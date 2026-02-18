@@ -22,3 +22,13 @@ modules/*/outputs/
 
 # Environment files
 .env
+
+# Data outputs (runtime artifacts)
+data/pipeline.db
+data/logs/
+data/raw/
+data/staged/
+data/intermediate/
+data/final/
+data/cache/
+data/archive/

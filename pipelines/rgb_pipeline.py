@@ -205,13 +205,10 @@ class RGBPipeline:
         pipeline_logger.info(f"Starting RGB Pipeline for {self.survey_id}")
 
         try:
-            # Follow your flowchart order
             self.stage_cross_run_image_filter()
             self.stage_kml_boundary()
             self.stage_webodm()
             self.stage_quality_gate()
-
-            # Placeholders for next modules
             self.stage_qgis_processing()
             self.stage_object_detection()
             self.stage_tile_generation()
