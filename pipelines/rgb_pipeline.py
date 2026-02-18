@@ -3,54 +3,89 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, Optional
 import time
-
 import logging
+
 from shared import get_logger, PipelineRepo, db_path, StageRunner
 from modules import run_kml, WebODMProcessor, run_filter
+from modules.data_segregation import run as run_data_segregation
 
 
 class RGBPipeline:
-    def __init__(self, survey_id: str, base_dir: Path, config: Dict[str, Any]):
-        self.survey_id = survey_id
+    def __init__(
+        self,
+        base_dir: Path,
+        config: Dict[str, Any],
+        *,
+        source_dir: Path,
+        surveys_root: Path,
+        year: int,
+    ):
         self.base_dir = Path(base_dir)
         self.config = config
 
-        self.raw_dir = self.base_dir / "data" / "raw" / survey_id
-        self.staged_dir = self.base_dir / "data" / "staged" / survey_id
-        self.intermediate_dir = self.base_dir / "data" / "intermediate" / survey_id
-        self.final_dir = self.base_dir / "data" / "final" / survey_id
+        self.source_dir = Path(source_dir)
+        self.surveys_root = Path(surveys_root)
+        self.year = year
 
-        self.logs_dir = self.base_dir / "data" / "logs" / survey_id
+        # survey_id will be determined by data_segregation
+        self.survey_id: Optional[str] = None
+
+        self.logs_dir = self.base_dir / "data" / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
 
-        self.loggers = self._init_loggers()
+        self.loggers = {
+            "pipeline": get_logger("rgb.pipeline", self.logs_dir / "pipeline.log"),
+            "cross_run_filter": get_logger("rgb.cross_run_filter", self.logs_dir / "cross_run_filter.log"),
+            "kml": get_logger("rgb.kml", self.logs_dir / "kml.log"),
+            "webodm": get_logger("rgb.webodm", self.logs_dir / "webodm.log"),
+            "segregation": get_logger("rgb.data_segregation", self.logs_dir / "data_segregation.log"),
+        }
+
         self.state: Dict[str, Any] = {}
 
-        # DB repo + stage runner
+        # DB
         self.repo = PipelineRepo(db_path(self.base_dir))
         self.runner = StageRunner(
             repo=self.repo,
-            survey_id=self.survey_id,
+            survey_id="pending",  # will update after segregation
             logger=self.loggers["pipeline"],
         )
 
-    def _init_loggers(self) -> Dict[str, logging.Logger]:
-        return {
-            "pipeline": get_logger(f"{self.survey_id}.pipeline", self.logs_dir / "pipeline.log"),
-            "cross_run_filter": get_logger(f"{self.survey_id}.cross_run_filter", self.logs_dir / "cross_run_filter.log"),
-            "kml": get_logger(f"{self.survey_id}.kml", self.logs_dir / "kml.log"),
-            "webodm": get_logger(f"{self.survey_id}.webodm", self.logs_dir / "webodm.log"),
-        }
+    # ============================================================
+    # STAGES
+    # ============================================================
 
-    # ---------------- STAGES (return dicts if possible) ----------------
+    def stage_data_segregation(self) -> Dict[str, Any]:
+        logger = self.loggers["segregation"]
+        logger.info("Stage: Data Segregation")
+
+        summary = run_data_segregation(
+            source_dir=self.source_dir,
+            surveys_root=self.surveys_root,
+            year=self.year,
+            logger=logger,
+        )
+
+        # Update survey_id after generation
+        self.survey_id = summary["survey_id"]
+
+        # Now update StageRunner survey_id
+        self.runner.survey_id = self.survey_id
+
+        # Update working directories
+        survey_rgb_path = Path(summary["survey_path"])
+        self.staged_dir = survey_rgb_path / "images"
+        self.intermediate_dir = survey_rgb_path / "boundary"
+
+        return summary
 
     def stage_cross_run_image_filter(self) -> Dict[str, Any]:
         logger = self.loggers["cross_run_filter"]
         logger.info("Stage: Cross-run image filter")
 
         return run_filter(
-            input_dir=self.staged_dir / "images_raw",
-            output_dir=self.staged_dir / "images",
+            input_dir=self.surveys_root / str(self.year) / self.survey_id / "rgb" / "images" / "path_raw",
+            output_dir=self.surveys_root / str(self.year) / self.survey_id / "rgb" / "images" / "path",
             logger=logger,
             max_gap=int(self.config.get("cross_run_filter", {}).get("max_gap", 10)),
             cross_run_window=int(self.config.get("cross_run_filter", {}).get("window", 3)),
@@ -60,10 +95,12 @@ class RGBPipeline:
         logger = self.loggers["kml"]
         logger.info("Stage: KML Boundary Setter")
 
+        rgb_path = self.surveys_root / str(self.year) / self.survey_id / "rgb"
+
         return run_kml(
-            kml_dir=self.staged_dir / "kml",
-            geojson_dir=self.intermediate_dir / "geojson",
-            csv_dir=self.intermediate_dir / "csv",
+            kml_dir=rgb_path / "boundary",
+            geojson_dir=rgb_path / "boundary",
+            csv_dir=rgb_path / "boundary",
             logger=logger,
         )
 
@@ -85,7 +122,8 @@ class RGBPipeline:
             description="RGB automated processing",
         )
 
-        image_folder = self.staged_dir / "images"
+        rgb_path = self.surveys_root / str(self.year) / self.survey_id / "rgb"
+        image_folder = rgb_path / "images" / "path"
 
         task1_id = processor.create_task_with_images(
             project_id=project_id,
@@ -93,12 +131,12 @@ class RGBPipeline:
             image_folder=str(image_folder),
             options=webodm_cfg.get("task1_options", {}),
         )
+
         t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, task1_id)
 
-        geojson_dir = self.intermediate_dir / "geojson"
-        geojson_files = sorted(list(geojson_dir.glob("*.geojson")))
+        geojson_files = list((rgb_path / "boundary").glob("*.geojson"))
         if not geojson_files:
-            raise FileNotFoundError(f"No .geojson boundary found in: {geojson_dir}")
+            raise FileNotFoundError("No boundary GeoJSON found")
 
         boundary_geojson = geojson_files[0].read_text(encoding="utf-8")
 
@@ -111,6 +149,7 @@ class RGBPipeline:
             image_folder=str(image_folder),
             options=task2_options,
         )
+
         t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, task2_id)
 
         return {
@@ -120,21 +159,33 @@ class RGBPipeline:
         }
 
     def stage_quality_gate(self) -> Dict[str, Any]:
-        self.loggers["pipeline"].info("Stage: Quality Gate Check (TODO)")
+        self.loggers["pipeline"].info("Stage: Quality Gate Check")
         return {"passed": True}
 
-    # ---------------- RUN ----------------
+    # ============================================================
+    # RUN
+    # ============================================================
 
     def run(self, *, resume: bool = True, force_stages: Optional[set[str]] = None) -> Dict[str, Any]:
         pipeline_logger = self.loggers["pipeline"]
-        pipeline_logger.info(f"Starting RGB Pipeline for {self.survey_id}")
+        pipeline_logger.info("Starting RGB Pipeline")
 
         total_start = time.perf_counter()
-        self.repo.upsert_survey_running(self.survey_id)
-
         force_stages = force_stages or set()
 
         try:
+            # DATA SEGREGATION FIRST
+            self.runner.run(
+                "data_segregation",
+                self.stage_data_segregation,
+                output_key="data_segregation",
+                state=self.state,
+                force=("data_segregation" in force_stages) or (not resume),
+            )
+
+            # mark survey running AFTER ID exists
+            self.repo.upsert_survey_running(self.survey_id)
+
             self.runner.run(
                 "cross_run_filter",
                 self.stage_cross_run_image_filter,
@@ -168,7 +219,6 @@ class RGBPipeline:
             )
 
             self.state["success"] = True
-            pipeline_logger.info("RGB Pipeline completed successfully")
 
             total_runtime = time.perf_counter() - total_start
             self.repo.mark_survey_finished(self.survey_id, success=True, total_runtime_seconds=total_runtime)
@@ -178,9 +228,9 @@ class RGBPipeline:
             self.state["error"] = str(e)
 
             total_runtime = time.perf_counter() - total_start
-            self.repo.mark_survey_finished(self.survey_id, success=False, total_runtime_seconds=total_runtime)
+            if self.survey_id:
+                self.repo.mark_survey_finished(self.survey_id, success=False, total_runtime_seconds=total_runtime)
 
             pipeline_logger.exception("RGB Pipeline failed")
 
         return self.state
-
