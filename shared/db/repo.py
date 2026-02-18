@@ -94,3 +94,44 @@ class PipelineRepo:
                 (status, now, runtime_seconds, error_message, output_json, stage_id),
             )
             conn.commit()
+
+    # -------- Helper Methods -------- #
+
+    def get_latest_stage(self, survey_id: str, stage_name: str) -> Optional[dict]:
+        """
+        Returns the latest stage row as a dict, or None if not found.
+        """
+        with connect(self.db_file) as conn:
+            row = conn.execute(
+                """
+                SELECT id, survey_id, stage_name, status, started_at, finished_at,
+                       runtime_seconds, error_message, output_json
+                FROM stages
+                WHERE survey_id = ? AND stage_name = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (survey_id, stage_name),
+            ).fetchone()
+
+            if row is None:
+                return None
+
+            return dict(row)
+
+    def get_latest_stage_output(self, survey_id: str, stage_name: str) -> Optional[Dict[str, Any]]:
+        """
+        Returns parsed JSON output of the latest stage if available.
+        """
+        latest = self.get_latest_stage(survey_id, stage_name)
+        if not latest:
+            return None
+
+        output_json = latest.get("output_json")
+        if not output_json:
+            return None
+
+        try:
+            return json.loads(output_json)
+        except Exception:
+            return None
