@@ -1,0 +1,3 @@
+
+
+Remember that in processing images with ODM, no images within a task should share the same filename as ODM will think of these images as the same file and will skip the file during the stitching process.
