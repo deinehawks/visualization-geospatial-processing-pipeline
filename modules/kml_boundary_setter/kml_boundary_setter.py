@@ -258,7 +258,7 @@ class KMLBoundarySetter:
 
 # ---------------- Pipeline entry ---------------- #
 
-def run(
+def run_kml(
     kml_dir: Path,
     geojson_dir: Path,
     csv_dir: Path,

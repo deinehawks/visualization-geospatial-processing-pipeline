@@ -7,8 +7,8 @@ from pathlib import Path
 from typing import Dict, Any
 from shared.logging import get_logger
 
-from modules.kml_boundary_setter.kml_boundary_setter import run as run_kml
-from modules.webodm.webodm_processor import WebODMProcessor
+from modules import run_kml
+from modules import WebODMProcessor
 
 
 class RGBPipeline:
