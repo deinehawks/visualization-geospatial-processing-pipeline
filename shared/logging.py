@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -22,10 +23,34 @@ MAGENTA = "\033[95m"
 CYAN = "\033[96m"
 WHITE = "\033[97m"
 
+ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def strip_ansi(s: str) -> str:
+    return ANSI_RE.sub("", s)
+
 
 # ================================
-# Custom Color Formatter
+# Filters / Formatters
 # ================================
+
+class StripAnsiFilter(logging.Filter):
+    """Ensures file logs never contain ANSI escape codes (even if message includes them)."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if isinstance(record.msg, str):
+            record.msg = strip_ansi(record.msg)
+        # If args contain strings with ANSI codes, you could strip them too:
+        if record.args:
+            new_args = []
+            for a in record.args:
+                if isinstance(a, str):
+                    new_args.append(strip_ansi(a))
+                else:
+                    new_args.append(a)
+            record.args = tuple(new_args)
+        return True
+
 
 class ColorFormatter(logging.Formatter):
     LEVEL_COLORS = {
@@ -37,14 +62,18 @@ class ColorFormatter(logging.Formatter):
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        levelname = record.levelname
-        color = self.LEVEL_COLORS.get(levelname, WHITE)
+        # IMPORTANT: don't permanently mutate the record (shared by handlers)
+        original_levelname = record.levelname
+        original_name = record.name
 
-        record.levelname = f"{color}{levelname:<8}{RESET}"
-        record.name = f"{CYAN}{record.name}{RESET}"
-
-        formatted = super().format(record)
-        return formatted
+        try:
+            color = self.LEVEL_COLORS.get(original_levelname, WHITE)
+            record.levelname = f"{color}{original_levelname:<8}{RESET}"
+            record.name = f"{CYAN}{original_name}{RESET}"
+            return super().format(record)
+        finally:
+            record.levelname = original_levelname
+            record.name = original_name
 
 
 LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
@@ -57,7 +86,13 @@ def get_logger(
     level: int = logging.INFO,
     to_console: bool = True,
 ) -> logging.Logger:
+    """
+    Create or return a configured logger.
 
+    - Safe to call multiple times (won't duplicate handlers).
+    - File handler: clean logs (no ANSI)
+    - Console handler: colored logs
+    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
@@ -65,13 +100,14 @@ def get_logger(
     if getattr(logger, "_configured", False):
         return logger
 
-    # ---- File handler (NO COLORS) ----
+    # ---- File handler (NO COLORS + STRIP ANSI) ----
     if log_file is not None:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
         file_handler = logging.FileHandler(log_path, encoding="utf-8")
         file_handler.setLevel(level)
+        file_handler.addFilter(StripAnsiFilter()) 
         file_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
         file_handler.setFormatter(file_formatter)
         logger.addHandler(file_handler)
@@ -84,7 +120,7 @@ def get_logger(
         console_handler.setFormatter(console_formatter)
         logger.addHandler(console_handler)
 
-    logger._configured = True  # type: ignore
+    logger._configured = True  # type: ignore[attr-defined]
     return logger
 
 

@@ -65,21 +65,9 @@ def run(
     *,
     force: bool = False,
 ) -> Dict[str, Any]:
-
-    source_dir = Path(source_dir)
-    surveys_root = Path(surveys_root)
-
-    logger.info("Starting data segregation stage")
-
-    if not source_dir.exists():
-        raise FileNotFoundError(f"Source directory does not exist: {source_dir}")
-
-    # --------------------------------------------------------
-    # Generate survey ID
-    # --------------------------------------------------------
+    # ... keep everything you already have above ...
 
     survey_id = generate_next_survey_id(surveys_root, year, logger)
-
     survey_path = surveys_root / str(year) / survey_id / "rgb"
 
     if survey_path.exists() and not force:
@@ -90,61 +78,71 @@ def run(
     # --------------------------------------------------------
     # Create standard folder structure
     # --------------------------------------------------------
+    dirs = {
+        "rgb_root": survey_path,
+        "boundary": survey_path / "boundary",
 
-    folders = [
+        # images
+        "raw": survey_path / "images" / "raw",
+        "path": survey_path / "images" / "path",
+        "cross_runs": survey_path / "images" / "cross-runs",
+
+        # outputs
+        "ortho": survey_path / "ortho",
+        "odm": survey_path / "odm",
+        "dem_odm": survey_path / "dem" / "odm",
+        "dem_dtm": survey_path / "dem" / "odm" / "dtm",
+        "dem_dsm": survey_path / "dem" / "odm" / "dsm",
+    }
+
+    extra_folders = [
         survey_path / "3d",
-        survey_path / "boundary",
         survey_path / "dem" / "lidar",
-        survey_path / "dem" / "odm",
-        survey_path / "images" / "path_raw",
-        survey_path / "images" / "path",
-        survey_path / "images" / "cross-runs",
         survey_path / "object-detection",
-        survey_path / "odm",
-        survey_path / "ortho",
         survey_path / "qgis" / "clipped",
         survey_path / "tiles",
     ]
 
-    for folder in folders:
-        folder.mkdir(parents=True, exist_ok=True)
+    for p in list(dirs.values()) + extra_folders:
+        p.mkdir(parents=True, exist_ok=True)
 
     # --------------------------------------------------------
     # Validate + Copy Images
     # --------------------------------------------------------
-
     image_extensions = (".jpg", ".jpeg", ".JPG", ".JPEG")
-
-    images = [
-        f for f in source_dir.rglob("*")
-        if f.suffix in image_extensions
-    ]
+    images = [f for f in source_dir.rglob("*") if f.suffix in image_extensions]
 
     if len(images) == 0:
         raise ValueError("No JPG/JPEG images found in source directory.")
 
     logger.info(f"Found {len(images)} images")
 
-    path_raw_dir = survey_path / "images" / "path_raw"
+    # Use images/raw as canonical input folder
+    raw_dir = dirs["raw"]
 
     for img in images:
-        shutil.copy2(img, path_raw_dir / img.name)
+        shutil.copy2(img, raw_dir / img.name)
 
-    logger.info("Images copied to path_raw")
+    logger.info("Images copied to raw")
+    
+    # (optional) also mirror to images/raw if you still want it
+    # raw_dir = dirs["raw"]
+    # for img in images:
+    #     shutil.copy2(img, raw_dir / img.name)
 
     # --------------------------------------------------------
-    # Validate + Copy KML
+    # Validate + Copy KML/KMZ -> boundary/<survey_id>.kml
     # --------------------------------------------------------
-
     kml_files = list(source_dir.rglob("*.kml"))
     kmz_files = list(source_dir.rglob("*.kmz"))
 
-    boundary_dir = survey_path / "boundary"
-
-    selected_kml_path = None
+    boundary_dir = dirs["boundary"]
+    selected_kml_path: Optional[Path] = None
 
     if kml_files:
-        selected_kml_path = kml_files[0]
+        src_kml = kml_files[0]
+        selected_kml_path = boundary_dir / f"{survey_id}.kml"
+        shutil.copy2(src_kml, selected_kml_path)
 
     elif kmz_files:
         kmz_path = kmz_files[0]
@@ -152,7 +150,6 @@ def run(
 
         with zipfile.ZipFile(kmz_path, "r") as zf:
             kml_members = [m for m in zf.namelist() if m.lower().endswith(".kml")]
-
             if not kml_members:
                 raise ValueError("KMZ file does not contain any KML file.")
 
@@ -168,35 +165,27 @@ def run(
                 if not extracted_path:
                     raise ValueError("Failed to extract KML from KMZ.")
 
-                # Copy extracted KML into boundary directory
                 selected_kml_path = boundary_dir / f"{survey_id}.kml"
                 shutil.copy2(extracted_path, selected_kml_path)
 
     else:
         raise ValueError("No KML or KMZ file found in source directory.")
 
-    # If normal KML (not KMZ extracted)
-    if selected_kml_path and selected_kml_path.suffix.lower() == ".kml" and selected_kml_path.parent != boundary_dir:
-        shutil.copy2(selected_kml_path, boundary_dir / selected_kml_path.name)
-        selected_kml_path = boundary_dir / selected_kml_path.name
-
     logger.info(f"KML saved as: {selected_kml_path.name}")
 
     # --------------------------------------------------------
-    # Count Ignored Files
+    # Ignored Files
     # --------------------------------------------------------
-
-    ignored_counts = {}
+    ignored_counts: Dict[str, int] = {}
     for file in source_dir.rglob("*"):
         if file.is_file():
             ext = file.suffix.lower()
-            if ext not in image_extensions and ext != ".kml":
+            if ext not in (".kml", ".kmz") and ext not in (e.lower() for e in image_extensions):
                 ignored_counts[ext] = ignored_counts.get(ext, 0) + 1
 
     # --------------------------------------------------------
-    # Write Manifest
+    # Manifest
     # --------------------------------------------------------
-
     manifest = {
         "survey_id": survey_id,
         "year": year,
@@ -208,15 +197,9 @@ def run(
     }
 
     manifest_path = survey_path / "manifest.json"
-
     with open(manifest_path, "w", encoding="utf-8") as f:
         json.dump(manifest, f, indent=2)
-
     logger.info("Manifest written")
-
-    # --------------------------------------------------------
-    # Return Summary (StageRunner will store in DB)
-    # --------------------------------------------------------
 
     summary = {
         "survey_id": survey_id,
@@ -224,8 +207,9 @@ def run(
         "image_count": len(images),
         "kml_file": f"{survey_id}.kml",
         "manifest": str(manifest_path),
+        "dirs": {k: str(v) for k, v in dirs.items()},  
     }
 
     logger.info("Data segregation stage completed successfully")
-
     return summary
+

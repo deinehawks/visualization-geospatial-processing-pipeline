@@ -1,77 +1,90 @@
-import requests
+from __future__ import annotations
+
+import csv
+import json
 import os
 import time
-import json
-import csv
-from pathlib import Path
-from typing import Optional
 from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
+
 import logging
+import requests
+
 
 class WebODMProcessor:
-    def __init__(
-        self,
-        url: str,
-        username: str,
-        password: str,
-        logger: logging.Logger
-    ):
+    def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
         self.base_url = url.rstrip("/")
         self.username = username
         self.password = password
-        self.token = None
-        self.headers = {}
-        self.processing_log = []
         self.logger = logger
 
+        self.token: Optional[str] = None
+        self.headers: Dict[str, str] = {}
+        self.processing_log: list[dict] = []
+
+        # use one session for all requests
+        self.session = requests.Session()
+
         self.authenticate()
-    
-    def authenticate(self):
+
+    # -------------------------
+    # Auth / HTTP
+    # -------------------------
+
+    def authenticate(self) -> None:
         self.logger.info("Authenticating with WebODM")
 
-        response = requests.post(
+        resp = self.session.post(
             f"{self.base_url}/api/token-auth/",
-            data={"username": self.username, "password": self.password}
+            data={"username": self.username, "password": self.password},
+            timeout=60,
         )
+        resp.raise_for_status()
 
-        response.raise_for_status()
+        self.token = resp.json().get("token")
+        if not self.token:
+            raise RuntimeError("WebODM auth succeeded but no token returned.")
 
-        self.token = response.json()["token"]
         self.headers = {"Authorization": f"JWT {self.token}"}
-
         self.logger.info("Authentication successful")
 
-    
+    # -------------------------
+    # Projects / Tasks
+    # -------------------------
+
     def create_project(self, name: str, description: str = "") -> int:
         self.logger.info(f"Creating project: {name}")
 
-        response = requests.post(
+        resp = self.session.post(
             f"{self.base_url}/api/projects/",
             headers=self.headers,
-            data={"name": name, "description": description}
+            data={"name": name, "description": description},
+            timeout=60,
         )
+        resp.raise_for_status()
 
-        response.raise_for_status()
-        project_id = response.json()["id"]
-
+        project_id = resp.json()["id"]
         self.logger.info(f"Project created (ID={project_id})")
-        return project_id
+        return int(project_id)
 
-    
     def create_task_with_images(
         self,
         project_id: int,
         name: str,
         image_folder: str,
-        options: dict = None
-    ) -> int:
-
+        options: Optional[dict] = None,
+    ) -> str:
         self.logger.info(f"Creating task: {name}")
         self.logger.info(f"Image source: {image_folder}")
 
-        image_files = list(Path(image_folder).glob("*.jpg")) + \
-                      list(Path(image_folder).glob("*.JPG")) + \
-                      list(Path(image_folder).glob("*.jpeg"))
+        folder = Path(image_folder)
+        image_files = (
+            list(folder.glob("*.jpg"))
+            + list(folder.glob("*.JPG"))
+            + list(folder.glob("*.jpeg"))
+            + list(folder.glob("*.JPEG"))
+        )
 
         if not image_files:
             self.logger.error("No JPG images found")
@@ -80,187 +93,194 @@ class WebODMProcessor:
         self.logger.info(f"Found {len(image_files)} images")
 
         files = []
-        for img_file in image_files:
-            files.append(("images", (img_file.name, open(img_file, "rb"), "image/jpeg")))
-
-        data = {"name": name}
-
-        if options:
-            formatted_options = [{"name": k, "value": v} for k, v in options.items()]
-            data["options"] = json.dumps(formatted_options)
+        opened = []
 
         try:
-            response = requests.post(
+            for img in image_files:
+                f = open(img, "rb")
+                opened.append(f)
+                files.append(("images", (img.name, f, "image/jpeg")))
+
+            data: Dict[str, Any] = {"name": name}
+
+            if options:
+                formatted_options = [{"name": k, "value": v} for k, v in options.items()]
+                data["options"] = json.dumps(formatted_options)
+
+            resp = self.session.post(
                 f"{self.base_url}/api/projects/{project_id}/tasks/",
                 headers=self.headers,
                 files=files,
-                data=data
+                data=data,
+                timeout=600,  # uploads can be slow
             )
+            resp.raise_for_status()
 
-            for _, file_tuple in files:
-                file_tuple[1].close()
-
-            response.raise_for_status()
-            task_id = response.json()["id"]
-
+            task_id = resp.json()["id"]
             self.logger.info(f"Task created (ID={task_id})")
             self.logger.info("Image upload complete")
+            return str(task_id)
 
-            return task_id
-
-        except requests.exceptions.HTTPError as e:
-            for _, file_tuple in files:
-                try:
-                    file_tuple[1].close()
-                except Exception:
-                    pass
-
+        except requests.HTTPError:
             self.logger.exception("Failed to create task")
             raise
 
-    
-    def upload_images(self, project_id: int, task_id: int, image_folder: str):
-        """Upload images to an existing task (legacy method, prefer create_task_with_images)."""
-        self.logger.info(f"Uploading images from: {image_folder}")
-        
-        image_files = list(Path(image_folder).glob("*.jpg")) + \
-                     list(Path(image_folder).glob("*.JPG")) + \
-                     list(Path(image_folder).glob("*.jpeg"))
-        
-        if not image_files:
-            raise ValueError(f"No JPG images found in {image_folder}")
-        
-        self.logger.info(f"Found {len(image_files)} images")
-        
-        files = []
-        for img_file in image_files:
-            files.append(("images", (img_file.name, open(img_file, "rb"), "image/jpeg")))
-        
-        response = requests.post(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/upload/",
-            headers=self.headers,
-            files=files
-        )
-        
-        # Close file handles
-        for _, file_tuple in files:
-            file_tuple[1].close()
-        
-        response.raise_for_status()
-        self.logger.info(f"✓ Uploaded {len(image_files)} images")
-    
-    def commit_task(self, project_id: int, task_id: int):
-        """Start processing a task (auto-processing is default, so this may not be needed)."""
-        self.logger.info(f"Committing task for processing...")
-        response = requests.post(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/commit/",
-            headers=self.headers
-        )
-        response.raise_for_status()
-        self.logger.info("Task committed for processing")
-    
-    def get_task_status(self, project_id: int, task_id: int) -> dict:
-        """Get the current status of a task."""
-        response = requests.get(
+        finally:
+            for f in opened:
+                try:
+                    f.close()
+                except Exception:
+                    pass
+
+    def get_task(self, project_id: int, task_id: str) -> dict:
+        """Canonical task fetch. Use this everywhere."""
+        resp = self.session.get(
             f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/",
-            headers=self.headers
+            headers=self.headers,
+            timeout=60,
         )
-        response.raise_for_status()
-        return response.json()
-    
+        resp.raise_for_status()
+        return resp.json()
+
+    def get_task_output(self, project_id: int, task_id: str) -> str:
+        resp = self.session.get(
+            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/output/",
+            headers=self.headers,
+            timeout=60,
+        )
+        return resp.text if resp.status_code == 200 else ""
+
+    # -------------------------
+    # Wait / Progress
+    # -------------------------
+
+    @staticmethod
+    def fmt_elapsed(seconds: float) -> str:
+        s = int(seconds)
+        m, s = divmod(s, 60)
+        h, m = divmod(m, 60)
+        if h:
+            return f"{h}h {m}m {s}s"
+        if m:
+            return f"{m}m {s}s"
+        return f"{s}s"
+
     def wait_for_completion(
         self,
         project_id: int,
-        task_id: int,
-        check_interval: int = 30
-    ):
-        self.logger.info("Waiting for task completion")
-        start_time = time.time()
+        task_id: str,
+        poll_seconds: int = 10,
+        heartbeat_seconds: int = 300,
+    ) -> Tuple[bool, float, dict]:
+        """
+        Poll until task is completed/failed/canceled.
+
+        NOTE about 0% progress:
+        - Many WebODM builds don't update 'progress' reliably via this endpoint.
+        - We log progress if available, otherwise we log status + processing_time/upload_progress if present.
+        """
+        start = time.time()
+
+        last_status = None
+        last_progress = None
+        last_processing_time = None
+        last_upload_progress = None
+        last_heartbeat = 0.0
 
         while True:
-            try:
-                status_info = self.get_task_status(project_id, task_id)
+            task = self.get_task(project_id, task_id)
 
-                status_dict = status_info.get("status")
-                if isinstance(status_dict, dict):
-                    status = status_dict.get("code")
-                else:
-                    status = status_dict
+            # status varies by version: sometimes task["status"] is int/obj; sometimes string.
+            raw_status = task.get("status")
+            if isinstance(raw_status, str):
+                status = raw_status.lower()
+            elif isinstance(raw_status, dict) and "label" in raw_status:
+                status = str(raw_status["label"]).lower()
+            else:
+                status = str(raw_status).lower() if raw_status is not None else ""
 
-                elapsed = time.time() - start_time
+            progress = task.get("progress")  # often None or 0 forever
+            processing_time = task.get("processing_time")  # sometimes increases
+            upload_progress = task.get("upload_progress")  # sometimes increases
+            images_count = task.get("images_count")
 
-                if status == 40:
-                    runtime = elapsed
-                    self.logger.info(
-                        f"Task completed in {self._format_time(runtime)}"
-                    )
-                    return True, runtime, status_info
+            elapsed = time.time() - start
 
-                elif status == 30:
-                    runtime = elapsed
-                    self.logger.error(
-                        f"Task failed after {self._format_time(runtime)}"
-                    )
-                    return False, runtime, status_info
+            changed = False
 
-                elif status == 50:
-                    runtime = elapsed
-                    self.logger.warning(
-                        f"Task canceled after {self._format_time(runtime)}"
-                    )
-                    return False, runtime, status_info
+            if status != last_status:
+                self.logger.info(f"WebODM status: {status.upper() or 'UNKNOWN'} | elapsed={self.fmt_elapsed(elapsed)}")
+                last_status = status
+                changed = True
 
-                else:
-                    progress = status_info.get("progress", 0)
-                    status_text = status_info.get("status_text", "Processing")
-                    self.logger.info(
-                        f"{status_text} | {progress}% | "
-                        f"Elapsed: {self._format_time(elapsed)}"
-                    )
+            # Log percent if it actually exists and changes
+            if isinstance(progress, (int, float)) and progress != last_progress:
+                # only print meaningful progress
+                self.logger.info(f"WebODM progress: {progress}% | elapsed={self.fmt_elapsed(elapsed)}")
+                last_progress = progress
+                changed = True
 
-                    time.sleep(check_interval)
+            # Fallback: log processing_time changes (better than 0%)
+            if isinstance(processing_time, (int, float)) and processing_time != last_processing_time:
+                self.logger.info(
+                    f"WebODM processing_time: {int(processing_time)}s"
+                    + (f" | images={images_count}" if images_count is not None else "")
+                    + f" | elapsed={self.fmt_elapsed(elapsed)}"
+                )
+                last_processing_time = processing_time
+                changed = True
 
-            except Exception:
-                self.logger.exception("Error checking task status")
-                time.sleep(check_interval)
+            if isinstance(upload_progress, (int, float)) and upload_progress != last_upload_progress:
+                self.logger.info(f"WebODM upload_progress: {upload_progress}% | elapsed={self.fmt_elapsed(elapsed)}")
+                last_upload_progress = upload_progress
+                changed = True
 
-    
+            # heartbeat
+            if not changed and (elapsed - last_heartbeat) >= heartbeat_seconds:
+                self.logger.info(f"WebODM still running... | elapsed={self.fmt_elapsed(elapsed)}")
+                last_heartbeat = elapsed
+
+            # terminal states
+            if status in ("completed", "failed", "canceled", "cancelled"):
+                success = status == "completed"
+                runtime = elapsed
+                return success, runtime, task
+
+            time.sleep(poll_seconds)
+
+    # -------------------------
+    # Documentation helpers (kept)
+    # -------------------------
+
     def _format_time(self, seconds: float) -> str:
-        """Format seconds into readable time string."""
         hours = int(seconds // 3600)
         minutes = int((seconds % 3600) // 60)
         secs = int(seconds % 60)
-        
         if hours > 0:
             return f"{hours}h {minutes}m {secs}s"
-        elif minutes > 0:
+        if minutes > 0:
             return f"{minutes}m {secs}s"
-        else:
-            return f"{secs}s"
-    
-    def get_task_info(self, project_id: int, task_id: int) -> dict:
-        """Get detailed task information including statistics."""
-        response = requests.get(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/",
-            headers=self.headers
-        )
-        response.raise_for_status()
-        return response.json()
-    
-    def get_task_output(self, project_id: int, task_id: int) -> str:
-        """Get the processing output/console log."""
-        response = requests.get(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/output/",
-            headers=self.headers
-        )
-        if response.status_code == 200:
-            return response.text
-        return ""
-    
-    def log_task_details(self, task_name: str, project_id: int, task_id: int, 
-                        options: dict, runtime: float, success: bool, 
-                        task_info: dict, image_count: int):
-        """Log task details for documentation."""
+        return f"{secs}s"
+
+    def _extract_statistics(self, task_info: dict) -> dict:
+        stats = {}
+        if "statistics" in task_info:
+            stats = task_info["statistics"]
+        stats["images_count"] = task_info.get("images_count", 0)
+        stats["upload_progress"] = task_info.get("upload_progress", 0)
+        return stats
+
+    def log_task_details(
+        self,
+        task_name: str,
+        project_id: int,
+        task_id: str,
+        options: dict,
+        runtime: float,
+        success: bool,
+        task_info: dict,
+        image_count: int,
+    ):
         log_entry = {
             "timestamp": datetime.now().isoformat(),
             "task_name": task_name,
@@ -274,58 +294,34 @@ class WebODMProcessor:
             "processing_time": task_info.get("processing_time", 0),
             "status": task_info.get("status", {}),
             "statistics": self._extract_statistics(task_info),
-            "webodm_url": f"{self.base_url}/dashboard/{project_id}/task/{task_id}"
+            "webodm_url": f"{self.base_url}/dashboard/{project_id}/task/{task_id}",
         }
-        
         self.processing_log.append(log_entry)
         return log_entry
-    
-    def _extract_statistics(self, task_info: dict) -> dict:
-        """Extract key statistics from task info."""
-        stats = {}
-        
-        # Extract available statistics
-        if "statistics" in task_info:
-            stats = task_info["statistics"]
-        
-        # Add other useful metrics
-        stats["images_count"] = task_info.get("images_count", 0)
-        stats["upload_progress"] = task_info.get("upload_progress", 0)
-        
-        return stats
-    
-    def save_documentation(self, output_folder: str, project_name: str):
-        """Save comprehensive documentation of the processing run."""
+
+    def save_documentation(self, output_folder: str, project_name: str) -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        # Save as JSON (complete data)
+        os.makedirs(output_folder, exist_ok=True)
+
         json_file = os.path.join(output_folder, f"processing_log_{timestamp}.json")
-        with open(json_file, 'w') as f:
-            json.dump({
-                "project_name": project_name,
-                "processing_date": datetime.now().isoformat(),
-                "tasks": self.processing_log
-            }, f, indent=2)
+        with open(json_file, "w", encoding="utf-8") as f:
+            json.dump(
+                {"project_name": project_name, "processing_date": datetime.now().isoformat(), "tasks": self.processing_log},
+                f,
+                indent=2,
+            )
         self.logger.info(f"Detailed log saved to: {json_file}")
-        
-        # Save as CSV (for easy viewing in Excel)
+
         csv_file = os.path.join(output_folder, f"processing_summary_{timestamp}.csv")
-        with open(csv_file, 'w', newline='') as f:
+        with open(csv_file, "w", newline="", encoding="utf-8") as f:
             if self.processing_log:
-                # Flatten options for CSV
-                fieldnames = [
-                    "timestamp", "task_name", "project_id", "task_id", 
-                    "success", "runtime_formatted", "image_count", "webodm_url"
-                ]
-                
-                # Add option fields
-                first_task = self.processing_log[0]
-                option_keys = list(first_task.get("options", {}).keys())
+                fieldnames = ["timestamp", "task_name", "project_id", "task_id", "success", "runtime_formatted", "image_count", "webodm_url"]
+                option_keys = list((self.processing_log[0].get("options") or {}).keys())
                 fieldnames.extend([f"option_{k}" for k in option_keys])
-                
+
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
                 writer.writeheader()
-                
+
                 for log in self.processing_log:
                     row = {
                         "timestamp": log["timestamp"],
@@ -335,114 +331,13 @@ class WebODMProcessor:
                         "success": log["success"],
                         "runtime_formatted": log["runtime_formatted"],
                         "image_count": log["image_count"],
-                        "webodm_url": log["webodm_url"]
+                        "webodm_url": log["webodm_url"],
                     }
-                    
-                    # Add options
                     for key in option_keys:
-                        row[f"option_{key}"] = log["options"].get(key, "")
-                    
+                        row[f"option_{key}"] = (log.get("options") or {}).get(key, "")
                     writer.writerow(row)
-        
+
         self.logger.info(f"Summary saved to: {csv_file}")
-        
-        # Save processing output logs
-        self._save_output_logs(output_folder, timestamp)
-        
-        # Create a human-readable report
-        self._create_report(output_folder, timestamp, project_name)
-    
-    def _save_output_logs(self, output_folder: str, timestamp: str):
-        """Save console output logs for each task."""
-        logs_folder = os.path.join(output_folder, "console_logs")
-        os.makedirs(logs_folder, exist_ok=True)
-        
-        for log in self.processing_log:
-            output = self.get_task_output(log["project_id"], log["task_id"])
-            if output:
-                log_file = os.path.join(
-                    logs_folder, 
-                    f"task_{log['task_id']}_{log['task_name'].replace(' ', '_')}_{timestamp}.txt"
-                )
-                with open(log_file, 'w') as f:
-                    f.write(output)
-    
-    def _create_report(self, output_folder: str, timestamp: str, project_name: str):
-        """Create a human-readable markdown report."""
-        report_file = os.path.join(output_folder, f"processing_report_{timestamp}.md")
-        
-        with open(report_file, 'w') as f:
-            f.write(f"# WebODM Processing Report\n\n")
-            f.write(f"**Project:** {project_name}\n\n")
-            f.write(f"**Date:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n")
-            f.write(f"---\n\n")
-            
-            for i, log in enumerate(self.processing_log, 1):
-                f.write(f"## Task {i}: {log['task_name']}\n\n")
-                f.write(f"- **Status:** {'✓ Success' if log['success'] else '✗ Failed'}\n")
-                f.write(f"- **Runtime:** {log['runtime_formatted']}\n")
-                f.write(f"- **Image Count:** {log['image_count']}\n")
-                f.write(f"- **Task ID:** {log['task_id']}\n")
-                f.write(f"- **WebODM URL:** [{self.base_url}/dashboard/{log['project_id']}/task/{log['task_id']}]({log['webodm_url']})\n\n")
-                
-                f.write(f"### Settings\n\n")
-                f.write(f"```json\n")
-                f.write(json.dumps(log['options'], indent=2))
-                f.write(f"\n```\n\n")
-                
-                if log['statistics']:
-                    f.write(f"### Statistics\n\n")
-                    for key, value in log['statistics'].items():
-                        f.write(f"- **{key}:** {value}\n")
-                    f.write("\n")
-                
-                f.write(f"---\n\n")
-        
-        self.logger.info(f"Report saved to: {report_file}")
-    
-    def restart_task(self, project_id: int, task_id: int):
-        """Restart a task."""
-        self.logger.info("Restarting task...")
-        response = requests.post(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/restart/",
-            headers=self.headers
-        )
-        response.raise_for_status()
-        self.logger.info("Task restarted")
-    
-    def download_asset(self, project_id: int, task_id: int, asset_type: str, output_path: str):
-        """Download a specific asset."""
-        self.logger.info(f"Downloading {asset_type}...")
-        
-        response = requests.get(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/download/{asset_type}",
-            headers=self.headers,
-            stream=True
-        )
-        response.raise_for_status()
-        
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        self.logger.info(f"Downloaded to: {output_path}")
-    
-    def download_all_assets(self, project_id: int, task_id: int, output_path: str):
-        """Download all assets as a zip file."""
-        self.logger.info("Downloading all assets...")
-        
-        response = requests.get(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/download/all.zip",
-            headers=self.headers,
-            stream=True
-        )
-        response.raise_for_status()
-        
-        with open(output_path, 'wb') as f:
-            for chunk in response.iter_content(chunk_size=8192):
-                f.write(chunk)
-        
-        self.logger.info(f"All assets downloaded to: {output_path}")
 
 
 def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]:
@@ -451,17 +346,13 @@ def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]
         return None
 
     if folder.is_file():
-        if folder.suffix.lower() in [".geojson", ".json"]:
-            return str(folder)
-        return None
+        return str(folder) if folder.suffix.lower() in (".geojson", ".json") else None
 
-    # Prefer .geojson
     geojson_files = list(folder.rglob("*.geojson")) + list(folder.rglob("*.GeoJSON"))
     if geojson_files:
         logger.info(f"Found GeoJSON file: {geojson_files[0]}")
         return str(geojson_files[0])
 
-    # Fallback .json (best-effort)
     json_files = list(folder.rglob("*.json")) + list(folder.rglob("*.JSON"))
     for jf in json_files:
         try:

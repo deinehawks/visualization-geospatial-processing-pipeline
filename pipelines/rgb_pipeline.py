@@ -5,7 +5,8 @@ from typing import Dict, Any, Optional, Set
 import time
 import uuid
 import logging
-
+import subprocess
+import shutil
 from shared import get_logger, PipelineRepo, db_path, StageRunner
 from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
 
@@ -16,7 +17,7 @@ class RGBPipeline:
 
     Flow:
       1) data_segregation (generates survey_id + creates folder structure in SURVEYS_ROOT)
-      2) cross_run_filter  (path_raw -> path, excluded -> cross-runs)
+      2) cross_run_filter  (raw -> path, excluded -> cross-runs)
       3) kml_boundary      (kml -> geojson + csv)
       4) webodm            (task1 unbounded, task2 bounded)
       5) quality_gate      (placeholder)
@@ -140,7 +141,7 @@ class RGBPipeline:
 
         rgb_path = self._require_rgb_path()
 
-        input_dir = rgb_path / "images" / "path_raw"
+        input_dir = rgb_path / "images" / "raw"
         output_dir = rgb_path / "images" / "path"
 
         filter_cfg = self.config.get("cross_run_filter", {})
@@ -201,6 +202,20 @@ class RGBPipeline:
 
         webodm_cfg = self.config["webodm"]
         naming_cfg = self.config.get("naming", {})
+        exports_cfg = self.config.get("exports", {})
+        tools_cfg = (exports_cfg.get("tools") or {})
+
+        # dirs from data_segregation (NO hardcoding)
+        ds = self.state.get("data_segregation") or {}
+        dirs = ds.get("dirs") or {}
+        if not dirs:
+            raise RuntimeError("Missing data_segregation.dirs in state. Ensure segregation returns dirs mapping.")
+
+        def dir_from_key(key: str) -> Path:
+            p = dirs.get(key)
+            if not p:
+                raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
+            return Path(p)
 
         # Crossrun flag: prefer runtime detection from filter stage (resume-safe)
         crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
@@ -210,11 +225,14 @@ class RGBPipeline:
         boundary_geojson_path = self.state.get("boundary_geojson_path")
 
         # Task flags
-        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")  # unbounded normally xb
-        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")   # bounded normally b
+        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
+        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
 
         task1_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
         task2_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
+
+        # canonical filtered images directory from dirs (fallback to rgb_path if not present)
+        image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 
         processor = WebODMProcessor(
             url=webodm_cfg["url"],
@@ -223,37 +241,95 @@ class RGBPipeline:
             logger=logger,
         )
 
-        # Per your standard: project name should be AH-xxxxx (not _RGB)
         project_id = processor.create_project(
             name=f"{survey_id}",
             description="RGB automated processing",
         )
 
-        image_folder = rgb_path / "images" / "path"
+          # ---------------- helpers ----------------
+
+        def run_gdalwarp(src: Path, dst: Path, epsg: int) -> None:
+            gdalwarp = tools_cfg.get("gdalwarp_path") or "gdalwarp"
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            cmd = [str(gdalwarp), "-t_srs", f"EPSG:{epsg}", str(src), str(dst)]
+            logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
+            try:
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
+            except FileNotFoundError:
+                logger.warning("gdalwarp not found. Skipping reprojection (keeping raw download).")
+                shutil.copy2(src, dst)
+            except subprocess.CalledProcessError as e:
+                logger.warning(f"gdalwarp failed. Keeping raw download. stderr={e.stderr[:200] if e.stderr else ''}")
+                shutil.copy2(src, dst)
+
+        def safe_download_asset(asset_type: str, out_path: Path) -> bool:
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                processor.download_asset(project_id, current_task_id, asset_type, str(out_path))
+                return True
+            except Exception:
+                logger.exception(f"Failed downloading asset_type='{asset_type}' to {out_path}")
+                return False
+
+        def safe_download_all_assets(out_path: Path) -> bool:
+            try:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                processor.download_all_assets(project_id, current_task_id, str(out_path))
+                return True
+            except Exception:
+                logger.exception(f"Failed downloading all-assets zip to {out_path}")
+                return False
 
         # ---------------- TASK 1 (always) ----------------
         task1_options = dict(webodm_cfg.get("task1_options", {}))
-        task1_id = processor.create_task_with_images(
+        current_task_id = processor.create_task_with_images(
             project_id=project_id,
             name=task1_name,
             image_folder=str(image_folder),
             options=task1_options,
         )
-        t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, task1_id)
+        t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
 
         result: Dict[str, Any] = {
             "project_id": project_id,
-            "task1": {
-                "id": task1_id,
-                "name": task1_name,
-                "success": t1_success,
-                "runtime_seconds": t1_runtime,
-            },
+            "task1": {"id": current_task_id, "name": task1_name, "success": t1_success, "runtime_seconds": t1_runtime},
             "task2": None,
             "boundary_used": False,
             "boundary_reason": None,
             "boundary_geojson_path": boundary_geojson_path,
+            "downloads": {"task1": {}, "task2": {}},
         }
+
+        # ---------------- Downloads after TASK 1 ----------------
+        if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
+            ortho_cfg = exports_cfg["ortho"]
+            out_dir = dir_from_key(ortho_cfg["out_dir_key"])
+            epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+            filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(flag=f"{crossrun_flag}{boundary_flag_task1}")
+
+            # download raw orthomosaic first
+            tmp_raw = out_dir / f"__tmp_raw_{filename}"
+            final_out = out_dir / filename
+
+            # pick asset candidate list (config-driven)
+            candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
+            downloaded = False
+            for asset_type in candidates:
+                if safe_download_asset(asset_type, tmp_raw):
+                    downloaded = True
+                    result["downloads"]["task1"]["orthomosaic_raw"] = str(tmp_raw)
+                    break
+
+            if downloaded:
+                run_gdalwarp(tmp_raw, final_out, epsg)
+                try:
+                    tmp_raw.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                result["downloads"]["task1"]["orthomosaic"] = str(final_out)
+                result["downloads"]["task1"]["epsg"] = epsg
+            else:
+                logger.warning("Could not download orthomosaic (no candidate succeeded).")
 
         # ---------------- TASK 2 (only if boundary exists) ----------------
         if not boundary_available:
@@ -269,30 +345,97 @@ class RGBPipeline:
             return result
 
         boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
-
         task2_options = dict(webodm_cfg.get("task2_options", {}))
         task2_options["boundary"] = boundary_geojson
 
-        task2_id = processor.create_task_with_images(
+        current_task_id = processor.create_task_with_images(
             project_id=project_id,
             name=task2_name,
             image_folder=str(image_folder),
             options=task2_options,
         )
-        t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, task2_id)
+        t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
 
-        result["task2"] = {
-            "id": task2_id,
-            "name": task2_name,
-            "success": t2_success,
-            "runtime_seconds": t2_runtime,
-        }
+        result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
         result["boundary_used"] = True
+
+        # ---------------- Downloads after TASK 2 ----------------
+        if exports_cfg.get("enabled", False):
+            # DEM set (config-driven colors/shadings)
+            if exports_cfg.get("dem", {}).get("enabled", False):
+                dem_cfg = exports_cfg["dem"]
+                epsg = int(dem_cfg.get("reproject_epsg", 3857))
+                dtm_dir = dir_from_key(dem_cfg["dtm_dir_key"])
+                dsm_dir = dir_from_key(dem_cfg["dsm_dir_key"])
+                colors = list(dem_cfg.get("colors") or [])
+                shadings = list(dem_cfg.get("shadings") or [])
+                tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
+
+                # NOTE: asset_type naming depends on your WebODM endpoint.
+                # These are placeholders that you’ll align to your actual download endpoints.
+                # Example scheme: f"dtm/{color}/{shading}.tif"
+                for model in ("dtm", "dsm"):
+                    out_base = dtm_dir if model == "dtm" else dsm_dir
+                    for color in colors:
+                        for shading in shadings:
+                            fname = tmpl.format(color=color, shading=shading)
+                            tmp_raw = out_base / f"__tmp_raw_{fname}"
+                            final_out = out_base / fname
+
+                            asset_type = f"{model}/{color}/{shading}"  # <-- adjust to your API
+                            ok = safe_download_asset(asset_type, tmp_raw)
+                            if ok:
+                                run_gdalwarp(tmp_raw, final_out, epsg)
+                                try:
+                                    tmp_raw.unlink(missing_ok=True)
+                                except Exception:
+                                    pass
+
+                result["downloads"]["task2"]["dem_epsg"] = epsg
+                result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
+                result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
+
+            # all-assets zip
+            if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
+                zcfg = exports_cfg["all_assets_zip"]
+                out_dir = dir_from_key(zcfg["out_dir_key"])
+                fname = zcfg.get("filename_template", "{survey_id}-RGB-{flag}-all.zip").format(
+                    survey_id=survey_id,
+                    flag=f"{crossrun_flag}{boundary_flag_task1}",
+                )
+                zip_path = out_dir / fname
+                if safe_download_all_assets(zip_path):
+                    result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+
         return result
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         self.loggers["pipeline"].info("Stage: Quality Gate Check")
         return {"passed": True}
+
+    def _log_summary(self):
+        p = self.loggers["pipeline"]
+
+        survey = self.survey_id or "?"
+        filt = self.state.get("cross_run_filter") or {}
+        kept = filt.get("total_kept")
+        excl = filt.get("total_excluded")
+
+        boundary_used = (self.state.get("webodm") or {}).get("boundary_used", False)
+
+        web = self.state.get("webodm") or {}
+        t1 = (web.get("task1") or {}).get("runtime_seconds")
+        t2 = (web.get("task2") or {}).get("runtime_seconds")
+
+        p.info("SUMMARY")
+        p.info(f"- survey: {survey}")
+        if kept is not None and excl is not None:
+            p.info(f"- filter: kept={kept} excluded={excl}")
+        p.info(f"- boundary used: {'yes' if boundary_used else 'no'}")
+        if t1 is not None:
+            p.info(f"- webodm task1: {t1:.1f}s")
+        if t2 is not None:
+            p.info(f"- webodm task2: {t2:.1f}s")
 
     # ============================================================
     # RUN
