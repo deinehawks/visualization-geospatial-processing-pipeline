@@ -186,22 +186,15 @@ class RGBPipeline:
         logger = self.loggers["webodm"]
         logger.info("Stage: WebODM Processing")
 
-        survey_id = self._require_survey_id()
-        rgb_path = self._require_rgb_path()
-
         webodm_cfg = self.config["webodm"]
         naming_cfg = self.config.get("naming", {})
 
-        # Crossrun flag:
-        # - Use pipeline-derived if available, else fallback to config/env
-        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")  # "c" or "xc"
+        crossrun_flag = naming_cfg.get("crossrun_mode", "xc")   # xc or c
+        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")  # task1 usually xb
+        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")   # task2 usually b
 
-        # Boundary flags
-        boundary_flag_task1 = naming_cfg.get("boundary_mode_task1", "xb")  # xb or b
-        boundary_flag_task2 = naming_cfg.get("boundary_mode_task2", "b")   # b recommended
-
-        task1_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
-        task2_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
+        task1_name = f"{self.survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
+        task2_name = f"{self.survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
 
         processor = WebODMProcessor(
             url=webodm_cfg["url"],
@@ -211,15 +204,14 @@ class RGBPipeline:
         )
 
         project_id = processor.create_project(
-            name=f"{survey_id}_RGB",
+            name=f"{self.survey_id}",
             description="RGB automated processing",
         )
 
-        image_folder = rgb_path / "images" / "path"  # filtered canonical
-        if not image_folder.exists():
-            raise FileNotFoundError(f"Filtered image folder not found: {image_folder}")
+        rgb_path = self.surveys_root / str(self.year) / self.survey_id / "rgb"
+        image_folder = rgb_path / "images" / "path"  # canonical filtered images
 
-        # -------- Task 1 (Unbounded Orthomosaic) --------
+        # ---------------- TASK 1 ----------------
         task1_options = dict(webodm_cfg.get("task1_options", {}))
         task1_id = processor.create_task_with_images(
             project_id=project_id,
@@ -229,13 +221,30 @@ class RGBPipeline:
         )
         t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, task1_id)
 
-        # -------- Task 2 (Bounded) --------
-        boundary_dir = rgb_path / "boundary"
-        geojson_files = sorted(boundary_dir.glob("*.geojson"))
-        if not geojson_files:
-            raise FileNotFoundError(f"No .geojson boundary found in: {boundary_dir}")
+        result = {
+            "project_id": project_id,
+            "task1": {"id": task1_id, "success": t1_success, "runtime_seconds": t1_runtime, "name": task1_name},
+            "task2": None,
+            "boundary_used": False,
+            "boundary_reason": None,
+        }
 
-        boundary_geojson = geojson_files[0].read_text(encoding="utf-8")
+        # ---------------- TASK 2 (optional) ----------------
+        # Prefer reading kml stage output (resume-safe)
+        kml_summary = self.state.get("kml") or {}
+        processed_files = kml_summary.get("processed_files") or []
+        boundary_geojson_path = None
+
+        if processed_files:
+            boundary_geojson_path = processed_files[0].get("geojson")
+
+        if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+            msg = "No valid GeoJSON boundary produced. Skipping bounded task (Task 2)."
+            logger.warning(msg)
+            result["boundary_reason"] = msg
+            return result
+
+        boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
 
         task2_options = dict(webodm_cfg.get("task2_options", {}))
         task2_options["boundary"] = boundary_geojson
@@ -248,15 +257,9 @@ class RGBPipeline:
         )
         t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, task2_id)
 
-        # Optional: store WebODM tasks in your DB table if you added run_id-based webodm_tasks table.
-        # (Only if you already implemented repo.insert_webodm_task)
-        # self.repo.insert_webodm_task(...)
-
-        return {
-            "project_id": project_id,
-            "task1": {"id": task1_id, "name": task1_name, "success": t1_success, "runtime_seconds": t1_runtime},
-            "task2": {"id": task2_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime},
-        }
+        result["task2"] = {"id": task2_id, "success": t2_success, "runtime_seconds": t2_runtime, "name": task2_name}
+        result["boundary_used"] = True
+        return result
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         self.loggers["pipeline"].info("Stage: Quality Gate Check")

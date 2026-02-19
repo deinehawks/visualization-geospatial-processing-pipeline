@@ -7,9 +7,9 @@ Filters drone images by detecting:
 - too-close images (distance threshold)
 - cross-run range exclusions (paired cross-runs within max_gap)
 
-Outputs:
-- kept images copied to output_dir
-- excluded images copied to sibling folder: <output_dir>/../cross-run-images
+Outputs (STANDARD):
+- kept images copied to: <output_dir>            (rgb/images/path)
+- excluded images copied to: <output_dir>/../cross-runs  (rgb/images/cross-runs)
 
 Design:
 - No CLI parsing here
@@ -20,8 +20,6 @@ Design:
 from __future__ import annotations
 
 import math
-import os
-import re
 import shutil
 import logging
 from pathlib import Path
@@ -96,9 +94,7 @@ def bearing(p1: Tuple[float, float], p2: Tuple[float, float]) -> float:
 def calculate_distances_and_bearings(
     files_with_gps: List[Tuple[str, Tuple[float, float]]]
 ) -> List[Tuple[str, float, float]]:
-    """
-    Returns list of (filename, distance_m, bearing_change_deg).
-    """
+    """Returns list of (filename, distance_m, bearing_change_deg)."""
     results: List[Tuple[str, float, float]] = []
     last_point = None
     last_bearing = None
@@ -133,9 +129,7 @@ def calculate_adaptive_parameters(
     bearing_changes: List[float],
     logger: logging.Logger,
 ) -> Dict[str, float]:
-    """
-    Adaptive params based on dataset statistics.
-    """
+    """Adaptive params based on dataset statistics."""
     sorted_distances = sorted([d for d in distances if d > 0])
 
     if len(sorted_distances) < 10:
@@ -218,10 +212,7 @@ def detect_cross_runs_adaptive(
     metrics: List[Tuple[str, float, float]],
     logger: logging.Logger,
 ) -> Tuple[List[str], Dict[str, float]]:
-    """
-    Detect cross-runs using distribution analysis of bearing changes.
-    Returns (cross_runs, stats) where stats includes selected method + threshold.
-    """
+    """Detect cross-runs using distribution analysis of bearing changes."""
     if len(metrics) < 3:
         return [], {"threshold": 0.0}
 
@@ -392,7 +383,6 @@ def detect_close_clusters(
 
         expanded = cluster.copy()
 
-        # expand by 1 on each side if adjacent is a cross-run
         if start_idx - 1 >= 0 and files_list[start_idx - 1] in cross_runs_set:
             expanded.insert(0, files_list[start_idx - 1])
         if end_idx + 1 < len(files_list) and files_list[end_idx + 1] in cross_runs_set:
@@ -493,22 +483,33 @@ def exclude_ranges(files: List[str], cross_runs: List[str], max_gap: int, logger
     return excluded
 
 
+# ---------------- helpers ---------------- #
+
+def _reset_dir(dir_path: Path) -> None:
+    """Delete directory if exists then recreate (resume-safe)."""
+    if dir_path.exists():
+        shutil.rmtree(dir_path)
+    dir_path.mkdir(parents=True, exist_ok=True)
+
+
 # ---------------- Pipeline Entry ---------------- #
 
 def run_filter(
     input_dir: Path,
     output_dir: Path,
     logger: logging.Logger,
-    sensitivity: float = 1.5,  # kept for compatibility (not used in adaptive method)
+    sensitivity: float = 1.5,  # kept for compatibility (not used)
     max_gap: int = 10,
     cross_run_window: int = 3,
+    *,
+    reset_outputs: bool = True,  # prevents “Found 256 images” on re-run
 ) -> Dict[str, object]:
     """
     Pipeline-friendly entry point.
 
-    Copies:
-    - kept images -> output_dir
-    - excluded images -> sibling folder "cross-run-images" next to output_dir's parent
+    STANDARD OUTPUTS:
+    - kept images -> output_dir (e.g. rgb/images/path)
+    - excluded images -> sibling folder "cross-runs" (e.g. rgb/images/cross-runs)
 
     Returns summary dict.
     """
@@ -518,10 +519,16 @@ def run_filter(
     if not input_dir.exists() or not input_dir.is_dir():
         raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    # standardized excluded folder name
+    excluded_dir = output_dir.parent / "cross-runs"
 
-    excluded_dir = output_dir.parent / "cross-run-images"
-    excluded_dir.mkdir(parents=True, exist_ok=True)
+    # resume-safe: clear outputs if rerunning
+    if reset_outputs:
+        _reset_dir(output_dir)
+        _reset_dir(excluded_dir)
+    else:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        excluded_dir.mkdir(parents=True, exist_ok=True)
 
     files = sorted([p.name for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
     logger.info(f"Cross-run filter: found {len(files)} images in {input_dir}")
@@ -592,16 +599,13 @@ def run_filter(
 
     # Combine exclusions
     all_excluded = set(close_clusters) | set(too_close) | set(range_excluded)
-    # Keep "no GPS" by default (unless excluded for other reasons, which they won't be)
     kept_files = [f for f in files if f not in all_excluded]
     excluded_files = [f for f in files if f in all_excluded]
 
     # Copy
     logger.info("Step: copy files to kept/excluded outputs")
-
     for fname in kept_files:
         shutil.copy2(input_dir / fname, output_dir / fname)
-
     for fname in excluded_files:
         shutil.copy2(input_dir / fname, excluded_dir / fname)
 
@@ -621,6 +625,7 @@ def run_filter(
         "typical_distance_m": float(typical_distance) if typical_distance is not None else None,
         "adaptive_params": adaptive_params,
         "cross_run_stats": cross_run_stats,
+        "reset_outputs": bool(reset_outputs),
     }
 
     logger.info(
