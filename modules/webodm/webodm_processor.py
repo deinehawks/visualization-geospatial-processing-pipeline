@@ -164,6 +164,54 @@ class WebODMProcessor:
         if m:
             return f"{m}m {s}s"
         return f"{s}s"
+    
+    @staticmethod
+    def _normalize_status(raw_status) -> tuple[str, bool]:
+        """
+        Returns (label, is_terminal)
+
+        WebODM can return:
+        - int codes (e.g., 40)
+        - dict with label/name
+        - string labels
+        """
+        # Most common numeric status codes in WebODM/NodeODM integrations
+        code_map = {
+            10: "created",
+            20: "queued",
+            30: "running",
+            40: "completed",
+            50: "failed",
+            60: "canceled",
+        }
+
+        # int status
+        if isinstance(raw_status, int):
+            label = code_map.get(raw_status, f"status_{raw_status}")
+            return label, label in ("completed", "failed", "canceled")
+
+        # sometimes float (rare)
+        if isinstance(raw_status, float) and raw_status.is_integer():
+            label = code_map.get(int(raw_status), f"status_{int(raw_status)}")
+            return label, label in ("completed", "failed", "canceled")
+
+        # dict status (some versions)
+        if isinstance(raw_status, dict):
+            label = raw_status.get("label") or raw_status.get("name") or raw_status.get("code")
+            if label is None:
+                return "unknown", False
+            label = str(label).lower()
+            return label, label in ("completed", "failed", "canceled", "cancelled")
+
+        # string status
+        if isinstance(raw_status, str):
+            label = raw_status.lower().strip()
+            if label == "cancelled":
+                label = "canceled"
+            return label, label in ("completed", "failed", "canceled")
+
+        return "unknown", False
+
 
     def wait_for_completion(
         self,
@@ -175,79 +223,132 @@ class WebODMProcessor:
         """
         Poll until task is completed/failed/canceled.
 
-        NOTE about 0% progress:
-        - Many WebODM builds don't update 'progress' reliably via this endpoint.
-        - We log progress if available, otherwise we log status + processing_time/upload_progress if present.
+        WebODM 'status' can be:
+        - int codes (common): 40=completed, 50=failed, 60=canceled
+        - dict with a 'label' (some builds)
+        - string labels
+
+        This version:
+        - normalizes status robustly
+        - logs only on change + periodic heartbeat
+        - logs progress if meaningful, otherwise logs processing_time/upload_progress deltas
         """
+
+        def _normalize_status(raw_status: Any) -> tuple[str, bool]:
+            code_map = {
+                10: "created",
+                20: "queued",
+                30: "running",
+                40: "completed",
+                50: "failed",
+                60: "canceled",
+            }
+
+            # int status
+            if isinstance(raw_status, int):
+                label = code_map.get(raw_status, f"status_{raw_status}")
+                return label, label in ("completed", "failed", "canceled")
+
+            # float-but-integer status (rare)
+            if isinstance(raw_status, float) and raw_status.is_integer():
+                label = code_map.get(int(raw_status), f"status_{int(raw_status)}")
+                return label, label in ("completed", "failed", "canceled")
+
+            # dict status
+            if isinstance(raw_status, dict):
+                label = raw_status.get("label") or raw_status.get("name") or raw_status.get("code")
+                if label is None:
+                    return "unknown", False
+                label = str(label).lower().strip()
+                if label == "cancelled":
+                    label = "canceled"
+                return label, label in ("completed", "failed", "canceled")
+
+            # string status
+            if isinstance(raw_status, str):
+                label = raw_status.lower().strip()
+                if label == "cancelled":
+                    label = "canceled"
+                return label, label in ("completed", "failed", "canceled")
+
+            return "unknown", False
+
         start = time.time()
 
-        last_status = None
-        last_progress = None
-        last_processing_time = None
-        last_upload_progress = None
+        last_status: Optional[str] = None
+        last_progress: Optional[float] = None
+        last_processing_time: Optional[float] = None
+        last_upload_progress: Optional[float] = None
         last_heartbeat = 0.0
 
         while True:
             task = self.get_task(project_id, task_id)
 
-            # status varies by version: sometimes task["status"] is int/obj; sometimes string.
             raw_status = task.get("status")
-            if isinstance(raw_status, str):
-                status = raw_status.lower()
-            elif isinstance(raw_status, dict) and "label" in raw_status:
-                status = str(raw_status["label"]).lower()
-            else:
-                status = str(raw_status).lower() if raw_status is not None else ""
+            status, is_terminal = _normalize_status(raw_status)
 
-            progress = task.get("progress")  # often None or 0 forever
-            processing_time = task.get("processing_time")  # sometimes increases
-            upload_progress = task.get("upload_progress")  # sometimes increases
+            progress = task.get("progress")  # often stuck at 0
+            processing_time = task.get("processing_time")  # often more reliable than progress
+            upload_progress = task.get("upload_progress")
             images_count = task.get("images_count")
 
             elapsed = time.time() - start
-
             changed = False
 
             if status != last_status:
-                self.logger.info(f"WebODM status: {status.upper() or 'UNKNOWN'} | elapsed={self.fmt_elapsed(elapsed)}")
+                self.logger.info(
+                    f"WebODM status: {status.upper()} (raw={raw_status}) | elapsed={self.fmt_elapsed(elapsed)}"
+                )
                 last_status = status
                 changed = True
 
-            # Log percent if it actually exists and changes
-            if isinstance(progress, (int, float)) and progress != last_progress:
-                # only print meaningful progress
-                self.logger.info(f"WebODM progress: {progress}% | elapsed={self.fmt_elapsed(elapsed)}")
-                last_progress = progress
-                changed = True
+            # Log percent only if it's numeric and actually changes AND not always 0
+            if isinstance(progress, (int, float)):
+                prog_val = float(progress)
+                if last_progress is None or prog_val != last_progress:
+                    # still log 0 once (for visibility), but not spam
+                    self.logger.info(f"WebODM progress: {prog_val:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    last_progress = prog_val
+                    changed = True
 
-            # Fallback: log processing_time changes (better than 0%)
-            if isinstance(processing_time, (int, float)) and processing_time != last_processing_time:
-                self.logger.info(
-                    f"WebODM processing_time: {int(processing_time)}s"
-                    + (f" | images={images_count}" if images_count is not None else "")
-                    + f" | elapsed={self.fmt_elapsed(elapsed)}"
-                )
-                last_processing_time = processing_time
-                changed = True
+            # Fallback: processing_time changes (usually best signal)
+            if isinstance(processing_time, (int, float)):
+                pt = float(processing_time)
+                if last_processing_time is None or pt != last_processing_time:
+                    self.logger.info(
+                        f"WebODM processing_time: {int(pt)}s"
+                        + (f" | images={images_count}" if images_count is not None else "")
+                        + f" | elapsed={self.fmt_elapsed(elapsed)}"
+                    )
+                    last_processing_time = pt
+                    changed = True
 
-            if isinstance(upload_progress, (int, float)) and upload_progress != last_upload_progress:
-                self.logger.info(f"WebODM upload_progress: {upload_progress}% | elapsed={self.fmt_elapsed(elapsed)}")
-                last_upload_progress = upload_progress
-                changed = True
+            # Upload progress changes (useful during upload / preprocessing)
+            if isinstance(upload_progress, (int, float)):
+                up = float(upload_progress)
+                if last_upload_progress is None or up != last_upload_progress:
+                    self.logger.info(f"WebODM upload_progress: {up:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    last_upload_progress = up
+                    changed = True
 
-            # heartbeat
+            # Optional: surface errors/messages if present and non-empty
+            msg = task.get("message") or task.get("last_error") or ""
+            if isinstance(msg, str) and msg.strip():
+                # don't spam: only print when status changes or on heartbeat
+                if changed:
+                    self.logger.info(f"WebODM message: {msg.strip()}")
+
+            # heartbeat if nothing changed for a while
             if not changed and (elapsed - last_heartbeat) >= heartbeat_seconds:
                 self.logger.info(f"WebODM still running... | elapsed={self.fmt_elapsed(elapsed)}")
                 last_heartbeat = elapsed
 
-            # terminal states
-            if status in ("completed", "failed", "canceled", "cancelled"):
+            if is_terminal:
                 success = status == "completed"
-                runtime = elapsed
-                return success, runtime, task
+                return success, elapsed, task
 
             time.sleep(poll_seconds)
-
+            
     # -------------------------
     # Documentation helpers (kept)
     # -------------------------
