@@ -146,9 +146,10 @@ def run(
     selected_kml = kml_files[0]
 
     boundary_dir = survey_path / "boundary"
-    shutil.copy2(selected_kml, boundary_dir / selected_kml.name)
+    standard_kml_name = f"{survey_id}.kml"
+    shutil.copy2(selected_kml, boundary_dir / standard_kml_name)
 
-    logger.info(f"KML copied: {selected_kml.name}")
+    logger.info(f"KML copied as standardized name: {standard_kml_name}")
 
     # --------------------------------------------------------
     # Count Ignored Files

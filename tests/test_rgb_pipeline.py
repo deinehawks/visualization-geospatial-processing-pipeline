@@ -1,47 +1,23 @@
 from pathlib import Path
-import os
-from dotenv import load_dotenv
-
+from shared.config import load_pipeline_config
 from pipelines.rgb_pipeline import RGBPipeline
 
 # --------------------------------------------------
-# Load environment variables
+# Load centralized config
 # --------------------------------------------------
 
-load_dotenv()  # loads from project root .env
+config = load_pipeline_config()
 
 # --------------------------------------------------
-# Read values from .env
+# Extract needed paths
 # --------------------------------------------------
 
-WEBODM_URL = os.getenv("WEBODM_URL")
-WEBODM_USERNAME = os.getenv("WEBODM_USERNAME")
-WEBODM_PASSWORD = os.getenv("WEBODM_PASSWORD")
-
-SURVEYS_ROOT = Path(os.getenv("SURVEYS_ROOT"))
-FIELD_DATA_ROOT = Path(os.getenv("FIELD_DATA_ROOT"))
+SURVEYS_ROOT = config["paths"]["surveys_root"]
+FIELD_DATA_ROOT = config["paths"]["field_data_root"]
 
 SOURCE_DIR = FIELD_DATA_ROOT / "BLC_A2S_2Ha_60m"
 YEAR = 2025
 BASE_DIR = Path(".")
-
-# --------------------------------------------------
-# Config
-# --------------------------------------------------
-
-config = {
-    "cross_run_filter": {
-        "max_gap": 10,
-        "window": 3,
-    },
-    "webodm": {
-        "url": WEBODM_URL,
-        "username": WEBODM_USERNAME,
-        "password": WEBODM_PASSWORD,
-        "task1_options": {},
-        "task2_options": {},
-    },
-}
 
 # --------------------------------------------------
 # Run pipeline
@@ -56,4 +32,6 @@ pipeline = RGBPipeline(
 )
 
 result = pipeline.run(resume=False)
+
+print("\n===== FINAL RESULT =====")
 print(result)

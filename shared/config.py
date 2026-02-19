@@ -1,0 +1,53 @@
+from __future__ import annotations
+import os
+import json
+from pathlib import Path
+from dotenv import load_dotenv
+
+
+def load_pipeline_config() -> dict:
+    """
+    Load all pipeline configuration from .env once.
+    Returns structured dictionary used by RGBPipeline.
+    """
+
+    load_dotenv()
+
+    def read_json_env(name: str, default: dict) -> dict:
+        raw = os.getenv(name)
+        if not raw:
+            return default
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {name}: {e}")
+
+    config = {
+        "paths": {
+            "surveys_root": Path(os.getenv("SURVEYS_ROOT")),
+            "field_data_root": Path(os.getenv("FIELD_DATA_ROOT")),
+        },
+        "cross_run_filter": {
+            "max_gap": int(os.getenv("CROSSRUN_MAX_GAP", 10)),
+            "window": int(os.getenv("CROSSRUN_WINDOW", 3)),
+        },
+        "webodm": {
+            "url": os.getenv("WEBODM_URL"),
+            "username": os.getenv("WEBODM_USERNAME"),
+            "password": os.getenv("WEBODM_PASSWORD"),
+            "task1_options": read_json_env("WEBODM_TASK1_OPTIONS_JSON", {}),
+            "task2_options": read_json_env("WEBODM_TASK2_OPTIONS_JSON", {}),
+        }
+    }
+
+    # Basic validation
+    if not config["webodm"]["url"]:
+        raise ValueError("WEBODM_URL missing in .env")
+
+    if not config["webodm"]["username"]:
+        raise ValueError("WEBODM_USERNAME missing in .env")
+
+    if not config["webodm"]["password"]:
+        raise ValueError("WEBODM_PASSWORD missing in .env")
+
+    return config

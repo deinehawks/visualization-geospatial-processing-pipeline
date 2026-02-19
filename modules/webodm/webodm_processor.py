@@ -445,47 +445,31 @@ class WebODMProcessor:
         self.logger.info(f"All assets downloaded to: {output_path}")
 
 
-def find_geojson_file(self, folder_path: str) -> str:
-    """Find a GeoJSON file in the specified folder or its subfolders."""
+def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]:
     folder = Path(folder_path)
-    
     if not folder.exists():
         return None
-    
-    # If it's a file and ends with .geojson or .json, return it
+
     if folder.is_file():
-        if folder.suffix.lower() in ['.geojson', '.json']:
+        if folder.suffix.lower() in [".geojson", ".json"]:
             return str(folder)
         return None
-    
-    # If it's a directory, search for GeoJSON files
-    if folder.is_dir():
-        # First, look for .geojson files
-        geojson_files = list(folder.glob("*.geojson")) + list(folder.glob("*.GeoJSON"))
-        if geojson_files:
-            self.logger.info(f"Found GeoJSON file: {geojson_files[0]}")
-            return str(geojson_files[0])
-        
-        # If no .geojson, look for .json files
-        json_files = list(folder.glob("*.json")) + list(folder.glob("*.JSON"))
-        if json_files:
-            # Try to verify it's actually a GeoJSON by checking content
-            for json_file in json_files:
-                try:
-                    with open(json_file, 'r') as f:
-                        content = f.read(100)  # Read first 100 chars
-                        if 'FeatureCollection' in content or 'Feature' in content or 'geometry' in content:
-                            self.logger.info(f"Found GeoJSON file: {json_file}")
-                            return str(json_file)
-                except:
-                    continue
-        
-        # Look in subfolders
-        for subfolder in folder.iterdir():
-            if subfolder.is_dir():
-                result = find_geojson_file(str(subfolder))
-                if result:
-                    return result
-    
-    return None
 
+    # Prefer .geojson
+    geojson_files = list(folder.rglob("*.geojson")) + list(folder.rglob("*.GeoJSON"))
+    if geojson_files:
+        logger.info(f"Found GeoJSON file: {geojson_files[0]}")
+        return str(geojson_files[0])
+
+    # Fallback .json (best-effort)
+    json_files = list(folder.rglob("*.json")) + list(folder.rglob("*.JSON"))
+    for jf in json_files:
+        try:
+            head = jf.read_text(encoding="utf-8", errors="ignore")[:200]
+            if "FeatureCollection" in head or "geometry" in head:
+                logger.info(f"Found GeoJSON-like JSON: {jf}")
+                return str(jf)
+        except Exception:
+            pass
+
+    return None

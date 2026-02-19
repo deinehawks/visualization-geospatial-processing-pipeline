@@ -121,6 +121,16 @@ class RGBPipeline:
         logger.info("Stage: WebODM Processing")
 
         webodm_cfg = self.config["webodm"]
+        naming_cfg = self.config.get("naming", {})
+
+        # flags from .env
+        crossrun_flag = naming_cfg.get("crossrun_mode", "xc")  # xc or c
+        boundary_flag_task1 = naming_cfg.get("boundary_mode", "xb")  # xb or b (task1 should usually be xb)
+        boundary_flag_task2 = "b"  # bounded task should be b (but if you want env-driven too, add PIPELINE_TASK2_BOUNDARY_MODE)
+
+        # Build names: <survey_id>-RGB--<flags>
+        task1_name = f"{self.survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
+        task2_name = f"{self.survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
 
         processor = WebODMProcessor(
             url=webodm_cfg["url"],
@@ -134,41 +144,45 @@ class RGBPipeline:
             description="RGB automated processing",
         )
 
-        rgb_path = self.surveys_root / str(self.year) / self.survey_id / "rgb"
-        image_folder = rgb_path / "images" / "path"
+        rgb_root = self.base_dir / "data" / "staged" / self.survey_id  # adjust if you’re using F:\surveys as canonical
+        image_folder = self.staged_dir / "images"  # your existing path
+
+        # TASK 1 options from .env JSON
+        task1_options = webodm_cfg.get("task1_options", {})
 
         task1_id = processor.create_task_with_images(
             project_id=project_id,
-            name="Unbounded Orthomosaic",
+            name=task1_name,
             image_folder=str(image_folder),
-            options=webodm_cfg.get("task1_options", {}),
+            options=task1_options,
         )
-
         t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, task1_id)
 
-        geojson_files = list((rgb_path / "boundary").glob("*.geojson"))
+        # TASK 2 boundary geojson
+        geojson_dir = self.intermediate_dir / "geojson"
+        geojson_files = sorted(list(geojson_dir.glob("*.geojson")))
         if not geojson_files:
-            raise FileNotFoundError("No boundary GeoJSON found")
-
+            raise FileNotFoundError(f"No .geojson boundary found in: {geojson_dir}")
         boundary_geojson = geojson_files[0].read_text(encoding="utf-8")
 
+        # TASK 2 options from .env JSON + boundary injected
         task2_options = dict(webodm_cfg.get("task2_options", {}))
         task2_options["boundary"] = boundary_geojson
 
         task2_id = processor.create_task_with_images(
             project_id=project_id,
-            name="Bounded Orthomosaic",
+            name=task2_name,
             image_folder=str(image_folder),
             options=task2_options,
         )
-
         t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, task2_id)
 
         return {
             "project_id": project_id,
-            "task1": {"id": task1_id, "success": t1_success, "runtime_seconds": t1_runtime},
-            "task2": {"id": task2_id, "success": t2_success, "runtime_seconds": t2_runtime},
+            "task1": {"id": task1_id, "success": t1_success, "runtime_seconds": t1_runtime, "name": task1_name},
+            "task2": {"id": task2_id, "success": t2_success, "runtime_seconds": t2_runtime, "name": task2_name},
         }
+
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         self.loggers["pipeline"].info("Stage: Quality Gate Check")
