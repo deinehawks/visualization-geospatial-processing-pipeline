@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,12 +15,17 @@ def utc_now_iso() -> str:
 
 class PipelineRepo:
     """
-    Thin repository layer for pipeline tracking.
+    Thin repository layer for pipeline tracking (run_id-based).
     Pipelines call this; they never write SQL directly.
+
+    Core idea:
+    - "runs" is the parent entity that always exists from the start.
+    - stages reference runs.run_id (FK-safe even before survey_id exists)
+    - survey_id can be attached to a run later.
     """
 
     def __init__(self, db_file: Path):
-        self.db_file = db_file
+        self.db_file = Path(db_file)
         self._init_db()
 
     def _init_db(self) -> None:
@@ -27,7 +33,77 @@ class PipelineRepo:
             conn.executescript(SCHEMA_SQL)
             conn.commit()
 
-    # -------- Survey -------- #
+    # ============================================================
+    # RUNS
+    # ============================================================
+
+    def create_run(
+        self,
+        run_id: str,
+        *,
+        source_dir: Optional[str] = None,
+        surveys_root: Optional[str] = None,
+        year: Optional[int] = None,
+    ) -> None:
+        now = utc_now_iso()
+        with connect(self.db_file) as conn:
+            conn.execute(
+                """
+                INSERT INTO runs (run_id, status, started_at, source_dir, surveys_root, year)
+                VALUES (?, 'running', ?, ?, ?, ?)
+                ON CONFLICT(run_id) DO UPDATE SET
+                    status='running',
+                    started_at=COALESCE(runs.started_at, excluded.started_at),
+                    source_dir=COALESCE(excluded.source_dir, runs.source_dir),
+                    surveys_root=COALESCE(excluded.surveys_root, runs.surveys_root),
+                    year=COALESCE(excluded.year, runs.year)
+                """,
+                (run_id, now, source_dir, surveys_root, year),
+            )
+            conn.commit()
+
+    def attach_survey_id(self, run_id: str, survey_id: str) -> None:
+        with connect(self.db_file) as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET survey_id=?
+                WHERE run_id=?
+                """,
+                (survey_id, run_id),
+            )
+            conn.commit()
+
+    def mark_run_finished(self, run_id: str, success: bool, total_runtime_seconds: float) -> None:
+        now = utc_now_iso()
+        status = "completed" if success else "failed"
+        with connect(self.db_file) as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET status=?, finished_at=?, total_runtime_seconds=?
+                WHERE run_id=?
+                """,
+                (status, now, total_runtime_seconds, run_id),
+            )
+            conn.commit()
+
+    def get_run(self, run_id: str) -> Optional[dict]:
+        with connect(self.db_file) as conn:
+            row = conn.execute(
+                """
+                SELECT run_id, survey_id, status, started_at, finished_at, total_runtime_seconds,
+                       source_dir, surveys_root, year
+                FROM runs
+                WHERE run_id=?
+                """,
+                (run_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    # ============================================================
+    # SURVEYS (optional, for survey-level analytics)
+    # ============================================================
 
     def upsert_survey_running(self, survey_id: str) -> None:
         now = utc_now_iso()
@@ -58,17 +134,19 @@ class PipelineRepo:
             )
             conn.commit()
 
-    # -------- Stage -------- #
+    # ============================================================
+    # STAGES (run_id-based)
+    # ============================================================
 
-    def start_stage(self, survey_id: str, stage_name: str) -> int:
+    def start_stage(self, run_id: str, stage_name: str) -> int:
         now = utc_now_iso()
         with connect(self.db_file) as conn:
             cur = conn.execute(
                 """
-                INSERT INTO stages (survey_id, stage_name, status, started_at)
+                INSERT INTO stages (run_id, stage_name, status, started_at)
                 VALUES (?, ?, 'running', ?)
                 """,
-                (survey_id, stage_name, now),
+                (run_id, stage_name, now),
             )
             conn.commit()
             return int(cur.lastrowid)
@@ -95,35 +173,26 @@ class PipelineRepo:
             )
             conn.commit()
 
-    # -------- Helper Methods -------- #
+    # -------- Helper Methods (resume) -------- #
 
-    def get_latest_stage(self, survey_id: str, stage_name: str) -> Optional[dict]:
-        """
-        Returns the latest stage row as a dict, or None if not found.
-        """
+    def get_latest_stage(self, run_id: str, stage_name: str) -> Optional[dict]:
         with connect(self.db_file) as conn:
             row = conn.execute(
                 """
-                SELECT id, survey_id, stage_name, status, started_at, finished_at,
+                SELECT id, run_id, stage_name, status, started_at, finished_at,
                        runtime_seconds, error_message, output_json
                 FROM stages
-                WHERE survey_id = ? AND stage_name = ?
+                WHERE run_id = ? AND stage_name = ?
                 ORDER BY id DESC
                 LIMIT 1
                 """,
-                (survey_id, stage_name),
+                (run_id, stage_name),
             ).fetchone()
 
-            if row is None:
-                return None
+            return dict(row) if row else None
 
-            return dict(row)
-
-    def get_latest_stage_output(self, survey_id: str, stage_name: str) -> Optional[Dict[str, Any]]:
-        """
-        Returns parsed JSON output of the latest stage if available.
-        """
-        latest = self.get_latest_stage(survey_id, stage_name)
+    def get_latest_stage_output(self, run_id: str, stage_name: str) -> Optional[Dict[str, Any]]:
+        latest = self.get_latest_stage(run_id, stage_name)
         if not latest:
             return None
 

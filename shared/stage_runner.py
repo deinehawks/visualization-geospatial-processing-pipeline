@@ -4,7 +4,7 @@ import time
 from typing import Callable, Any, Optional, Dict
 import logging
 
-from shared import PipelineRepo
+from shared.db.repo import PipelineRepo
 
 
 class StageRunner:
@@ -12,15 +12,18 @@ class StageRunner:
     Wraps stage execution with DB + logging + resume support.
 
     Resume logic:
-    - If latest stage for (survey_id, stage_name) is 'completed', skip by default
+    - If latest stage for (run_id, stage_name) is 'completed', skip by default
     - Optionally loads output_json into state
     - force=True will rerun even if completed
     """
 
-    def __init__(self, repo: PipelineRepo, survey_id: str, logger: logging.Logger):
+    def __init__(self, repo: PipelineRepo, run_id: str, logger: logging.Logger):
         self.repo = repo
-        self.survey_id = survey_id
+        self.run_id = run_id
         self.logger = logger
+
+        # Guarantee parent run exists (FK safety)
+        self.repo.create_run(self.run_id)
 
     def run(
         self,
@@ -33,24 +36,23 @@ class StageRunner:
         load_output_on_skip: bool = True,
     ) -> Any:
         # ---- RESUME CHECK ----
-        latest = self.repo.get_latest_stage(self.survey_id, stage_name)
+        latest = self.repo.get_latest_stage(self.run_id, stage_name)
         if not force and latest and latest.get("status") == "completed":
             self.logger.info(f"StageRunner: skip {stage_name} (already completed in DB)")
 
             if load_output_on_skip and state is not None and output_key:
-                output = self.repo.get_latest_stage_output(self.survey_id, stage_name)
+                output = self.repo.get_latest_stage_output(self.run_id, stage_name)
                 if output is not None:
                     state[output_key] = output
                     self.logger.info(f"StageRunner: loaded saved output for {stage_name} into state['{output_key}']")
                 else:
                     self.logger.info(f"StageRunner: no saved output_json for {stage_name} to load")
 
-            # Return saved output if available, else None
-            return self.repo.get_latest_stage_output(self.survey_id, stage_name)
+            return self.repo.get_latest_stage_output(self.run_id, stage_name)
 
         # ---- RUN STAGE ----
         self.logger.info(f"StageRunner: start {stage_name}")
-        stage_id = self.repo.start_stage(self.survey_id, stage_name)
+        stage_id = self.repo.start_stage(self.run_id, stage_name)
         start = time.perf_counter()
 
         try:
