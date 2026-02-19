@@ -1,7 +1,11 @@
 """
 KML Boundary Setter Module (Pipeline-ready)
 
-Extracts boundary coordinates from KML files and converts them to:
+Extracts boundary coordinates from:
+- .kml
+- .kmz (auto-extracts embedded KML)
+
+Converts to:
 - GeoJSON format (for WebODM)
 - CSV format with boundary metadata
 """
@@ -15,6 +19,9 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+import zipfile
+import tempfile
+import shutil
 
 
 @dataclass
@@ -25,7 +32,7 @@ class ProcessedKMLResult:
 
 
 class KMLBoundarySetter:
-    """Processes KML files and generates GeoJSON and CSV boundary files."""
+    """Processes KML/KMZ files and generates GeoJSON and CSV boundary files."""
 
     def __init__(
         self,
@@ -42,21 +49,46 @@ class KMLBoundarySetter:
         self.processed_files: List[ProcessedKMLResult] = []
         self.failed_files: List[str] = []
 
-    # ---------------- Core parsing ---------------- #
+    # ============================================================
+    # KMZ SUPPORT
+    # ============================================================
+
+    def _extract_kml_from_kmz(self, kmz_path: Path) -> Optional[Path]:
+        """
+        Extract first KML inside KMZ to temp folder and return its path.
+        """
+        try:
+            tmp_dir = Path(tempfile.mkdtemp(prefix="kmz_extract_"))
+            with zipfile.ZipFile(kmz_path, "r") as zf:
+                kml_members = [m for m in zf.namelist() if m.lower().endswith(".kml")]
+                if not kml_members:
+                    self.logger.warning(f"No .kml inside KMZ: {kmz_path.name}")
+                    return None
+
+                member = kml_members[0]
+                zf.extract(member, path=tmp_dir)
+
+                extracted = tmp_dir / member
+                if not extracted.exists():
+                    extracted = next(tmp_dir.rglob("*.kml"), None)
+
+                return extracted
+
+        except Exception:
+            self.logger.exception(f"Failed to extract KMZ: {kmz_path}")
+            return None
+
+    # ============================================================
+    # KML PARSING
+    # ============================================================
 
     def extract_coordinates_from_kml(self, kml_path: Path) -> Optional[List[List[str]]]:
-        """
-        Extracts the coordinate list from a KML file, supporting namespaces.
-        Returns list of coordinate triplets [lon, lat, alt?] as strings.
-        """
         try:
             tree = ET.parse(kml_path)
             root = tree.getroot()
 
-            # Standard KML namespace
             ns = {"kml": "http://www.opengis.net/kml/2.2"}
 
-            # Find coordinates tag (namespace first, then fallback)
             coords_elem = root.find(".//kml:coordinates", ns)
             if coords_elem is None or not (coords_elem.text and coords_elem.text.strip()):
                 coords_elem = root.find(".//coordinates")
@@ -75,28 +107,21 @@ class KMLBoundarySetter:
             return None
 
     def format_xyz_to_latlon(self, coords: List[List[str]]) -> List[List[float]]:
-        """Formats coordinates as [lat, lon] for Leaflet."""
         return [[float(c[1]), float(c[0])] for c in coords]
 
     def format_xyz_to_lonlat(self, coords: List[List[str]]) -> List[List[float]]:
-        """Formats coordinates as [lon, lat] for GeoJSON/MapLibre."""
         return [[float(c[0]), float(c[1])] for c in coords]
 
     def get_min_max_xy(self, coords: List[List[str]]) -> Tuple[float, float, float, float]:
-        """Returns bounding box from coordinates."""
         longitudes = [float(x[0]) for x in coords]
         latitudes = [float(x[1]) for x in coords]
         return min(longitudes), min(latitudes), max(longitudes), max(latitudes)
 
-    # ---------------- Writers ---------------- #
+    # ============================================================
+    # WRITERS
+    # ============================================================
 
     def write_geojson(self, filepath: Path, boundary_lonlat: List[List[float]]) -> None:
-        """
-        Writes a GeoJSON Polygon file.
-
-        Note: GeoJSON polygon coordinates should typically be closed (first==last).
-        We'll close it if not closed.
-        """
         if boundary_lonlat and boundary_lonlat[0] != boundary_lonlat[-1]:
             boundary_lonlat = boundary_lonlat + [boundary_lonlat[0]]
 
@@ -116,25 +141,12 @@ class KMLBoundarySetter:
         self.logger.info(f"GeoJSON saved: {filepath}")
 
     def write_csv(self, filepath: Path, row: Dict[str, Any]) -> None:
-        """Writes a CSV file with boundary metadata."""
         fieldnames = [
-            "id",
-            "code",
-            "area_code",
-            "access_code",
-            "type",
-            "flight_date",
-            "location",
-            "area",
-            "max_x",
-            "max_y",
-            "min_x",
-            "min_y",
-            "tags",
-            "boundaries",
-            "geojson_boundaries",
-            "ortho",
-            "point_cloud",
+            "id", "code", "area_code", "access_code", "type",
+            "flight_date", "location", "area",
+            "max_x", "max_y", "min_x", "min_y",
+            "tags", "boundaries", "geojson_boundaries",
+            "ortho", "point_cloud",
         ]
 
         filepath.parent.mkdir(parents=True, exist_ok=True)
@@ -145,20 +157,16 @@ class KMLBoundarySetter:
 
         self.logger.info(f"CSV saved: {filepath}")
 
-    # ---------------- Public API ---------------- #
+    # ============================================================
+    # PROCESSING
+    # ============================================================
 
     def process_kml_file(self, kml_path: Path, metadata: Optional[Dict[str, Any]] = None) -> bool:
-        """
-        Processes one KML file and writes GeoJSON and CSV outputs.
-        Returns True if success.
-        """
-        kml_path = Path(kml_path)
-
-        self.logger.info(f"Processing KML: {kml_path.name}")
+        self.logger.info(f"Processing: {kml_path.name}")
 
         coords = self.extract_coordinates_from_kml(kml_path)
         if not coords or len(coords) < 3:
-            self.logger.warning(f"No valid polygon coordinates found in {kml_path.name}. Skipping.")
+            self.logger.warning(f"No valid polygon found in {kml_path.name}")
             self.failed_files.append(kml_path.name)
             return False
 
@@ -167,15 +175,11 @@ class KMLBoundarySetter:
         min_x, min_y, max_x, max_y = self.get_min_max_xy(coords)
 
         base_id = kml_path.stem
-
-        # Output paths
         geojson_path = self.geojson_dir / f"{base_id}.geojson"
         csv_path = self.csv_dir / f"{base_id}.csv"
 
-        # Write GeoJSON
         self.write_geojson(geojson_path, geojson_boundary)
 
-        # Prepare CSV row
         md = metadata or {}
         row = {
             "id": base_id,
@@ -202,39 +206,42 @@ class KMLBoundarySetter:
         self.processed_files.append(
             ProcessedKMLResult(kml=kml_path.name, geojson=str(geojson_path), csv=str(csv_path))
         )
-        self.logger.info(f"Processed: {kml_path.name}")
+
         return True
 
-    def process_all(self, metadata_map: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """
-        Processes all .kml files in the kml_dir.
+    # ============================================================
+    # MAIN ENTRY
+    # ============================================================
 
-        metadata_map (optional): dict keyed by base_id or filename
-            Example:
-              {
-                "survey_001": {...},
-                "survey_002": {...}
-              }
-        """
+    def process_all(self, metadata_map: Optional[Dict[str, Dict[str, Any]]] = None) -> Dict[str, Any]:
         metadata_map = metadata_map or {}
 
         if not self.kml_dir.exists():
-            self.logger.error(f"KML directory does not exist: {self.kml_dir}")
             return {"success": False, "message": "KML directory missing", "processed": 0, "failed": 0}
 
-        kml_files = sorted([p for p in self.kml_dir.iterdir() if p.is_file() and p.suffix.lower() == ".kml"])
+        all_files = sorted([p for p in self.kml_dir.iterdir() if p.is_file() and p.suffix.lower() in (".kml", ".kmz")])
 
-        if not kml_files:
-            self.logger.error(f"No KML files found in: {self.kml_dir}")
-            return {"success": False, "message": "No KML files found", "processed": 0, "failed": 0}
+        if not all_files:
+            return {"success": False, "message": "No KML/KMZ files found", "processed": 0, "failed": 0}
 
-        self.logger.info(f"Found {len(kml_files)} KML file(s) in {self.kml_dir}")
+        self.logger.info(f"Found {len(all_files)} KML/KMZ file(s)")
 
-        for kml_path in kml_files:
-            key1 = kml_path.stem
-            key2 = kml_path.name
+        for file_path in all_files:
+            working_kml = file_path
+
+            # KMZ handling
+            if file_path.suffix.lower() == ".kmz":
+                extracted = self._extract_kml_from_kmz(file_path)
+                if not extracted:
+                    self.failed_files.append(file_path.name)
+                    continue
+                working_kml = extracted
+
+            key1 = working_kml.stem
+            key2 = working_kml.name
             md = metadata_map.get(key1) or metadata_map.get(key2)
-            self.process_kml_file(kml_path, metadata=md)
+
+            self.process_kml_file(working_kml, metadata=md)
 
         summary = {
             "success": True,
@@ -246,14 +253,8 @@ class KMLBoundarySetter:
             "csv_dir": str(self.csv_dir),
         }
 
-        self.logger.info("KML processing summary | "
-                         f"processed={summary['processed']} failed={summary['failed']}")
+        self.logger.info(f"KML summary | processed={summary['processed']} failed={summary['failed']}")
         return summary
-
-    def get_geojson_path(self, kml_filename: str) -> Optional[str]:
-        """Return GeoJSON path for a given KML filename if it exists."""
-        geojson_path = self.geojson_dir / f"{Path(kml_filename).stem}.geojson"
-        return str(geojson_path) if geojson_path.exists() else None
 
 
 # ---------------- Pipeline entry ---------------- #
@@ -265,9 +266,7 @@ def run_kml(
     logger: logging.Logger,
     metadata_map: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """
-    Pipeline-friendly entry point.
-    """
+
     setter = KMLBoundarySetter(
         kml_dir=kml_dir,
         geojson_dir=geojson_dir,
