@@ -69,6 +69,18 @@ class RGBPipeline:
         # Update survey_id after generation
         self.survey_id = summary["survey_id"]
 
+        # Rename KML to match survey ID
+        rgb_path = Path(summary["survey_path"])
+        boundary_dir = rgb_path / "boundary"
+
+        original_kml = list(boundary_dir.glob("*.kml"))[0]
+        new_kml_path = boundary_dir / f"{self.survey_id}.kml"
+
+        original_kml.rename(new_kml_path)
+
+        self.loggers["segregation"].info(f"KML renamed to {new_kml_path.name}")
+
+
         # Now update StageRunner survey_id
         self.runner.survey_id = self.survey_id
 
