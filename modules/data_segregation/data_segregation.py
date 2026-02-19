@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 from datetime import datetime
 import logging
-
+import zipfile
+import tempfile
 
 # ============================================================
 # SURVEY ID GENERATOR
@@ -136,20 +137,50 @@ def run(
     # --------------------------------------------------------
 
     kml_files = list(source_dir.rglob("*.kml"))
-
-    if not kml_files:
-        raise ValueError("No KML file found in source directory.")
-
-    if len(kml_files) > 1:
-        logger.warning("Multiple KML files found — selecting first one.")
-
-    selected_kml = kml_files[0]
+    kmz_files = list(source_dir.rglob("*.kmz"))
 
     boundary_dir = survey_path / "boundary"
-    standard_kml_name = f"{survey_id}.kml"
-    shutil.copy2(selected_kml, boundary_dir / standard_kml_name)
 
-    logger.info(f"KML copied as standardized name: {standard_kml_name}")
+    selected_kml_path = None
+
+    if kml_files:
+        selected_kml_path = kml_files[0]
+
+    elif kmz_files:
+        kmz_path = kmz_files[0]
+        logger.info(f"KMZ detected: {kmz_path.name} — extracting KML")
+
+        with zipfile.ZipFile(kmz_path, "r") as zf:
+            kml_members = [m for m in zf.namelist() if m.lower().endswith(".kml")]
+
+            if not kml_members:
+                raise ValueError("KMZ file does not contain any KML file.")
+
+            member = kml_members[0]
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                zf.extract(member, path=tmpdir)
+                extracted_path = Path(tmpdir) / member
+
+                if not extracted_path.exists():
+                    extracted_path = next(Path(tmpdir).rglob("*.kml"), None)
+
+                if not extracted_path:
+                    raise ValueError("Failed to extract KML from KMZ.")
+
+                # Copy extracted KML into boundary directory
+                selected_kml_path = boundary_dir / f"{survey_id}.kml"
+                shutil.copy2(extracted_path, selected_kml_path)
+
+    else:
+        raise ValueError("No KML or KMZ file found in source directory.")
+
+    # If normal KML (not KMZ extracted)
+    if selected_kml_path and selected_kml_path.suffix.lower() == ".kml" and selected_kml_path.parent != boundary_dir:
+        shutil.copy2(selected_kml_path, boundary_dir / selected_kml_path.name)
+        selected_kml_path = boundary_dir / selected_kml_path.name
+
+    logger.info(f"KML saved as: {selected_kml_path.name}")
 
     # --------------------------------------------------------
     # Count Ignored Files
@@ -172,7 +203,7 @@ def run(
         "source_folder": str(source_dir),
         "created_at": datetime.now().isoformat(),
         "image_count": len(images),
-        "kml_file": selected_kml.name,
+        "kml_file": f"{survey_id}.kml",
         "ignored_files": ignored_counts,
     }
 
@@ -191,7 +222,7 @@ def run(
         "survey_id": survey_id,
         "survey_path": str(survey_path),
         "image_count": len(images),
-        "kml_file": selected_kml.name,
+        "kml_file": f"{survey_id}.kml",
         "manifest": str(manifest_path),
     }
 
