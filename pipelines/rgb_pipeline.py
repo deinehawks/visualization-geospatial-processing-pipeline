@@ -143,10 +143,6 @@ class RGBPipeline:
         input_dir = rgb_path / "images" / "path_raw"
         output_dir = rgb_path / "images" / "path"
 
-        # your filter script also creates cross-run-images;
-        # but your standard output wants them in rgb/images/cross-runs
-        # make your module accept excluded_dir if you can (recommended).
-        # For now, we let module run as-is; ensure it writes to rgb/images/cross-runs.
         filter_cfg = self.config.get("cross_run_filter", {})
         max_gap = int(filter_cfg.get("max_gap", 10))
         window = int(filter_cfg.get("window", 3))
@@ -159,42 +155,66 @@ class RGBPipeline:
             cross_run_window=window,
         )
 
-        # Determine naming flag for WebODM tasks (c vs xc)
-        # If filtering excludes crossruns, we mark "xc". If you keep crossruns, mark "c".
-        # Here: we assume filter excludes crossruns => "xc".
-        self.state["crossrun_flag"] = "xc"
+        # If your filter excluded any cross-run images => "xc", else "c"
+        excluded = int(result.get("total_excluded") or 0)
+        self.state["crossrun_flag"] = "xc" if excluded > 0 else "c"
 
         return result
+
 
     def stage_kml_boundary(self) -> Dict[str, Any]:
         logger = self.loggers["kml"]
         logger.info("Stage: KML Boundary Setter")
 
         rgb_path = self._require_rgb_path()
-
-        # Your standard: boundary folder holds kml + geojson + csv
         boundary_dir = rgb_path / "boundary"
 
-        return run_kml(
+        summary = run_kml(
             kml_dir=boundary_dir,
             geojson_dir=boundary_dir,
             csv_dir=boundary_dir,
             logger=logger,
         )
 
+        processed_files = summary.get("processed_files") or []
+        geojson_path = None
+        if processed_files:
+            geojson_path = processed_files[0].get("geojson")
+
+        boundary_ok = bool(geojson_path and Path(geojson_path).exists())
+
+        # Store resume-safe boundary info
+        self.state["boundary_available"] = boundary_ok
+        self.state["boundary_geojson_path"] = str(geojson_path) if geojson_path else None
+
+        if not boundary_ok:
+            logger.warning("No valid polygon boundary produced (GeoJSON missing). Pipeline will run Task 1 only.")
+
+        return summary
+
     def stage_webodm(self) -> Dict[str, Any]:
         logger = self.loggers["webodm"]
         logger.info("Stage: WebODM Processing")
 
+        survey_id = self._require_survey_id()
+        rgb_path = self._require_rgb_path()
+
         webodm_cfg = self.config["webodm"]
         naming_cfg = self.config.get("naming", {})
 
-        crossrun_flag = naming_cfg.get("crossrun_mode", "xc")   # xc or c
-        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")  # task1 usually xb
-        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")   # task2 usually b
+        # Crossrun flag: prefer runtime detection from filter stage (resume-safe)
+        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
 
-        task1_name = f"{self.survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
-        task2_name = f"{self.survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
+        # Boundary presence from KML stage (resume-safe)
+        boundary_available = bool(self.state.get("boundary_available"))
+        boundary_geojson_path = self.state.get("boundary_geojson_path")
+
+        # Task flags
+        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")  # unbounded normally xb
+        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")   # bounded normally b
+
+        task1_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
+        task2_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
 
         processor = WebODMProcessor(
             url=webodm_cfg["url"],
@@ -203,15 +223,15 @@ class RGBPipeline:
             logger=logger,
         )
 
+        # Per your standard: project name should be AH-xxxxx (not _RGB)
         project_id = processor.create_project(
-            name=f"{self.survey_id}",
+            name=f"{survey_id}",
             description="RGB automated processing",
         )
 
-        rgb_path = self.surveys_root / str(self.year) / self.survey_id / "rgb"
-        image_folder = rgb_path / "images" / "path"  # canonical filtered images
+        image_folder = rgb_path / "images" / "path"
 
-        # ---------------- TASK 1 ----------------
+        # ---------------- TASK 1 (always) ----------------
         task1_options = dict(webodm_cfg.get("task1_options", {}))
         task1_id = processor.create_task_with_images(
             project_id=project_id,
@@ -221,25 +241,29 @@ class RGBPipeline:
         )
         t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, task1_id)
 
-        result = {
+        result: Dict[str, Any] = {
             "project_id": project_id,
-            "task1": {"id": task1_id, "success": t1_success, "runtime_seconds": t1_runtime, "name": task1_name},
+            "task1": {
+                "id": task1_id,
+                "name": task1_name,
+                "success": t1_success,
+                "runtime_seconds": t1_runtime,
+            },
             "task2": None,
             "boundary_used": False,
             "boundary_reason": None,
+            "boundary_geojson_path": boundary_geojson_path,
         }
 
-        # ---------------- TASK 2 (optional) ----------------
-        # Prefer reading kml stage output (resume-safe)
-        kml_summary = self.state.get("kml") or {}
-        processed_files = kml_summary.get("processed_files") or []
-        boundary_geojson_path = None
-
-        if processed_files:
-            boundary_geojson_path = processed_files[0].get("geojson")
+        # ---------------- TASK 2 (only if boundary exists) ----------------
+        if not boundary_available:
+            msg = "Boundary not available. Skipping Task 2 (bounded models)."
+            logger.warning(msg)
+            result["boundary_reason"] = msg
+            return result
 
         if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-            msg = "No valid GeoJSON boundary produced. Skipping bounded task (Task 2)."
+            msg = "Boundary flag is True but GeoJSON path is missing. Skipping Task 2."
             logger.warning(msg)
             result["boundary_reason"] = msg
             return result
@@ -257,7 +281,12 @@ class RGBPipeline:
         )
         t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, task2_id)
 
-        result["task2"] = {"id": task2_id, "success": t2_success, "runtime_seconds": t2_runtime, "name": task2_name}
+        result["task2"] = {
+            "id": task2_id,
+            "name": task2_name,
+            "success": t2_success,
+            "runtime_seconds": t2_runtime,
+        }
         result["boundary_used"] = True
         return result
 

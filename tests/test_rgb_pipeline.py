@@ -16,7 +16,7 @@ SURVEYS_ROOT = config["paths"]["surveys_root"]
 FIELD_DATA_ROOT = config["paths"]["field_data_root"]
 
 SOURCE_DIR = FIELD_DATA_ROOT / "BLC_A2S_2Ha_60m"
-YEAR = 2025
+YEAR = 2026
 BASE_DIR = Path(".")
 
 # --------------------------------------------------
