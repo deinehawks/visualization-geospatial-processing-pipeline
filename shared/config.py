@@ -35,6 +35,7 @@ def load_pipeline_config() -> dict:
             "url": os.getenv("WEBODM_URL"),
             "username": os.getenv("WEBODM_USERNAME"),
             "password": os.getenv("WEBODM_PASSWORD"),
+            "node_id": int(os.getenv("WEBODM_NODE_ID", 0)), 
             "task1_options": read_json_env("WEBODM_TASK1_OPTIONS_JSON", {}),
             "task2_options": read_json_env("WEBODM_TASK2_OPTIONS_JSON", {}),
         }
@@ -49,5 +50,8 @@ def load_pipeline_config() -> dict:
 
     if not config["webodm"]["password"]:
         raise ValueError("WEBODM_PASSWORD missing in .env")
+    
+    if not config["webodm"]["node_id"]:
+        raise ValueError("WEBODM_NODE_ID missing in .env")
 
     return config

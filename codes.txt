@@ -1,0 +1,5 @@
+Remove-Item .\data\logs\* -Recurse -Force
+Remove-Item .\data\pipeline.db -Force
+
+python -m tests.test_rgb_pipeline
+

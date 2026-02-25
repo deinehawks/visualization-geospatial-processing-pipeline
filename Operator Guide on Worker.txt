@@ -1,0 +1,15 @@
+D:\Visualization\field data
+D:\Visualization\surveys
+
+
+ssh user@192.168.10.5
+
+Verify Docker engine is up - docker info
+
+run NodeODM - docker start nodeodm-worker
+
+Confirm it’s running - docker ps
+
+stop nodeodm - docker stop nodeodm-worker
+
+restart nodeodm - docker restart nodeodm-worker

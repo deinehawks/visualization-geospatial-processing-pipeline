@@ -1,3 +1,6 @@
 
 
 Remember that in processing images with ODM, no images within a task should share the same filename as ODM will think of these images as the same file and will skip the file during the stitching process.
+
+
+python -m experiments.rgb_experiment --survey STM_1Ha_M3C_60m_85f75s_5mps --year 2026
