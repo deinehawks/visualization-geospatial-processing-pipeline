@@ -410,8 +410,54 @@ class RGBPipeline:
         return result
 
     def stage_quality_gate(self) -> Dict[str, Any]:
-        self.loggers["pipeline"].info("Stage: Quality Gate Check")
-        return {"passed": True}
+        logger = self.loggers["pipeline"]
+        logger.info("Stage: Quality Gate Check")
+
+        survey_id = self.survey_id or "?"
+        retries = 0
+        max_retries = 3  # you can change this
+
+        while True:
+            print("\n=========== QUALITY GATE ===========")
+            print(f"Survey: {survey_id}")
+            print("Have you finished inspecting the outputs in WebODM?")
+            print("Type:")
+            print("  yes      -> Proceed")
+            print("  restart  -> Re-run WebODM from load dataset")
+            print("  fail     -> Mark pipeline as failed")
+            print("====================================\n")
+
+            answer = input("Your decision (yes/restart/fail): ").strip().lower()
+
+            if answer in ("yes", "y"):
+                logger.info("Quality gate PASSED by user.")
+                return {"passed": True, "retries": retries}
+
+            if answer in ("fail", "f"):
+                logger.warning("Quality gate FAILED by user.")
+                return {"passed": False, "retries": retries}
+
+            if answer in ("restart", "r"):
+                retries += 1
+
+                if retries > max_retries:
+                    logger.error("Maximum restart attempts exceeded.")
+                    return {
+                        "passed": False,
+                        "retries": retries,
+                        "reason": "max_retries_exceeded",
+                    }
+
+                logger.warning(f"Restarting WebODM from load dataset (attempt {retries}/{max_retries})")
+
+                # Re-run WebODM stage (fresh project + upload)
+                new_web_state = self.stage_webodm()
+                self.state["webodm"] = new_web_state
+
+                # After restart, loop again and ask user
+                continue
+
+            print("Invalid input. Please type: yes, restart, or fail.")
 
     def _log_summary(self):
         p = self.loggers["pipeline"]
@@ -488,6 +534,11 @@ class RGBPipeline:
                 state=self.state,
                 force=("quality_gate" in force_stages) or (not resume),
             )
+
+            # Stop pipeline if quality gate failed
+            q = self.state.get("quality_gate") or {}
+            if q.get("passed") is False:
+                raise RuntimeError("Pipeline stopped due to failed Quality Gate.")
 
             self.state["success"] = True
 

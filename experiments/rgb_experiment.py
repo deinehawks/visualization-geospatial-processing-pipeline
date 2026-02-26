@@ -20,8 +20,7 @@ WEBODM_NODE_ID = 2
 def force_webodm_node2():
     """
     Temporary monkey patch:
-    Injects processing_node=WEBODM_NODE_ID into ONLY the task-create request,
-    without changing your WebODMProcessor module permanently.
+    Injects processing_node=WEBODM_NODE_ID into ONLY the task-create request.
     """
     from modules import WebODMProcessor
 
