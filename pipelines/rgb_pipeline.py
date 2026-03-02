@@ -547,62 +547,161 @@ class RGBPipeline:
             if cached_dir is not None:
                 self._cleanup_upload_cache(cached_dir, logger)
 
+
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
         logger.info("Stage: Quality Gate Check")
 
         survey_id = self.survey_id or "?"
-        retries = 0
-        max_retries = 3
+        max_restarts = 3
+        restarts = 0
+
+        web = self.state.get("webodm") or {}
+        project_id = web.get("project_id")
+
+        if not project_id:
+            raise RuntimeError("Quality gate cannot run: missing webodm.project_id in pipeline state.")
+
+        task1 = web.get("task1") or {}
+        task2 = web.get("task2") or {}
+
+        if not task1.get("id") and not task2.get("id"):
+            raise RuntimeError("Quality gate cannot run: missing webodm task ids (task1/task2).")
+
+        allowed_stages = {"load_dataset", "structure_from_motion", "multi_view_stereo", "texturing"}
+
+        def _pick_default_task() -> tuple[str, str]:
+            """Default QA target: task2 if present else task1."""
+            if task2.get("id"):
+                return str(task2["id"]), str(task2.get("name") or "task2")
+            return str(task1["id"]), str(task1.get("name") or "task1")
+
+        def restart_and_wait(task_id_to_restart: str, task_name_to_restart: str, restart_from: str) -> Dict[str, Any]:
+            nonlocal restarts, web, task1, task2
+
+            restarts += 1
+            if restarts > max_restarts:
+                logger.error("Maximum WebODM restart attempts exceeded.")
+                return {"passed": False, "restarts": restarts, "reason": "max_restarts_exceeded"}
+
+            webodm_cfg = self.config["webodm"]
+            processor = WebODMProcessor(
+                url=webodm_cfg["url"],
+                username=webodm_cfg["username"],
+                password=webodm_cfg["password"],
+                logger=self.loggers["webodm"],
+            )
+
+            logger.warning(
+                f"Requesting WebODM internal restart | project_id={project_id} task_id={task_id_to_restart} "
+                f"restart_from={restart_from} | attempt {restarts}/{max_restarts}"
+            )
+
+            processor.restart_task(project_id=int(project_id), task_id=str(task_id_to_restart), restart_from=restart_from)
+
+            success, runtime, task_info = processor.wait_for_completion(int(project_id), str(task_id_to_restart))
+
+            updated_task_state = {
+                "id": str(task_id_to_restart),
+                "name": task_name_to_restart,
+                "success": bool(success),
+                "runtime_seconds": float(runtime),
+                "restart_from": restart_from,
+                "restart_attempt": restarts,
+                "status": task_info.get("status"),
+            }
+
+            # Write back into state
+            if task2.get("id") and str(task2.get("id")) == str(task_id_to_restart):
+                task2.update(updated_task_state)
+                web["task2"] = task2
+            elif task1.get("id") and str(task1.get("id")) == str(task_id_to_restart):
+                task1.update(updated_task_state)
+                web["task1"] = task1
+
+            self.state["webodm"] = web
+            return {"passed": None, "restarts": restarts, "task": updated_task_state}
 
         while True:
+            # refresh local refs in case they changed
+            web = self.state.get("webodm") or {}
+            task1 = web.get("task1") or {}
+            task2 = web.get("task2") or {}
+
+            default_task_id, default_task_name = _pick_default_task()
+
             print("\n=========== QUALITY GATE ===========")
             print(f"Survey: {survey_id}")
-            print("Have you finished inspecting the outputs in WebODM?")
-            print("Type:")
-            print("  yes      -> Proceed")
-            print("  restart  -> Re-run WebODM from load dataset (new project suffix)")
-            print("  fail     -> Mark pipeline as failed")
+            print(f"Project ID: {project_id}")
+            print(f"Task1: {task1.get('name')} (id={task1.get('id')})")
+            print(f"Task2: {task2.get('name')} (id={task2.get('id')})")
+            print("\nInspect outputs in WebODM dashboard.")
+            print("Commands:")
+            print("  yes                         -> Proceed")
+            print("  fail                        -> Mark pipeline as failed")
+            print("  restart                      -> Restart QA task from load_dataset (Task2 if exists else Task1)")
+            print("  restart t1                   -> Restart Task1 from load_dataset")
+            print("  restart t2                   -> Restart Task2 from load_dataset")
+            print("  restart t1 <stage>           -> Restart Task1 from stage")
+            print("  restart t2 <stage>           -> Restart Task2 from stage")
+            print("\nStages:")
+            print("  load_dataset | structure_from_motion | multi_view_stereo | texturing")
             print("====================================\n")
 
-            answer = input("Your decision (yes/restart/fail): ").strip().lower()
+            raw = input("Your decision: ").strip().lower()
 
-            if answer in ("yes", "y"):
+            if raw in ("yes", "y"):
                 logger.info("Quality gate PASSED by user.")
-                # clear suffix after pass (optional)
-                self.state.pop("webodm_project_suffix", None)
-                return {"passed": True, "retries": retries}
+                return {"passed": True, "restarts": restarts, "project_id": project_id}
 
-            if answer in ("fail", "f"):
+            if raw in ("fail", "f"):
                 logger.warning("Quality gate FAILED by user.")
-                return {"passed": False, "retries": retries}
+                return {"passed": False, "restarts": restarts, "project_id": project_id}
 
-            if answer in ("restart", "r"):
-                retries += 1
-
-                if retries > max_retries:
-                    logger.error("Maximum restart attempts exceeded.")
-                    return {
-                        "passed": False,
-                        "retries": retries,
-                        "reason": "max_retries_exceeded",
-                    }
-
-                # Force a unique project name on each restart
-                self.state["webodm_project_suffix"] = f"--R{retries}"
-                logger.warning(f"Restarting WebODM from load dataset (attempt {retries}/{max_retries})")
-
-                # Reset webodm state first (avoid confusion)
-                self.state.pop("webodm", None)
-
-                # Re-run WebODM stage (fresh project + upload)
-                new_web_state = self.stage_webodm()
-                self.state["webodm"] = new_web_state
-
-                # Ask again
+            # default restart (QA task)
+            if raw == "restart":
+                res = restart_and_wait(default_task_id, default_task_name, "load_dataset")
+                if res.get("passed") is False:
+                    return res
                 continue
 
-            print("Invalid input. Please type: yes, restart, or fail.")
+            # restart with target/stage
+            if raw.startswith("restart "):
+                parts = raw.split()
+                # restart t1
+                # restart t2
+                # restart t1 texturing
+                # restart t2 load_dataset
+                if len(parts) not in (2, 3):
+                    print("Invalid format. Use: restart | restart t1|t2 | restart t1|t2 <stage>")
+                    continue
+
+                target = parts[1]
+                stage = parts[2] if len(parts) == 3 else "load_dataset"
+
+                if target not in ("t1", "t2"):
+                    print("Invalid target. Use t1 or t2.")
+                    continue
+
+                if stage not in allowed_stages:
+                    print(f"Invalid stage '{stage}'. Use one of: {', '.join(sorted(allowed_stages))}")
+                    continue
+
+                chosen = task1 if target == "t1" else task2
+                if not chosen or not chosen.get("id"):
+                    print(f"{target} does not exist for this run.")
+                    continue
+
+                tid = str(chosen["id"])
+                tname = str(chosen.get("name") or target)
+
+                res = restart_and_wait(tid, tname, stage)
+                if res.get("passed") is False:
+                    return res
+                continue
+
+            print("Invalid input. Use: yes | fail | restart | restart t1|t2 [stage]")
+
 
     def _log_summary(self):
         p = self.loggers["pipeline"]

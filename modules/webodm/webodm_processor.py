@@ -465,3 +465,53 @@ def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]
             pass
 
     return None
+
+def restart_task(
+    self,
+    project_id: int,
+    task_id: str,
+    restart_from: str = "load_dataset",
+) -> dict:
+    """
+    Restart an existing WebODM task from a processing stage WITHOUT re-uploading images.
+
+    Common restart_from values (depends on WebODM version/build):
+      - "load_dataset"
+      - "structure_from_motion"
+      - "multi_view_stereo"
+      - "texturing"
+
+    Returns JSON response (if any).
+    """
+    self.logger.warning(f"Restarting WebODM task {task_id} from '{restart_from}'")
+
+    url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/restart/"
+
+    # WebODM typically expects JSON. Some builds accept form data.
+    payload_json = {"restart_from": restart_from}
+    payload_form = {"restart_from": restart_from}
+
+    # Try JSON first
+    resp = self.session.post(
+        url,
+        headers=self.headers,
+        json=payload_json,
+        timeout=60,
+    )
+
+    # If backend doesn't like JSON, retry with form data once
+    if resp.status_code in (400, 415):
+        self.logger.warning(f"Restart JSON payload rejected (status={resp.status_code}). Retrying as form-data...")
+        resp = self.session.post(
+            url,
+            headers=self.headers,
+            data=payload_form,
+            timeout=60,
+        )
+
+    resp.raise_for_status()
+
+    try:
+        return resp.json()
+    except Exception:
+        return {"ok": True, "status_code": resp.status_code}
