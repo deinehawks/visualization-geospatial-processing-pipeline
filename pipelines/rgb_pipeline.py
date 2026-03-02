@@ -441,12 +441,9 @@ class RGBPipeline:
         # Guarantee cache is local by defaulting to TEMP.
         # Optional env/config override: config["paths"]["upload_cache_root"] if you add it later.
         upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
-
-        if upload_cache_root_cfg:
-            local_root = Path(upload_cache_root_cfg)
-        else:
-            # fallback: first try ENV directly, then TEMP
-            local_root = Path(os.getenv("UPLOAD_CACHE_ROOT") or os.getenv("TEMP", r"C:\temp"))
+        if not upload_cache_root_cfg:
+            upload_cache_root_cfg = os.getenv("UPLOAD_CACHE_ROOT")
+        local_root = Path(upload_cache_root_cfg) if upload_cache_root_cfg else Path(os.getenv("TEMP", r"C:\temp"))
 
         cache_root = local_root / "automation-pipeline" / "upload_cache" / self.run_id
 

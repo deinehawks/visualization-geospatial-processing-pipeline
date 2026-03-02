@@ -21,6 +21,7 @@ def force_webodm_node2():
     """
     Temporary monkey patch:
     Injects processing_node=WEBODM_NODE_ID into ONLY the task-create request.
+    Safe with MultipartEncoder/MultipartEncoderMonitor (streaming uploads).
     """
     from modules import WebODMProcessor
 
@@ -31,11 +32,36 @@ def force_webodm_node2():
 
         def patched_post(url, *args, **kwargs):
             if f"/api/projects/{project_id}/tasks/" in url:
-                data = kwargs.get("data") or {}
-                if not isinstance(data, dict):
-                    data = dict(data)
-                data["processing_node"] = str(WEBODM_NODE_ID)
-                kwargs["data"] = data
+                data = kwargs.get("data")
+
+                # Case 1: normal dict
+                if isinstance(data, dict) or data is None:
+                    data = data or {}
+                    data["processing_node"] = str(WEBODM_NODE_ID)
+                    kwargs["data"] = data
+                    return original_post(url, *args, **kwargs)
+
+                # Case 2: list/tuple pairs (convertible)
+                if isinstance(data, (list, tuple)):
+                    try:
+                        d = dict(data)
+                        d["processing_node"] = str(WEBODM_NODE_ID)
+                        kwargs["data"] = d
+                        return original_post(url, *args, **kwargs)
+                    except Exception:
+                        # fall through to Case 3
+                        pass
+
+                # Case 3: MultipartEncoder / MultipartEncoderMonitor (NOT iterable)
+                # They usually have .fields which is a dict-like mapping of form fields.
+                if hasattr(data, "fields") and isinstance(getattr(data, "fields"), dict):
+                    data.fields["processing_node"] = str(WEBODM_NODE_ID)
+                    kwargs["data"] = data
+                    return original_post(url, *args, **kwargs)
+
+                # Unknown data type: don't touch it (avoid breaking uploads)
+                return original_post(url, *args, **kwargs)
+
             return original_post(url, *args, **kwargs)
 
         self.session.post = patched_post
