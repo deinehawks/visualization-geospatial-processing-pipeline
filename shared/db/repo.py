@@ -24,13 +24,22 @@ class PipelineRepo:
     - survey_id can be attached to a run later.
     """
 
-    def __init__(self, db_file: Path):
-        self.db_file = Path(db_file)
-        self._init_db()
+    def _ensure_column(conn, table: str, column: str, coltype: str) -> None:
+        rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
+        existing_cols = [r["name"] for r in rows]  
+        if column not in existing_cols:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
+
 
     def _init_db(self) -> None:
         with connect(self.db_file) as conn:
             conn.executescript(SCHEMA_SQL)
+
+            # ---- migrations for older DBs ----
+            _ensure_column(conn, "runs", "paused_at", "TEXT")
+            _ensure_column(conn, "runs", "paused_after_stage", "TEXT")
+            _ensure_column(conn, "runs", "pause_reason", "TEXT")
+
             conn.commit()
 
     # ============================================================
@@ -52,7 +61,10 @@ class PipelineRepo:
                 INSERT INTO runs (run_id, status, started_at, source_dir, surveys_root, year)
                 VALUES (?, 'running', ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
-                    status='running',
+                    status=CASE
+                        WHEN runs.status='paused' THEN 'paused'
+                        ELSE 'running'
+                    END,
                     started_at=COALESCE(runs.started_at, excluded.started_at),
                     source_dir=COALESCE(excluded.source_dir, runs.source_dir),
                     surveys_root=COALESCE(excluded.surveys_root, runs.surveys_root),
@@ -100,6 +112,44 @@ class PipelineRepo:
                 (run_id,),
             ).fetchone()
             return dict(row) if row else None
+        
+    def mark_run_paused(
+        self,
+        run_id: str,
+        *,
+        paused_after_stage: str = "",
+        reason: str = "pause_flag",
+    ) -> None:
+        now = utc_now_iso()
+        with connect(self.db_file) as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET status='paused',
+                    paused_at=?,
+                    paused_after_stage=?,
+                    pause_reason=?
+                WHERE run_id=?
+                """,
+                (now, paused_after_stage, reason, run_id),
+            )
+            conn.commit()
+
+
+    def mark_run_running(self, run_id: str) -> None:
+        with connect(self.db_file) as conn:
+            conn.execute(
+                """
+                UPDATE runs
+                SET status='running',
+                    paused_at=NULL,
+                    paused_after_stage=NULL,
+                    pause_reason=NULL
+                WHERE run_id=?
+                """,
+                (run_id,),
+            )
+            conn.commit()
 
     # ============================================================
     # SURVEYS (optional, for survey-level analytics)

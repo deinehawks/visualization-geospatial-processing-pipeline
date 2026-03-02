@@ -201,6 +201,40 @@ class RGBPipeline:
             logger.exception(f"Failed to clean upload cache: {cache_dir}")
 
     # ============================================================
+    # Pause helpers
+    # ============================================================
+
+    def _pause_flag_path(self) -> Path:
+        # put it inside base_dir so it works anywhere you run the project
+        return self.base_dir / "data" / "pause.flag"
+
+    def _should_pause(self) -> bool:
+        return self._pause_flag_path().exists()
+
+    def _check_pause_or_raise(self, stage_name: str) -> None:
+        """
+        If pause.flag exists, mark run as paused and stop execution gracefully.
+        """
+        if not self._should_pause():
+            return
+
+        reason = f"pause.flag detected before stage '{stage_name}'"
+        self.loggers["pipeline"].warning(f"⏸ PAUSE  | {reason}")
+
+        # mark run paused in DB (requires repo methods you added earlier)
+        try:
+            self.repo.mark_run_paused(
+                self.run_id,
+                paused_after_stage=stage_name,
+                reason="pause_flag",
+            )
+        except Exception:
+            self.loggers["pipeline"].exception("Failed to mark run as paused in DB")
+
+        # raise a special exception that we handle in run()
+        raise RuntimeError("__PIPELINE_PAUSED__")
+
+    # ============================================================
     # STAGES
     # ============================================================
 
@@ -735,10 +769,23 @@ class RGBPipeline:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_logger.info(f"Starting RGB Pipeline | run_id={self.run_id}")
 
+        # If this run was previously paused, explicitly mark it running again
+        # (only if you implemented repo.mark_run_running)
+        try:
+            r = self.repo.get_run(self.run_id)
+            if r and r.get("status") == "paused":
+                self.repo.mark_run_running(self.run_id)
+                pipeline_logger.info("Resuming paused run -> status set to running")
+        except Exception:
+            pipeline_logger.exception("Failed while attempting to resume paused run")
+
         total_start = time.perf_counter()
         force_stages = force_stages or set()
 
         try:
+            # ---- Pause checkpoints (before each stage) ----
+            self._check_pause_or_raise("data_segregation")
+
             self.runner.run(
                 "data_segregation",
                 self.stage_data_segregation,
@@ -746,6 +793,8 @@ class RGBPipeline:
                 state=self.state,
                 force=("data_segregation" in force_stages) or (not resume),
             )
+
+            self._check_pause_or_raise("cross_run_filter")
 
             self.runner.run(
                 "cross_run_filter",
@@ -755,6 +804,8 @@ class RGBPipeline:
                 force=("cross_run_filter" in force_stages) or (not resume),
             )
 
+            self._check_pause_or_raise("kml_boundary")
+
             self.runner.run(
                 "kml_boundary",
                 self.stage_kml_boundary,
@@ -763,6 +814,8 @@ class RGBPipeline:
                 force=("kml_boundary" in force_stages) or (not resume),
             )
 
+            self._check_pause_or_raise("webodm")
+
             self.runner.run(
                 "webodm",
                 self.stage_webodm,
@@ -770,6 +823,8 @@ class RGBPipeline:
                 state=self.state,
                 force=("webodm" in force_stages) or (not resume),
             )
+
+            self._check_pause_or_raise("quality_gate")
 
             self.runner.run(
                 "quality_gate",
@@ -795,7 +850,30 @@ class RGBPipeline:
             pipeline_logger.info(f"RGB Pipeline finished | run_id={self.run_id} | success=True")
             return self.state
 
+        except RuntimeError as e:
+            # Special pause stop (NOT a failure)
+            if str(e) == "__PIPELINE_PAUSED__":
+                self.state["success"] = False
+                self.state["paused"] = True
+                self.state["error"] = "paused_by_flag"
+                pipeline_logger.warning(f"RGB Pipeline paused | run_id={self.run_id}")
+                return self.state
+
+            # Normal runtime errors -> failure
+            self.state["success"] = False
+            self.state["error"] = str(e)
+
+            total_runtime = time.perf_counter() - total_start
+            self.repo.mark_run_finished(self.run_id, success=False, total_runtime_seconds=total_runtime)
+
+            if self.survey_id:
+                self.repo.mark_survey_finished(self.survey_id, success=False, total_runtime_seconds=total_runtime)
+
+            pipeline_logger.exception(f"RGB Pipeline failed | run_id={self.run_id}")
+            return self.state
+
         except Exception as e:
+            # Any other exception -> failure
             self.state["success"] = False
             self.state["error"] = str(e)
 
