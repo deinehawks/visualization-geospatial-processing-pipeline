@@ -265,15 +265,9 @@ class WebODMProcessor:
     
     @staticmethod
     def _normalize_status(raw_status) -> tuple[str, bool]:
-        """
-        Returns (label, is_terminal)
+        if raw_status is None:
+            return "queued", False
 
-        WebODM can return:
-        - int codes (e.g., 40)
-        - dict with label/name
-        - string labels
-        """
-        # Most common numeric status codes in WebODM/NodeODM integrations
         code_map = {
             10: "created",
             20: "queued",
@@ -283,25 +277,23 @@ class WebODMProcessor:
             60: "canceled",
         }
 
-        # int status
         if isinstance(raw_status, int):
             label = code_map.get(raw_status, f"status_{raw_status}")
             return label, label in ("completed", "failed", "canceled")
 
-        # sometimes float (rare)
         if isinstance(raw_status, float) and raw_status.is_integer():
             label = code_map.get(int(raw_status), f"status_{int(raw_status)}")
             return label, label in ("completed", "failed", "canceled")
 
-        # dict status (some versions)
         if isinstance(raw_status, dict):
             label = raw_status.get("label") or raw_status.get("name") or raw_status.get("code")
             if label is None:
                 return "unknown", False
-            label = str(label).lower()
-            return label, label in ("completed", "failed", "canceled", "cancelled")
+            label = str(label).lower().strip()
+            if label == "cancelled":
+                label = "canceled"
+            return label, label in ("completed", "failed", "canceled")
 
-        # string status
         if isinstance(raw_status, str):
             label = raw_status.lower().strip()
             if label == "cancelled":
@@ -351,7 +343,12 @@ class WebODMProcessor:
             task = self.get_task(project_id, task_id)
 
             raw_status = task.get("status")
-            status, is_terminal = self._normalize_status(raw_status)
+            # If WebODM returns status=None early, use pending_action as a nicer label
+            if raw_status is None:
+                pending = (task.get("pending_action") or "").strip()
+                status, is_terminal = ((pending.lower() if pending else "queued"), False)
+            else:
+                status, is_terminal = self._normalize_status(raw_status)
 
             progress = task.get("progress")
             processing_time = task.get("processing_time")
