@@ -522,7 +522,7 @@ class RGBPipeline:
                 image_folder=str(upload_folder),
                 options=task1_options,
             )
-            t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
+            t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, current_task_id, live=True)
 
             result: Dict[str, Any] = {
                 "project_id": project_id,
@@ -589,7 +589,7 @@ class RGBPipeline:
                 image_folder=str(upload_folder),
                 options=task2_options,
             )
-            t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
+            t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, current_task_id, live=True)
 
             result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
             result["boundary_used"] = True

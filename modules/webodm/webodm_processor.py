@@ -218,133 +218,125 @@ class WebODMProcessor:
         project_id: int,
         task_id: str,
         poll_seconds: int = 10,
-        heartbeat_seconds: int = 300,
+        *,
+        live: bool = True,
+        log_every_seconds: int = 600,     # write a normal log line every 10 minutes
+        pt_log_step_seconds: int = 300,   # only log processing_time when it jumps by >= 5 minutes
     ) -> Tuple[bool, float, dict]:
         """
         Poll until task is completed/failed/canceled.
 
-        WebODM 'status' can be:
-        - int codes (common): 40=completed, 50=failed, 60=canceled
-        - dict with a 'label' (some builds)
-        - string labels
-
-        This version:
-        - normalizes status robustly
-        - logs only on change + periodic heartbeat
-        - logs progress if meaningful, otherwise logs processing_time/upload_progress deltas
+        Improvements:
+        - Optional live single-line terminal output (no log spam)
+        - Throttled logs: only on status change + periodic checkpoints
+        - processing_time logs only when it advances by pt_log_step_seconds
         """
-
-        def _normalize_status(raw_status: Any) -> tuple[str, bool]:
-            code_map = {
-                10: "created",
-                20: "queued",
-                30: "running",
-                40: "completed",
-                50: "failed",
-                60: "canceled",
-            }
-
-            # int status
-            if isinstance(raw_status, int):
-                label = code_map.get(raw_status, f"status_{raw_status}")
-                return label, label in ("completed", "failed", "canceled")
-
-            # float-but-integer status (rare)
-            if isinstance(raw_status, float) and raw_status.is_integer():
-                label = code_map.get(int(raw_status), f"status_{int(raw_status)}")
-                return label, label in ("completed", "failed", "canceled")
-
-            # dict status
-            if isinstance(raw_status, dict):
-                label = raw_status.get("label") or raw_status.get("name") or raw_status.get("code")
-                if label is None:
-                    return "unknown", False
-                label = str(label).lower().strip()
-                if label == "cancelled":
-                    label = "canceled"
-                return label, label in ("completed", "failed", "canceled")
-
-            # string status
-            if isinstance(raw_status, str):
-                label = raw_status.lower().strip()
-                if label == "cancelled":
-                    label = "canceled"
-                return label, label in ("completed", "failed", "canceled")
-
-            return "unknown", False
-
         start = time.time()
 
         last_status: Optional[str] = None
         last_progress: Optional[float] = None
-        last_processing_time: Optional[float] = None
         last_upload_progress: Optional[float] = None
-        last_heartbeat = 0.0
+        last_processing_time_bucket: Optional[int] = None
+        last_checkpoint = 0.0  # elapsed seconds
+        last_line_len = 0
+
+        def _emit_live(line: str) -> None:
+            """Write one updating line to stdout (TTY only)."""
+            nonlocal last_line_len
+            try:
+                # pad with spaces to fully overwrite previous line
+                pad = " " * max(0, last_line_len - len(line))
+                print("\r" + line + pad, end="", flush=True)
+                last_line_len = len(line)
+            except Exception:
+                # if stdout isn't writable for some reason, silently ignore
+                pass
+
+        def _finalize_live() -> None:
+            """End the live line with newline."""
+            if live:
+                try:
+                    print()  # newline
+                except Exception:
+                    pass
 
         while True:
             task = self.get_task(project_id, task_id)
 
             raw_status = task.get("status")
-            status, is_terminal = _normalize_status(raw_status)
+            status, is_terminal = self._normalize_status(raw_status)
 
-            progress = task.get("progress")  # often stuck at 0
-            processing_time = task.get("processing_time")  # often more reliable than progress
+            progress = task.get("progress")
+            processing_time = task.get("processing_time")
             upload_progress = task.get("upload_progress")
             images_count = task.get("images_count")
 
             elapsed = time.time() - start
-            changed = False
 
+            # ---- live UI (updates every poll, but does not flood logs) ----
+            if live:
+                pt_txt = f"pt={int(processing_time)}s" if isinstance(processing_time, (int, float)) else "pt=?"
+                up_txt = f"up={float(upload_progress):.0f}%" if isinstance(upload_progress, (int, float)) else ""
+                pr_txt = f"p={float(progress):.0f}%" if isinstance(progress, (int, float)) else ""
+                imgs_txt = f"{images_count} imgs" if images_count is not None else ""
+                parts = [f"WebODM {status.upper()}", imgs_txt, self.fmt_elapsed(elapsed), pt_txt, up_txt, pr_txt]
+                line = " | ".join([p for p in parts if p])
+                _emit_live(line)
+
+            # ---- log only when status changes ----
             if status != last_status:
                 self.logger.info(
                     f"WebODM status: {status.upper()} (raw={raw_status}) | elapsed={self.fmt_elapsed(elapsed)}"
                 )
                 last_status = status
-                changed = True
 
-            # Log percent only if it's numeric and actually changes AND not always 0
-            if isinstance(progress, (int, float)):
-                prog_val = float(progress)
-                if last_progress is None or prog_val != last_progress:
-                    # still log 0 once (for visibility), but not spam
-                    self.logger.info(f"WebODM progress: {prog_val:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
-                    last_progress = prog_val
-                    changed = True
-
-            # Fallback: processing_time changes (usually best signal)
+            # ---- throttle processing_time logs by bucket ----
             if isinstance(processing_time, (int, float)):
-                pt = float(processing_time)
-                if last_processing_time is None or pt != last_processing_time:
+                pt = int(float(processing_time))
+                bucket = pt // int(pt_log_step_seconds)
+                if last_processing_time_bucket is None:
+                    last_processing_time_bucket = bucket
+                elif bucket > last_processing_time_bucket:
+                    # Only log each bucket jump (ex: every +300s)
                     self.logger.info(
-                        f"WebODM processing_time: {int(pt)}s"
+                        f"WebODM processing_time: {pt}s"
                         + (f" | images={images_count}" if images_count is not None else "")
                         + f" | elapsed={self.fmt_elapsed(elapsed)}"
                     )
-                    last_processing_time = pt
-                    changed = True
+                    last_processing_time_bucket = bucket
 
-            # Upload progress changes (useful during upload / preprocessing)
+            # ---- progress logs: only if it changes meaningfully (and not always 0) ----
+            if isinstance(progress, (int, float)):
+                prog_val = float(progress)
+                # only log when it changes by >= 1%
+                if last_progress is None or abs(prog_val - last_progress) >= 1.0:
+                    self.logger.info(f"WebODM progress: {prog_val:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    last_progress = prog_val
+
             if isinstance(upload_progress, (int, float)):
                 up = float(upload_progress)
-                if last_upload_progress is None or up != last_upload_progress:
+                if last_upload_progress is None or abs(up - last_upload_progress) >= 5.0:
                     self.logger.info(f"WebODM upload_progress: {up:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
                     last_upload_progress = up
-                    changed = True
 
-            # Optional: surface errors/messages if present and non-empty
+            # ---- periodic checkpoint log (for long runs) ----
+            if (elapsed - last_checkpoint) >= float(log_every_seconds):
+                self.logger.info(f"WebODM checkpoint | status={status} | elapsed={self.fmt_elapsed(elapsed)}")
+                last_checkpoint = elapsed
+
+            # ---- optional message (only on status change or checkpoint-ish) ----
             msg = task.get("message") or task.get("last_error") or ""
             if isinstance(msg, str) and msg.strip():
-                # don't spam: only print when status changes or on heartbeat
-                if changed:
+                # only print with checkpoints or when status changes already triggered
+                if (elapsed - last_checkpoint) < 1e-6 or status != last_status:
                     self.logger.info(f"WebODM message: {msg.strip()}")
 
-            # heartbeat if nothing changed for a while
-            if not changed and (elapsed - last_heartbeat) >= heartbeat_seconds:
-                self.logger.info(f"WebODM still running... | elapsed={self.fmt_elapsed(elapsed)}")
-                last_heartbeat = elapsed
-
             if is_terminal:
+                _finalize_live()
                 success = status == "completed"
+                self.logger.info(
+                    f"WebODM finished: {status.upper()} | elapsed={self.fmt_elapsed(elapsed)} | task_id={task_id}"
+                )
                 return success, elapsed, task
 
             time.sleep(poll_seconds)
@@ -440,6 +432,56 @@ class WebODMProcessor:
 
         self.logger.info(f"Summary saved to: {csv_file}")
 
+    def restart_task(
+        self,
+        project_id: int,
+        task_id: str,
+        restart_from: str = "load_dataset",
+    ) -> dict:
+        """
+        Restart an existing WebODM task from a processing stage WITHOUT re-uploading images.
+
+        Common restart_from values (depends on WebODM version/build):
+        - "load_dataset"
+        - "structure_from_motion"
+        - "multi_view_stereo"
+        - "texturing"
+
+        Returns JSON response (if any).
+        """
+        self.logger.warning(f"Restarting WebODM task {task_id} from '{restart_from}'")
+
+        url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/restart/"
+
+        # WebODM typically expects JSON. Some builds accept form data.
+        payload_json = {"restart_from": restart_from}
+        payload_form = {"restart_from": restart_from}
+
+        # Try JSON first
+        resp = self.session.post(
+            url,
+            headers=self.headers,
+            json=payload_json,
+            timeout=60,
+        )
+
+        # If backend doesn't like JSON, retry with form data once
+        if resp.status_code in (400, 415):
+            self.logger.warning(f"Restart JSON payload rejected (status={resp.status_code}). Retrying as form-data...")
+            resp = self.session.post(
+                url,
+                headers=self.headers,
+                data=payload_form,
+                timeout=60,
+            )
+
+        resp.raise_for_status()
+
+        try:
+            return resp.json()
+        except Exception:
+            return {"ok": True, "status_code": resp.status_code}
+
 
 def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]:
     folder = Path(folder_path)
@@ -466,52 +508,4 @@ def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]
 
     return None
 
-def restart_task(
-    self,
-    project_id: int,
-    task_id: str,
-    restart_from: str = "load_dataset",
-) -> dict:
-    """
-    Restart an existing WebODM task from a processing stage WITHOUT re-uploading images.
-
-    Common restart_from values (depends on WebODM version/build):
-      - "load_dataset"
-      - "structure_from_motion"
-      - "multi_view_stereo"
-      - "texturing"
-
-    Returns JSON response (if any).
-    """
-    self.logger.warning(f"Restarting WebODM task {task_id} from '{restart_from}'")
-
-    url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/restart/"
-
-    # WebODM typically expects JSON. Some builds accept form data.
-    payload_json = {"restart_from": restart_from}
-    payload_form = {"restart_from": restart_from}
-
-    # Try JSON first
-    resp = self.session.post(
-        url,
-        headers=self.headers,
-        json=payload_json,
-        timeout=60,
-    )
-
-    # If backend doesn't like JSON, retry with form data once
-    if resp.status_code in (400, 415):
-        self.logger.warning(f"Restart JSON payload rejected (status={resp.status_code}). Retrying as form-data...")
-        resp = self.session.post(
-            url,
-            headers=self.headers,
-            data=payload_form,
-            timeout=60,
-        )
-
-    resp.raise_for_status()
-
-    try:
-        return resp.json()
-    except Exception:
-        return {"ok": True, "status_code": resp.status_code}
+ 
