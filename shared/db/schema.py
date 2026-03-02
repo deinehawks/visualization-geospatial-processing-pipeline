@@ -81,6 +81,11 @@ CREATE TABLE IF NOT EXISTS webodm_tasks (
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    id TEXT PRIMARY KEY,
+    applied_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_webodm_tasks_run
 ON webodm_tasks(run_id);
 """

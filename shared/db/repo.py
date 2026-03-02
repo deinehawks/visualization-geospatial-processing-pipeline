@@ -23,23 +23,23 @@ class PipelineRepo:
     - stages reference runs.run_id (FK-safe even before survey_id exists)
     - survey_id can be attached to a run later.
     """
-
+    
+    @staticmethod
     def _ensure_column(conn, table: str, column: str, coltype: str) -> None:
         rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
-        existing_cols = [r["name"] for r in rows]  
+        existing_cols = [r["name"] for r in rows]
         if column not in existing_cols:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
-
 
     def _init_db(self) -> None:
         with connect(self.db_file) as conn:
             conn.executescript(SCHEMA_SQL)
 
             # ---- migrations for older DBs ----
-            _ensure_column(conn, "runs", "paused_at", "TEXT")
-            _ensure_column(conn, "runs", "paused_after_stage", "TEXT")
-            _ensure_column(conn, "runs", "pause_reason", "TEXT")
-
+            self._ensure_column(conn, "runs", "paused_at", "TEXT")
+            self._ensure_column(conn, "runs", "paused_after_stage", "TEXT")
+            self._ensure_column(conn, "runs", "pause_reason", "TEXT")
+            self._run_migrations(conn)
             conn.commit()
 
     # ============================================================
@@ -183,6 +183,39 @@ class PipelineRepo:
                 (status, now, total_runtime_seconds, survey_id),
             )
             conn.commit()
+
+    # ============================================================
+    # Migration Runner
+    # ============================================================
+
+    def _has_migration(self, conn, migration_id: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE id=? LIMIT 1",
+            (migration_id,),
+        ).fetchone()
+        return row is not None
+
+
+    def _mark_migration(self, conn, migration_id: str) -> None:
+        conn.execute(
+            "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
+            (migration_id, utc_now_iso()),
+        )
+
+
+    def _run_migrations(self, conn) -> None:
+        # import here to avoid circular import issues
+        from .migrations.m001_add_run_pause_columns import MIGRATION_ID, apply
+
+        migrations = [
+            (MIGRATION_ID, apply),
+        ]
+
+        for mid, fn in migrations:
+            if self._has_migration(conn, mid):
+                continue
+            fn(conn)
+            self._mark_migration(conn, mid)
 
     # ============================================================
     # STAGES (run_id-based)
