@@ -22,11 +22,29 @@ from __future__ import annotations
 import math
 import shutil
 import logging
+import time
 from pathlib import Path
 from statistics import mean, stdev
 from typing import Dict, List, Optional, Tuple, Set
 
 import exifread
+
+
+# ---------------- pretty logging helpers ---------------- #
+
+def _banner(logger: logging.Logger, title: str) -> None:
+    logger.info("")
+    logger.info("=" * 52)
+    logger.info(title)
+    logger.info("=" * 52)
+
+
+def _step(logger: logging.Logger, idx: int, title: str) -> None:
+    logger.info(f"[STEP {idx}] {title} ...")
+
+
+def _ok(logger: logging.Logger, msg: str) -> None:
+    logger.info(f"  ✓ {msg}")
 
 
 # ---------------- EXIF / GPS ---------------- #
@@ -141,7 +159,6 @@ def calculate_adaptive_parameters(
             "median_distance": float(sorted_distances[len(sorted_distances)//2]) if sorted_distances else 0.0,
             "cv_distance": 0.0,
         }
-        logger.info("Adaptive parameters: not enough data, using defaults")
         return params
 
     median_dist = sorted_distances[len(sorted_distances) // 2]
@@ -178,7 +195,7 @@ def calculate_adaptive_parameters(
     else:
         bridge_gap = 1
 
-    params = {
+    return {
         "cluster_ratio": float(cluster_ratio),
         "normal_distance_ratio": float(normal_distance_ratio),
         "aggressive_distance_ratio": float(aggressive_distance_ratio),
@@ -186,14 +203,6 @@ def calculate_adaptive_parameters(
         "median_distance": float(median_dist),
         "cv_distance": float(cv_dist),
     }
-
-    logger.info(
-        "Adaptive parameters | "
-        f"cv={cv_dist:.2f} median_dist={median_dist:.2f}m "
-        f"cluster_ratio={cluster_ratio:.2f} normal_ratio={normal_distance_ratio:.2f} "
-        f"aggressive_ratio={aggressive_distance_ratio:.2f} bridge_gap={bridge_gap}"
-    )
-    return params
 
 
 def calculate_typical_distance(distances: List[float]) -> Optional[float]:
@@ -211,6 +220,8 @@ def calculate_typical_distance(distances: List[float]) -> Optional[float]:
 def detect_cross_runs_adaptive(
     metrics: List[Tuple[str, float, float]],
     logger: logging.Logger,
+    *,
+    verbose: bool = False,  # <--- keep False for clean terminal output
 ) -> Tuple[List[str], Dict[str, float]]:
     """Detect cross-runs using distribution analysis of bearing changes."""
     if len(metrics) < 3:
@@ -272,17 +283,22 @@ def detect_cross_runs_adaptive(
 
     threshold = max(threshold, 40.0)
 
+    cross_runs = [fname for fname, _, bc in metrics if bc > threshold]
+
+    # clean terminal summary
     logger.info(
         "Cross-run detection | "
+        f"method={selected_method} threshold={threshold:.2f}° "
         f"avg={avg_change:.2f}° median={median_change:.2f}° std={std_change:.2f}° "
         f"p75={p75:.2f}° p85={p85:.2f}° p90={p90:.2f}° p95={p95:.2f}° "
-        f"method={selected_method} threshold={threshold:.2f}°"
+        f"detected={len(cross_runs)}"
     )
 
-    cross_runs = [fname for fname, _, bc in metrics if bc > threshold]
-    for fname, dist, bc in metrics:
-        if bc > threshold:
-            logger.info(f"Detect cross-run: {fname} | bearing_change={bc:.2f}° dist={dist:.2f}m")
+    # optional verbose per-image debug
+    if verbose and cross_runs:
+        for fname, dist, bc in metrics:
+            if bc > threshold:
+                logger.info(f"  cross-run: {fname} | bearing_change={bc:.2f}° dist={dist:.2f}m")
 
     return cross_runs, {"method": selected_method, "threshold": float(threshold)}
 
@@ -316,6 +332,8 @@ def detect_close_clusters(
     min_distance_ratio: float,
     bridge_gap: int,
     logger: logging.Logger,
+    *,
+    verbose: bool = False,  # <--- clean by default
 ) -> Set[str]:
     """Detect clusters of consecutive images too close together. Exclude ALL images in cluster."""
     if typical_distance is None:
@@ -377,6 +395,10 @@ def detect_close_clusters(
         merged_clusters.append(current)
         i += 1
 
+    # clean summary only
+    if merged_clusters:
+        logger.info(f"Close clusters detected: {len(merged_clusters)} cluster(s)")
+
     for cluster in merged_clusters:
         start_idx = file_to_idx[cluster[0]]
         end_idx = file_to_idx[cluster[-1]]
@@ -388,9 +410,11 @@ def detect_close_clusters(
         if end_idx + 1 < len(files_list) and files_list[end_idx + 1] in cross_runs_set:
             expanded.append(files_list[end_idx + 1])
 
-        logger.info(f"Close cluster: {expanded[0]} -> {expanded[-1]} ({len(expanded)} images) excluded")
         for img in expanded:
             cluster_images.add(img)
+
+        if verbose:
+            logger.info(f"  cluster: {expanded[0]} -> {expanded[-1]} ({len(expanded)} images)")
 
     return cluster_images
 
@@ -402,6 +426,8 @@ def filter_close_images(
     min_distance_ratio: float,
     aggressive_ratio: float,
     logger: logging.Logger,
+    *,
+    verbose: bool = False,  # <--- clean by default
 ) -> Set[str]:
     """Exclude images that are too close, with more aggressive threshold in cross-run regions."""
     if typical_distance is None:
@@ -412,7 +438,8 @@ def filter_close_images(
 
     logger.info(
         "Distance thresholds | "
-        f"typical={typical_distance:.2f}m normal={min_distance_normal:.2f}m "
+        f"typical={typical_distance:.2f}m "
+        f"normal={min_distance_normal:.2f}m "
         f"cross_region={min_distance_aggressive:.2f}m"
     )
 
@@ -433,21 +460,24 @@ def filter_close_images(
 
         if dist < threshold:
             too_close.add(fname)
-            logger.info(
-                f"Too close ({'CROSS' if in_cross_region else 'NORMAL'}): {fname} "
-                f"is {dist:.2f}m from {last_kept_name} (< {threshold:.2f}m)"
-            )
+            if verbose:
+                logger.info(
+                    f"  too_close ({'CROSS' if in_cross_region else 'NORMAL'}): {fname} "
+                    f"{dist:.2f}m from {last_kept_name} (< {threshold:.2f}m)"
+                )
         else:
             last_kept_point = gps
             last_kept_name = fname
 
+    # clean summary
+    logger.info(f"Too-close images excluded: {len(too_close)}")
     return too_close
 
 
 def exclude_ranges(files: List[str], cross_runs: List[str], max_gap: int, logger: logging.Logger) -> Set[str]:
     """Exclude ranges between paired cross-runs that are within max_gap images."""
     if len(cross_runs) < 2:
-        logger.info("Range exclusions: <2 cross-runs detected, none applied")
+        logger.info("Range exclusions: none (need >=2 cross-runs)")
         return set()
 
     file_indices = {fname: idx for idx, fname in enumerate(files)}
@@ -460,7 +490,6 @@ def exclude_ranges(files: List[str], cross_runs: List[str], max_gap: int, logger
         end_name = cross_runs[i + 1]
 
         if start_name not in file_indices or end_name not in file_indices:
-            logger.warning(f"Cross-run not found in file list: {start_name} or {end_name}")
             i += 1
             continue
 
@@ -472,14 +501,13 @@ def exclude_ranges(files: List[str], cross_runs: List[str], max_gap: int, logger
         gap = end_idx - start_idx
         if gap <= max_gap:
             pair_count += 1
-            logger.info(f"Exclude range pair {pair_count}: {start_name} -> {end_name} (gap={gap})")
             for idx in range(start_idx, end_idx + 1):
                 excluded.add(files[idx])
             i += 2
         else:
-            logger.info(f"Skip pair: {start_name} -> {end_name} gap={gap} > max_gap={max_gap}")
             i += 1
 
+    logger.info(f"Range exclusion pairs applied: {pair_count} | images_excluded={len(excluded)}")
     return excluded
 
 
@@ -502,7 +530,8 @@ def run_filter(
     max_gap: int = 10,
     cross_run_window: int = 3,
     *,
-    reset_outputs: bool = True,  # prevents “Found 256 images” on re-run
+    reset_outputs: bool = True,
+    verbose: bool = False,  # <--- set True only when debugging
 ) -> Dict[str, object]:
     """
     Pipeline-friendly entry point.
@@ -519,10 +548,8 @@ def run_filter(
     if not input_dir.exists() or not input_dir.is_dir():
         raise FileNotFoundError(f"Input directory does not exist: {input_dir}")
 
-    # standardized excluded folder name
     excluded_dir = output_dir.parent / "cross-runs"
 
-    # resume-safe: clear outputs if rerunning
     if reset_outputs:
         _reset_dir(output_dir)
         _reset_dir(excluded_dir)
@@ -530,10 +557,16 @@ def run_filter(
         output_dir.mkdir(parents=True, exist_ok=True)
         excluded_dir.mkdir(parents=True, exist_ok=True)
 
+    _banner(logger, "CROSS-RUN IMAGE FILTER")
+
     files = sorted([p.name for p in input_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
-    logger.info(f"Cross-run filter: found {len(files)} images in {input_dir}")
+    _ok(logger, f"Found images: {len(files)}")
+    _ok(logger, f"Input: {input_dir}")
+    _ok(logger, f"Kept -> {output_dir}")
+    _ok(logger, f"Excluded -> {excluded_dir}")
 
     # Extract GPS
+    _step(logger, 1, "Extract GPS from EXIF")
     files_with_gps: List[Tuple[str, Tuple[float, float]]] = []
     no_gps_files: List[str] = []
 
@@ -544,35 +577,45 @@ def run_filter(
         else:
             files_with_gps.append((fname, gps))
 
+    _ok(logger, f"Images with GPS: {len(files_with_gps)}")
     if no_gps_files:
-        logger.warning(f"{len(no_gps_files)} image(s) have no GPS and will be kept by default")
+        logger.warning(f"  ! Images without GPS (kept by default): {len(no_gps_files)}")
 
     if len(files_with_gps) < 3:
         raise RuntimeError("Not enough images with GPS data for analysis (need >= 3)")
 
     # Metrics
-    logger.info("Step: calculate distances & bearing changes")
+    _step(logger, 2, "Compute distances & bearing changes")
     metrics = calculate_distances_and_bearings(files_with_gps)
+    _ok(logger, "Metrics computed")
 
     distances = [dist for _, dist, _ in metrics if dist > 0]
     bearing_changes_list = [bc for _, _, bc in metrics if bc > 0]
     typical_distance = calculate_typical_distance(distances)
 
     # Adaptive parameters
-    logger.info("Step: calculate adaptive parameters")
+    _step(logger, 3, "Compute adaptive parameters")
     adaptive_params = calculate_adaptive_parameters(distances, bearing_changes_list, logger)
+    _ok(
+        logger,
+        f"Adaptive params: cluster={adaptive_params['cluster_ratio']:.2f} "
+        f"normal={adaptive_params['normal_distance_ratio']:.2f} "
+        f"aggr={adaptive_params['aggressive_distance_ratio']:.2f} "
+        f"bridge_gap={int(adaptive_params['bridge_gap'])}",
+    )
 
     # Cross-runs
-    logger.info("Step: detect cross-runs")
-    cross_runs, cross_run_stats = detect_cross_runs_adaptive(metrics, logger)
+    _step(logger, 4, "Detect cross-runs")
+    cross_runs, cross_run_stats = detect_cross_runs_adaptive(metrics, logger, verbose=verbose)
+    _ok(logger, f"Cross-runs detected: {len(cross_runs)}")
 
     # Regions
-    logger.info("Step: identify cross-run regions")
+    _step(logger, 5, "Identify cross-run regions")
     cross_run_regions = get_cross_run_regions(files, cross_runs, window_size=cross_run_window)
-    logger.info(f"Cross-run regions: {len(cross_run_regions)} images in region windows")
+    _ok(logger, f"Cross-run region images: {len(cross_run_regions)}")
 
     # Clusters
-    logger.info("Step: detect close clusters")
+    _step(logger, 6, "Detect close clusters")
     close_clusters = detect_close_clusters(
         files_with_gps,
         typical_distance,
@@ -580,10 +623,12 @@ def run_filter(
         min_distance_ratio=float(adaptive_params["cluster_ratio"]),
         bridge_gap=int(adaptive_params["bridge_gap"]),
         logger=logger,
+        verbose=verbose,
     )
+    _ok(logger, f"Cluster exclusions: {len(close_clusters)}")
 
     # Too close
-    logger.info("Step: filter too-close images")
+    _step(logger, 7, "Filter too-close images")
     too_close = filter_close_images(
         files_with_gps,
         typical_distance,
@@ -591,10 +636,11 @@ def run_filter(
         min_distance_ratio=float(adaptive_params["normal_distance_ratio"]),
         aggressive_ratio=float(adaptive_params["aggressive_distance_ratio"]),
         logger=logger,
+        verbose=verbose,
     )
 
     # Range exclusions
-    logger.info("Step: exclude cross-run ranges")
+    _step(logger, 8, "Exclude cross-run ranges")
     range_excluded = exclude_ranges(files, cross_runs, max_gap=max_gap, logger=logger)
 
     # Combine exclusions
@@ -604,10 +650,30 @@ def run_filter(
 
     # Copy
     logger.info("Step: copy files to kept/excluded outputs")
+
+    total_to_copy = len(kept_files) + len(excluded_files)
+    copied = 0
+    t0 = time.perf_counter()
+
+    def _log_progress():
+        elapsed = time.perf_counter() - t0
+        logger.info(f"Copy progress: {copied}/{total_to_copy} | elapsed={elapsed:.1f}s")
+
+    # kept -> output_dir
+    logger.info(f"Copying kept images -> {output_dir}")
     for fname in kept_files:
         shutil.copy2(input_dir / fname, output_dir / fname)
+        copied += 1
+        if copied % 50 == 0 or copied == total_to_copy:
+            _log_progress()
+
+    # excluded -> excluded_dir
+    logger.info(f"Copying excluded images -> {excluded_dir}")
     for fname in excluded_files:
         shutil.copy2(input_dir / fname, excluded_dir / fname)
+        copied += 1
+        if copied % 50 == 0 or copied == total_to_copy:
+            _log_progress()
 
     summary = {
         "input_dir": str(input_dir),
@@ -628,11 +694,12 @@ def run_filter(
         "reset_outputs": bool(reset_outputs),
     }
 
+    _banner(logger, "CROSS-RUN FILTER SUMMARY")
     logger.info(
-        "Cross-run filter summary | "
-        f"total={summary['total_images']} kept={summary['total_kept']} excluded={summary['total_excluded']} "
-        f"cross_runs={summary['cross_runs_detected']} clusters={summary['cluster_exclusions']} "
-        f"too_close={summary['too_close_exclusions']} range={summary['range_exclusions']}"
+        f"total={summary['total_images']} | kept={summary['total_kept']} | excluded={summary['total_excluded']} | "
+        f"cross_runs={summary['cross_runs_detected']} | clusters={summary['cluster_exclusions']} | "
+        f"too_close={summary['too_close_exclusions']} | range={summary['range_exclusions']}"
     )
 
     return summary
+

@@ -283,10 +283,18 @@ class RGBPipeline:
 
         input_dir = rgb_path / "images" / "raw"
         output_dir = rgb_path / "images" / "path"
+        excluded_dir = output_dir.parent / "cross-runs"
 
         filter_cfg = self.config.get("cross_run_filter", {})
         max_gap = int(filter_cfg.get("max_gap", 10))
         window = int(filter_cfg.get("window", 3))
+
+        # Toggle (default = False for safety)
+        delete_raw_after = bool(filter_cfg.get("delete_raw_after_success", False))
+
+        logger.info(f"Input (raw): {input_dir}")
+        logger.info(f"Output (kept/path): {output_dir}")
+        logger.info(f"Output (excluded/cross-runs): {excluded_dir}")
 
         result = run_filter(
             input_dir=input_dir,
@@ -299,6 +307,61 @@ class RGBPipeline:
         # If your filter excluded any cross-run images => "xc", else "c"
         excluded = int(result.get("total_excluded") or 0)
         self.state["crossrun_flag"] = "xc" if excluded > 0 else "c"
+
+        # -------------------------
+        # Optional: delete raw after successful filter
+        # -------------------------
+        if delete_raw_after:
+            try:
+                # Safety check: confirm outputs exist and counts match
+                total_images = int(result.get("total_images") or 0)
+                kept = int(result.get("total_kept") or 0)
+                excl = int(result.get("total_excluded") or 0)
+
+                if total_images <= 0:
+                    raise RuntimeError("Refusing to delete raw: total_images is 0 (unexpected).")
+
+                if kept + excl != total_images:
+                    raise RuntimeError(
+                        f"Refusing to delete raw: kept+excluded != total "
+                        f"({kept}+{excl}!={total_images})"
+                    )
+
+                if not output_dir.exists() or not excluded_dir.exists():
+                    raise RuntimeError("Refusing to delete raw: output directories missing.")
+
+                # Extra check on filesystem counts (resume-safe)
+                kept_fs = len([p for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
+                excl_fs = len([p for p in excluded_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
+
+                if kept_fs + excl_fs != total_images:
+                    raise RuntimeError(
+                        f"Refusing to delete raw: filesystem output count mismatch "
+                        f"({kept_fs}+{excl_fs}!={total_images})"
+                    )
+
+                logger.warning(
+                    f"Deleting RAW images folder to save space: {input_dir} "
+                    f"(total={total_images}, kept={kept_fs}, excluded={excl_fs})"
+                )
+
+                shutil.rmtree(input_dir)
+                logger.info("Raw folder deleted successfully.")
+
+                # (Optional) recreate empty raw dir so future code that expects it won't break
+                input_dir.mkdir(parents=True, exist_ok=True)
+                logger.info("Raw folder recreated (empty).")
+
+                # record in result/state for documentation
+                result["raw_deleted"] = True
+
+            except Exception as e:
+                # Don’t fail the pipeline just because cleanup failed
+                logger.warning(f"Raw cleanup skipped/failed: {e}")
+                result["raw_deleted"] = False
+                result["raw_delete_error"] = str(e)
+        else:
+            result["raw_deleted"] = False
 
         return result
 

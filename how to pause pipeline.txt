@@ -1,0 +1,14 @@
+Create the file:
+
+mkdir data
+type nul > data\pause.flag
+
+(or just create an empty pause.flag file manually)
+
+Resume
+
+Delete it:
+
+del data\pause.flag
+
+Then rerun the same command you normally run (same run_id if you’re passing it; if not, your experiment launcher should accept a --run-id so it resumes the same run).

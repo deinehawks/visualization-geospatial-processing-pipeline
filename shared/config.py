@@ -30,6 +30,7 @@ def load_pipeline_config() -> dict:
         "cross_run_filter": {
             "max_gap": int(os.getenv("CROSSRUN_MAX_GAP", 10)),
             "window": int(os.getenv("CROSSRUN_WINDOW", 3)),
+            "delete_raw_after_success": os.getenv("DELETE_RAW", "false").lower() == "true",
         },
         "webodm": {
             "url": os.getenv("WEBODM_URL"),

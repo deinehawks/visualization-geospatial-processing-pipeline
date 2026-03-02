@@ -23,6 +23,7 @@ from datetime import datetime
 import logging
 import zipfile
 import tempfile
+import time
 
 # ============================================================
 # SURVEY ID GENERATOR
@@ -120,10 +121,23 @@ def run(
     # Use images/raw as canonical input folder
     raw_dir = dirs["raw"]
 
+    logger.info(f"Copying images -> {raw_dir}")
+
+    copied = 0
+    total = len(images)
+    t0 = time.perf_counter()
+
     for img in images:
         shutil.copy2(img, raw_dir / img.name)
+        copied += 1
 
-    logger.info("Images copied to raw")
+        # log every 50 files 
+        if copied % 50 == 0 or copied == total:
+            elapsed = time.perf_counter() - t0
+            logger.info(f"Image copy progress: {copied}/{total} | elapsed={elapsed:.1f}s")
+
+    elapsed = time.perf_counter() - t0
+    logger.info(f"Images copied to raw | total={total} | time={elapsed:.1f}s")
     
     # (optional) also mirror to images/raw if you still want it
     # raw_dir = dirs["raw"]

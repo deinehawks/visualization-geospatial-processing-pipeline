@@ -1,0 +1,19 @@
+1. Force stop everything
+
+Open CMD as Administrator:
+
+taskkill /F /IM "Docker Desktop.exe"
+taskkill /F /IM "com.docker.backend.exe"
+net stop com.docker.service
+
+2. Restart WSL (VERY important)
+wsl --shutdown
+
+Then check:
+
+wsl -l -v
+
+Make sure your distros are not stuck in “Stopping”
+
+3. Start Docker again
+start "" "C:\Program Files\Docker\Docker\Docker Desktop.exe"
