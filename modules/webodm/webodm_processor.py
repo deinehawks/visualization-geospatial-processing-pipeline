@@ -79,7 +79,7 @@ class WebODMProcessor:
         self.logger.info(f"Image source: {image_folder}")
 
         folder = Path(image_folder)
-        image_files = (
+        image_files = sorted(
             list(folder.glob("*.jpg"))
             + list(folder.glob("*.JPG"))
             + list(folder.glob("*.jpeg"))
@@ -112,7 +112,7 @@ class WebODMProcessor:
                 headers=self.headers,
                 files=files,
                 data=data,
-                timeout=600,  # uploads can be slow
+                timeout=(60, 7200) # (connect_timeout, read_timeout)
             )
             resp.raise_for_status()
 

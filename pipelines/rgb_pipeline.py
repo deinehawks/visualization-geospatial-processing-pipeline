@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set,  List, Tuple
 import time
 import uuid
 import logging
 import subprocess
+import os
 import shutil
 from shared import get_logger, PipelineRepo, db_path, StageRunner
 from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
@@ -93,6 +94,111 @@ class RGBPipeline:
         if not self.rgb_path:
             raise RuntimeError("rgb_path is not set yet. Run data_segregation first.")
         return self.rgb_path
+    
+    @staticmethod
+    def _iter_jpeg_files(folder: Path) -> List[Path]:
+        exts = {".jpg", ".jpeg"}
+        files: List[Path] = []
+        for p in folder.iterdir():
+            if p.is_file() and p.suffix.lower() in exts:
+                files.append(p)
+        return sorted(files)
+
+    @staticmethod
+    def _fmt_bytes(num: int) -> str:
+        # simple human-readable formatter
+        step = 1024.0
+        for unit in ["B", "KB", "MB", "GB", "TB"]:
+            if num < step:
+                return f"{num:.1f} {unit}" if unit != "B" else f"{num} {unit}"
+            num /= step
+        return f"{num:.1f} PB"
+
+    def _stage_upload_cache(
+        self,
+        *,
+        src_dir: Path,
+        cache_root: Path,
+        logger: logging.Logger,
+        progress_every: int = 25,
+        require_free_multiplier: float = 1.2,
+    ) -> Tuple[Path, int]:
+        """
+        Copy JPEG images from src_dir to a local cache dir (fast local reads for upload).
+
+        - cache_root: e.g. <base_dir>/data/upload_cache/<run_id>
+        - require_free_multiplier: requires free_space >= total_bytes * multiplier
+        Returns: (cache_dir, image_count)
+        """
+        src_dir = Path(src_dir)
+        if not src_dir.exists():
+            raise FileNotFoundError(f"Upload cache source dir not found: {src_dir}")
+
+        images = self._iter_jpeg_files(src_dir)
+        if not images:
+            raise FileNotFoundError(f"No JPG/JPEG images found in: {src_dir}")
+
+        total_bytes = 0
+        for p in images:
+            try:
+                total_bytes += p.stat().st_size
+            except OSError:
+                # If a file is temporarily inaccessible over SMB, fail early
+                raise
+
+        cache_dir = Path(cache_root)
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Free space check on the cache drive
+        usage = shutil.disk_usage(str(cache_dir))
+        free_bytes = usage.free
+        needed = int(total_bytes * require_free_multiplier)
+
+        logger.info(
+            f"Upload cache: preparing {len(images)} images "
+            f"({self._fmt_bytes(total_bytes)}) -> {cache_dir} | free={self._fmt_bytes(free_bytes)}"
+        )
+
+        if free_bytes < needed:
+            raise RuntimeError(
+                f"Not enough free space for upload cache.\n"
+                f"- Needed (with x{require_free_multiplier} buffer): {self._fmt_bytes(needed)}\n"
+                f"- Free: {self._fmt_bytes(free_bytes)}\n"
+                f"Cache root: {cache_dir}"
+            )
+
+        # Copy
+        copied = 0
+        t0 = time.perf_counter()
+
+        for src in images:
+            dst = cache_dir / src.name
+            # Skip if already exists with same size (resume-friendly)
+            try:
+                if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                    copied += 1
+                else:
+                    shutil.copy2(src, dst)
+                    copied += 1
+            except Exception as e:
+                logger.exception(f"Failed copying to upload cache: {src} -> {dst}")
+                raise
+
+            if copied % progress_every == 0 or copied == len(images):
+                elapsed = time.perf_counter() - t0
+                logger.info(f"Upload cache copy progress: {copied}/{len(images)} | elapsed={elapsed:.1f}s")
+
+        elapsed = time.perf_counter() - t0
+        logger.info(f"Upload cache ready: {cache_dir} | images={len(images)} | copy_time={elapsed:.1f}s")
+        return cache_dir, len(images)
+
+    def _cleanup_upload_cache(self, cache_dir: Path, logger: logging.Logger) -> None:
+        try:
+            if cache_dir.exists():
+                shutil.rmtree(cache_dir)
+                logger.info(f"Upload cache cleaned: {cache_dir}")
+        except Exception:
+            logger.exception(f"Failed to clean upload cache: {cache_dir}")
 
     # ============================================================
     # STAGES
@@ -234,180 +340,212 @@ class RGBPipeline:
         # canonical filtered images directory from dirs (fallback to rgb_path if not present)
         image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 
-        processor = WebODMProcessor(
-            url=webodm_cfg["url"],
-            username=webodm_cfg["username"],
-            password=webodm_cfg["password"],
-            logger=logger,
-        )
+        # ---------------- Local Upload Cache ----------------
+        # Guarantee cache is local by defaulting to TEMP.
+        # Optional env/config override: config["paths"]["upload_cache_root"] if you add it later.
+        upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
+        local_root = Path(upload_cache_root_cfg) if upload_cache_root_cfg else Path(os.getenv("TEMP", r"C:\temp"))
 
-        project_id = processor.create_project(
-            name=f"{survey_id}",
-            description="RGB automated processing",
-        )
+        cache_root = local_root / "automation-pipeline" / "upload_cache" / self.run_id
 
-          # ---------------- helpers ----------------
+        cached_dir: Optional[Path] = None
+        upload_folder: Path = image_folder
 
-        def run_gdalwarp(src: Path, dst: Path, epsg: int) -> None:
-            gdalwarp = tools_cfg.get("gdalwarp_path") or "gdalwarp"
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            cmd = [str(gdalwarp), "-t_srs", f"EPSG:{epsg}", str(src), str(dst)]
-            logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
+        try:
+            # Attempt caching; fallback to direct if caching fails
             try:
-                subprocess.run(cmd, check=True, capture_output=True, text=True)
-            except FileNotFoundError:
-                logger.warning("gdalwarp not found. Skipping reprojection (keeping raw download).")
-                shutil.copy2(src, dst)
-            except subprocess.CalledProcessError as e:
-                logger.warning(f"gdalwarp failed. Keeping raw download. stderr={e.stderr[:200] if e.stderr else ''}")
-                shutil.copy2(src, dst)
-
-        def safe_download_asset(asset_type: str, out_path: Path) -> bool:
-            try:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                processor.download_asset(project_id, current_task_id, asset_type, str(out_path))
-                return True
-            except Exception:
-                logger.exception(f"Failed downloading asset_type='{asset_type}' to {out_path}")
-                return False
-
-        def safe_download_all_assets(out_path: Path) -> bool:
-            try:
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                processor.download_all_assets(project_id, current_task_id, str(out_path))
-                return True
-            except Exception:
-                logger.exception(f"Failed downloading all-assets zip to {out_path}")
-                return False
-
-        # ---------------- TASK 1 (always) ----------------
-        task1_options = dict(webodm_cfg.get("task1_options", {}))
-        current_task_id = processor.create_task_with_images(
-            project_id=project_id,
-            name=task1_name,
-            image_folder=str(image_folder),
-            options=task1_options,
-        )
-        t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
-
-        result: Dict[str, Any] = {
-            "project_id": project_id,
-            "task1": {"id": current_task_id, "name": task1_name, "success": t1_success, "runtime_seconds": t1_runtime},
-            "task2": None,
-            "boundary_used": False,
-            "boundary_reason": None,
-            "boundary_geojson_path": boundary_geojson_path,
-            "downloads": {"task1": {}, "task2": {}},
-        }
-
-        # ---------------- Downloads after TASK 1 ----------------
-        if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
-            ortho_cfg = exports_cfg["ortho"]
-            out_dir = dir_from_key(ortho_cfg["out_dir_key"])
-            epsg = int(ortho_cfg.get("reproject_epsg", 4326))
-            filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(flag=f"{crossrun_flag}{boundary_flag_task1}")
-
-            # download raw orthomosaic first
-            tmp_raw = out_dir / f"__tmp_raw_{filename}"
-            final_out = out_dir / filename
-
-            # pick asset candidate list (config-driven)
-            candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
-            downloaded = False
-            for asset_type in candidates:
-                if safe_download_asset(asset_type, tmp_raw):
-                    downloaded = True
-                    result["downloads"]["task1"]["orthomosaic_raw"] = str(tmp_raw)
-                    break
-
-            if downloaded:
-                run_gdalwarp(tmp_raw, final_out, epsg)
-                try:
-                    tmp_raw.unlink(missing_ok=True)
-                except Exception:
-                    pass
-                result["downloads"]["task1"]["orthomosaic"] = str(final_out)
-                result["downloads"]["task1"]["epsg"] = epsg
-            else:
-                logger.warning("Could not download orthomosaic (no candidate succeeded).")
-
-        # ---------------- TASK 2 (only if boundary exists) ----------------
-        if not boundary_available:
-            msg = "Boundary not available. Skipping Task 2 (bounded models)."
-            logger.warning(msg)
-            result["boundary_reason"] = msg
-            return result
-
-        if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-            msg = "Boundary flag is True but GeoJSON path is missing. Skipping Task 2."
-            logger.warning(msg)
-            result["boundary_reason"] = msg
-            return result
-
-        boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
-        task2_options = dict(webodm_cfg.get("task2_options", {}))
-        task2_options["boundary"] = boundary_geojson
-
-        current_task_id = processor.create_task_with_images(
-            project_id=project_id,
-            name=task2_name,
-            image_folder=str(image_folder),
-            options=task2_options,
-        )
-        t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
-
-        result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
-        result["boundary_used"] = True
-
-        # ---------------- Downloads after TASK 2 ----------------
-        if exports_cfg.get("enabled", False):
-            # DEM set (config-driven colors/shadings)
-            if exports_cfg.get("dem", {}).get("enabled", False):
-                dem_cfg = exports_cfg["dem"]
-                epsg = int(dem_cfg.get("reproject_epsg", 3857))
-                dtm_dir = dir_from_key(dem_cfg["dtm_dir_key"])
-                dsm_dir = dir_from_key(dem_cfg["dsm_dir_key"])
-                colors = list(dem_cfg.get("colors") or [])
-                shadings = list(dem_cfg.get("shadings") or [])
-                tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
-
-                # NOTE: asset_type naming depends on your WebODM endpoint.
-                # These are placeholders that you’ll align to your actual download endpoints.
-                # Example scheme: f"dtm/{color}/{shading}.tif"
-                for model in ("dtm", "dsm"):
-                    out_base = dtm_dir if model == "dtm" else dsm_dir
-                    for color in colors:
-                        for shading in shadings:
-                            fname = tmpl.format(color=color, shading=shading)
-                            tmp_raw = out_base / f"__tmp_raw_{fname}"
-                            final_out = out_base / fname
-
-                            asset_type = f"{model}/{color}/{shading}"  # <-- adjust to your API
-                            ok = safe_download_asset(asset_type, tmp_raw)
-                            if ok:
-                                run_gdalwarp(tmp_raw, final_out, epsg)
-                                try:
-                                    tmp_raw.unlink(missing_ok=True)
-                                except Exception:
-                                    pass
-
-                result["downloads"]["task2"]["dem_epsg"] = epsg
-                result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
-                result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
-
-            # all-assets zip
-            if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
-                zcfg = exports_cfg["all_assets_zip"]
-                out_dir = dir_from_key(zcfg["out_dir_key"])
-                fname = zcfg.get("filename_template", "{survey_id}-RGB-{flag}-all.zip").format(
-                    survey_id=survey_id,
-                    flag=f"{crossrun_flag}{boundary_flag_task1}",
+                cached_dir, _ = self._stage_upload_cache(
+                    src_dir=image_folder,
+                    cache_root=cache_root,
+                    logger=logger,
+                    progress_every=25,
+                    require_free_multiplier=1.2,
                 )
-                zip_path = out_dir / fname
-                if safe_download_all_assets(zip_path):
-                    result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+                upload_folder = cached_dir
+            except Exception as e:
+                logger.warning(f"Upload cache unavailable, uploading directly from source. reason={e}")
+                cached_dir = None
+                upload_folder = image_folder
 
-        return result
+            processor = WebODMProcessor(
+                url=webodm_cfg["url"],
+                username=webodm_cfg["username"],
+                password=webodm_cfg["password"],
+                logger=logger,
+            )
+
+            # If you set a project suffix (for restarts), prefer it; otherwise use survey_id
+            project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
+            project_name = f"{survey_id}{project_suffix}"
+
+            project_id = processor.create_project(
+                name=project_name,
+                description="RGB automated processing",
+            )
+
+            # ---------------- helpers ----------------
+
+            def run_gdalwarp(src: Path, dst: Path, epsg: int) -> None:
+                gdalwarp = tools_cfg.get("gdalwarp_path") or "gdalwarp"
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                cmd = [str(gdalwarp), "-t_srs", f"EPSG:{epsg}", str(src), str(dst)]
+                logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
+                try:
+                    subprocess.run(cmd, check=True, capture_output=True, text=True)
+                except FileNotFoundError:
+                    logger.warning("gdalwarp not found. Skipping reprojection (keeping raw download).")
+                    shutil.copy2(src, dst)
+                except subprocess.CalledProcessError as e:
+                    logger.warning(f"gdalwarp failed. Keeping raw download. stderr={e.stderr[:200] if e.stderr else ''}")
+                    shutil.copy2(src, dst)
+
+            def safe_download_asset(asset_type: str, out_path: Path) -> bool:
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    processor.download_asset(project_id, current_task_id, asset_type, str(out_path))
+                    return True
+                except Exception:
+                    logger.exception(f"Failed downloading asset_type='{asset_type}' to {out_path}")
+                    return False
+
+            def safe_download_all_assets(out_path: Path) -> bool:
+                try:
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    processor.download_all_assets(project_id, current_task_id, str(out_path))
+                    return True
+                except Exception:
+                    logger.exception(f"Failed downloading all-assets zip to {out_path}")
+                    return False
+
+            # ---------------- TASK 1 (always) ----------------
+            task1_options = dict(webodm_cfg.get("task1_options", {}))
+            current_task_id = processor.create_task_with_images(
+                project_id=project_id,
+                name=task1_name,
+                image_folder=str(upload_folder),
+                options=task1_options,
+            )
+            t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
+
+            result: Dict[str, Any] = {
+                "project_id": project_id,
+                "project_name": project_name,
+                "task1": {"id": current_task_id, "name": task1_name, "success": t1_success, "runtime_seconds": t1_runtime},
+                "task2": None,
+                "boundary_used": False,
+                "boundary_reason": None,
+                "boundary_geojson_path": boundary_geojson_path,
+                "downloads": {"task1": {}, "task2": {}},
+            }
+
+            # ---------------- Downloads after TASK 1 ----------------
+            if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
+                ortho_cfg = exports_cfg["ortho"]
+                out_dir = dir_from_key(ortho_cfg["out_dir_key"])
+                epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+                filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(
+                    flag=f"{crossrun_flag}{boundary_flag_task1}"
+                )
+
+                tmp_raw = out_dir / f"__tmp_raw_{filename}"
+                final_out = out_dir / filename
+
+                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
+                downloaded = False
+                for asset_type in candidates:
+                    if safe_download_asset(asset_type, tmp_raw):
+                        downloaded = True
+                        result["downloads"]["task1"]["orthomosaic_raw"] = str(tmp_raw)
+                        break
+
+                if downloaded:
+                    run_gdalwarp(tmp_raw, final_out, epsg)
+                    try:
+                        tmp_raw.unlink(missing_ok=True)
+                    except Exception:
+                        pass
+                    result["downloads"]["task1"]["orthomosaic"] = str(final_out)
+                    result["downloads"]["task1"]["epsg"] = epsg
+                else:
+                    logger.warning("Could not download orthomosaic (no candidate succeeded).")
+
+            # ---------------- TASK 2 (only if boundary exists) ----------------
+            if not boundary_available:
+                msg = "Boundary not available. Skipping Task 2 (bounded models)."
+                logger.warning(msg)
+                result["boundary_reason"] = msg
+                return result
+
+            if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+                msg = "Boundary flag is True but GeoJSON path is missing. Skipping Task 2."
+                logger.warning(msg)
+                result["boundary_reason"] = msg
+                return result
+
+            boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
+            task2_options = dict(webodm_cfg.get("task2_options", {}))
+            task2_options["boundary"] = boundary_geojson
+
+            current_task_id = processor.create_task_with_images(
+                project_id=project_id,
+                name=task2_name,
+                image_folder=str(upload_folder),
+                options=task2_options,
+            )
+            t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, current_task_id)
+
+            result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
+            result["boundary_used"] = True
+
+            # ---------------- Downloads after TASK 2 ----------------
+            if exports_cfg.get("enabled", False):
+                if exports_cfg.get("dem", {}).get("enabled", False):
+                    dem_cfg = exports_cfg["dem"]
+                    epsg = int(dem_cfg.get("reproject_epsg", 3857))
+                    dtm_dir = dir_from_key(dem_cfg["dtm_dir_key"])
+                    dsm_dir = dir_from_key(dem_cfg["dsm_dir_key"])
+                    colors = list(dem_cfg.get("colors") or [])
+                    shadings = list(dem_cfg.get("shadings") or [])
+                    tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
+
+                    for model in ("dtm", "dsm"):
+                        out_base = dtm_dir if model == "dtm" else dsm_dir
+                        for color in colors:
+                            for shading in shadings:
+                                fname = tmpl.format(color=color, shading=shading)
+                                tmp_raw = out_base / f"__tmp_raw_{fname}"
+                                final_out = out_base / fname
+
+                                asset_type = f"{model}/{color}/{shading}"  # <-- adjust to your API
+                                ok = safe_download_asset(asset_type, tmp_raw)
+                                if ok:
+                                    run_gdalwarp(tmp_raw, final_out, epsg)
+                                    try:
+                                        tmp_raw.unlink(missing_ok=True)
+                                    except Exception:
+                                        pass
+
+                    result["downloads"]["task2"]["dem_epsg"] = epsg
+                    result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
+                    result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
+
+                if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
+                    zcfg = exports_cfg["all_assets_zip"]
+                    out_dir = dir_from_key(zcfg["out_dir_key"])
+                    fname = zcfg.get("filename_template", "{survey_id}-RGB-{flag}-all.zip").format(
+                        survey_id=survey_id,
+                        flag=f"{crossrun_flag}{boundary_flag_task1}",
+                    )
+                    zip_path = out_dir / fname
+                    if safe_download_all_assets(zip_path):
+                        result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+
+            return result
+
+        finally:
+            # ALWAYS clean cache if it was created (even if WebODM fails mid-way)
+            if cached_dir is not None:
+                self._cleanup_upload_cache(cached_dir, logger)
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
@@ -415,7 +553,7 @@ class RGBPipeline:
 
         survey_id = self.survey_id or "?"
         retries = 0
-        max_retries = 3  # you can change this
+        max_retries = 3
 
         while True:
             print("\n=========== QUALITY GATE ===========")
@@ -423,7 +561,7 @@ class RGBPipeline:
             print("Have you finished inspecting the outputs in WebODM?")
             print("Type:")
             print("  yes      -> Proceed")
-            print("  restart  -> Re-run WebODM from load dataset")
+            print("  restart  -> Re-run WebODM from load dataset (new project suffix)")
             print("  fail     -> Mark pipeline as failed")
             print("====================================\n")
 
@@ -431,6 +569,8 @@ class RGBPipeline:
 
             if answer in ("yes", "y"):
                 logger.info("Quality gate PASSED by user.")
+                # clear suffix after pass (optional)
+                self.state.pop("webodm_project_suffix", None)
                 return {"passed": True, "retries": retries}
 
             if answer in ("fail", "f"):
@@ -448,13 +588,18 @@ class RGBPipeline:
                         "reason": "max_retries_exceeded",
                     }
 
+                # Force a unique project name on each restart
+                self.state["webodm_project_suffix"] = f"--R{retries}"
                 logger.warning(f"Restarting WebODM from load dataset (attempt {retries}/{max_retries})")
+
+                # Reset webodm state first (avoid confusion)
+                self.state.pop("webodm", None)
 
                 # Re-run WebODM stage (fresh project + upload)
                 new_web_state = self.stage_webodm()
                 self.state["webodm"] = new_web_state
 
-                # After restart, loop again and ask user
+                # Ask again
                 continue
 
             print("Invalid input. Please type: yes, restart, or fail.")
