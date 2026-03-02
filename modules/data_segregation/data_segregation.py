@@ -131,10 +131,13 @@ def run(
         shutil.copy2(img, raw_dir / img.name)
         copied += 1
 
-        # log every 50 files 
         if copied % 50 == 0 or copied == total:
             elapsed = time.perf_counter() - t0
-            logger.info(f"Image copy progress: {copied}/{total} | elapsed={elapsed:.1f}s")
+            msg = f"Copying images: {copied}/{total} | elapsed={elapsed:.1f}s"
+            print(msg.ljust(80), end="\r", flush=True)  # one-line update
+
+    # finish the line cleanly
+    print("".ljust(80), end="\r", flush=True)
 
     elapsed = time.perf_counter() - t0
     logger.info(f"Images copied to raw | total={total} | time={elapsed:.1f}s")

@@ -23,6 +23,10 @@ class PipelineRepo:
     - stages reference runs.run_id (FK-safe even before survey_id exists)
     - survey_id can be attached to a run later.
     """
+
+    def __init__(self, db_file: Path):
+        self.db_file = Path(db_file)
+        self._init_db()
     
     @staticmethod
     def _ensure_column(conn, table: str, column: str, coltype: str) -> None:

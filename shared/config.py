@@ -26,6 +26,7 @@ def load_pipeline_config() -> dict:
         "paths": {
             "surveys_root": Path(os.getenv("SURVEYS_ROOT")),
             "field_data_root": Path(os.getenv("FIELD_DATA_ROOT")),
+            "upload_cache_root": os.getenv("UPLOAD_CACHE_ROOT", ""),
         },
         "cross_run_filter": {
             "max_gap": int(os.getenv("CROSSRUN_MAX_GAP", 10)),

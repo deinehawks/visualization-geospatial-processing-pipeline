@@ -74,46 +74,138 @@ class WebODMProcessor:
         name: str,
         image_folder: str,
         options: Optional[dict] = None,
+        *,
+        recursive: bool = False,
+        progress_every_percent: float = 2.0,  # log every +2%
+        live: bool = True,                    # single-line live progress in terminal
     ) -> str:
+        from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+
         self.logger.info(f"Creating task: {name}")
         self.logger.info(f"Image source: {image_folder}")
 
         folder = Path(image_folder)
-        image_files = sorted(
-            list(folder.glob("*.jpg"))
-            + list(folder.glob("*.JPG"))
-            + list(folder.glob("*.jpeg"))
-            + list(folder.glob("*.JPEG"))
-        )
+        if not folder.exists():
+            raise FileNotFoundError(f"Image folder not found: {image_folder}")
+
+        # ------------------------------------------------------------
+        # Collect images (JPG/JPEG only), dedupe by case-insensitive filename
+        # ------------------------------------------------------------
+        if recursive:
+            candidates = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
+        else:
+            candidates = []
+            candidates += list(folder.glob("*.jpg"))
+            candidates += list(folder.glob("*.jpeg"))
+            candidates += list(folder.glob("*.JPG"))
+            candidates += list(folder.glob("*.JPEG"))
+
+        uniq: Dict[str, Path] = {}
+        for p in candidates:
+            key = p.name.lower()  # Windows/SMB safe dedupe
+            if key not in uniq:
+                uniq[key] = p
+
+        image_files = sorted(uniq.values(), key=lambda p: p.name.lower())
 
         if not image_files:
-            self.logger.error("No JPG images found")
-            raise ValueError(f"No JPG images found in {image_folder}")
+            self.logger.error("No JPG/JPEG images found")
+            raise ValueError(f"No JPG/JPEG images found in {image_folder}")
 
-        self.logger.info(f"Found {len(image_files)} images")
+        # size summary
+        total_bytes = 0
+        for p in image_files:
+            try:
+                total_bytes += p.stat().st_size
+            except OSError:
+                pass
+        gb = total_bytes / (1024**3)
+        self.logger.info(f"Found {len(image_files)} unique images | approx_size={gb:.2f} GB")
 
-        files = []
+        # ------------------------------------------------------------
+        # Build multipart fields (streaming) + progress monitor
+        # IMPORTANT: keep file handles open until after request completes
+        # ------------------------------------------------------------
         opened = []
+        fields: list[tuple[str, object]] = []
 
+        # "name" field
+        fields.append(("name", name))
+
+        # "options" field (json string)
+        if options:
+            formatted_options = [{"name": k, "value": v} for k, v in options.items()]
+            fields.append(("options", json.dumps(formatted_options)))
+
+        # Repeated "images" fields
         try:
             for img in image_files:
                 f = open(img, "rb")
                 opened.append(f)
-                files.append(("images", (img.name, f, "image/jpeg")))
+                # (filename, fileobj, mimetype)
+                fields.append(("images", (img.name, f, "image/jpeg")))
 
-            data: Dict[str, Any] = {"name": name}
+            encoder = MultipartEncoder(fields=fields)
 
-            if options:
-                formatted_options = [{"name": k, "value": v} for k, v in options.items()]
-                data["options"] = json.dumps(formatted_options)
+            # terminal live line helper
+            last_line_len = 0
+
+            def _emit_live(line: str) -> None:
+                nonlocal last_line_len
+                if not live:
+                    return
+                try:
+                    pad = " " * max(0, last_line_len - len(line))
+                    print("\r" + line + pad, end="", flush=True)
+                    last_line_len = len(line)
+                except Exception:
+                    pass
+
+            def _finalize_live() -> None:
+                if not live:
+                    return
+                try:
+                    print()
+                except Exception:
+                    pass
+
+            # progress throttling
+            last_logged_percent = -1.0
+            start = time.time()
+
+            def _callback(monitor: MultipartEncoderMonitor) -> None:
+                nonlocal last_logged_percent
+                if monitor.len <= 0:
+                    return
+
+                pct = (monitor.bytes_read / monitor.len) * 100.0
+                elapsed = time.time() - start
+
+                # live single-line progress (updates frequently)
+                _emit_live(f"Uploading to WebODM... {pct:6.2f}% | {self.fmt_elapsed(elapsed)}")
+
+                # log every N%
+                if pct - last_logged_percent >= float(progress_every_percent) or pct >= 100.0:
+                    self.logger.info(f"Upload progress: {pct:.1f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    last_logged_percent = pct
+
+            monitor = MultipartEncoderMonitor(encoder, _callback)
+
+            # NOTE: when using MultipartEncoder, do NOT use requests "files="
+            # Use "data=monitor" and set Content-Type manually.
+            headers = dict(self.headers)
+            headers["Content-Type"] = monitor.content_type
+
+            self.logger.info("Uploading images to WebODM (real progress enabled)...")
 
             resp = self.session.post(
                 f"{self.base_url}/api/projects/{project_id}/tasks/",
-                headers=self.headers,
-                files=files,
-                data=data,
-                timeout=(60, 7200) # (connect_timeout, read_timeout)
+                headers=headers,
+                data=monitor,
+                timeout=(60, 7200),
             )
+
+            _finalize_live()
             resp.raise_for_status()
 
             task_id = resp.json()["id"]
@@ -122,6 +214,11 @@ class WebODMProcessor:
             return str(task_id)
 
         except requests.HTTPError:
+            try:
+                body = (resp.text or "")[:500]  # type: ignore[name-defined]
+                self.logger.error(f"WebODM response snippet: {body}")
+            except Exception:
+                pass
             self.logger.exception("Failed to create task")
             raise
 
@@ -131,6 +228,7 @@ class WebODMProcessor:
                     f.close()
                 except Exception:
                     pass
+
 
     def get_task(self, project_id: int, task_id: str) -> dict:
         """Canonical task fetch. Use this everywhere."""
@@ -220,43 +318,32 @@ class WebODMProcessor:
         poll_seconds: int = 10,
         *,
         live: bool = True,
-        log_every_seconds: int = 600,     # write a normal log line every 10 minutes
-        pt_log_step_seconds: int = 300,   # only log processing_time when it jumps by >= 5 minutes
+        log_every_seconds: int = 600,     # normal log line every 10 minutes
+        pt_log_step_seconds: int = 300,   # log processing_time only when it advances by >= 5 minutes
     ) -> Tuple[bool, float, dict]:
-        """
-        Poll until task is completed/failed/canceled.
 
-        Improvements:
-        - Optional live single-line terminal output (no log spam)
-        - Throttled logs: only on status change + periodic checkpoints
-        - processing_time logs only when it advances by pt_log_step_seconds
-        """
         start = time.time()
 
         last_status: Optional[str] = None
         last_progress: Optional[float] = None
         last_upload_progress: Optional[float] = None
         last_processing_time_bucket: Optional[int] = None
-        last_checkpoint = 0.0  # elapsed seconds
+        last_checkpoint_elapsed = 0.0
         last_line_len = 0
 
         def _emit_live(line: str) -> None:
-            """Write one updating line to stdout (TTY only)."""
             nonlocal last_line_len
             try:
-                # pad with spaces to fully overwrite previous line
                 pad = " " * max(0, last_line_len - len(line))
                 print("\r" + line + pad, end="", flush=True)
                 last_line_len = len(line)
             except Exception:
-                # if stdout isn't writable for some reason, silently ignore
                 pass
 
         def _finalize_live() -> None:
-            """End the live line with newline."""
             if live:
                 try:
-                    print()  # newline
+                    print()
                 except Exception:
                     pass
 
@@ -273,31 +360,30 @@ class WebODMProcessor:
 
             elapsed = time.time() - start
 
-            # ---- live UI (updates every poll, but does not flood logs) ----
+            # ---- live single-line UI (no spam in logs) ----
             if live:
                 pt_txt = f"pt={int(processing_time)}s" if isinstance(processing_time, (int, float)) else "pt=?"
                 up_txt = f"up={float(upload_progress):.0f}%" if isinstance(upload_progress, (int, float)) else ""
                 pr_txt = f"p={float(progress):.0f}%" if isinstance(progress, (int, float)) else ""
                 imgs_txt = f"{images_count} imgs" if images_count is not None else ""
                 parts = [f"WebODM {status.upper()}", imgs_txt, self.fmt_elapsed(elapsed), pt_txt, up_txt, pr_txt]
-                line = " | ".join([p for p in parts if p])
-                _emit_live(line)
+                _emit_live(" | ".join([p for p in parts if p]))
 
-            # ---- log only when status changes ----
-            if status != last_status:
+            # ---- status change log ----
+            status_changed = (status != last_status)
+            if status_changed:
                 self.logger.info(
                     f"WebODM status: {status.upper()} (raw={raw_status}) | elapsed={self.fmt_elapsed(elapsed)}"
                 )
                 last_status = status
 
-            # ---- throttle processing_time logs by bucket ----
+            # ---- processing_time bucket logs ----
             if isinstance(processing_time, (int, float)):
                 pt = int(float(processing_time))
                 bucket = pt // int(pt_log_step_seconds)
                 if last_processing_time_bucket is None:
                     last_processing_time_bucket = bucket
                 elif bucket > last_processing_time_bucket:
-                    # Only log each bucket jump (ex: every +300s)
                     self.logger.info(
                         f"WebODM processing_time: {pt}s"
                         + (f" | images={images_count}" if images_count is not None else "")
@@ -305,12 +391,13 @@ class WebODMProcessor:
                     )
                     last_processing_time_bucket = bucket
 
-            # ---- progress logs: only if it changes meaningfully (and not always 0) ----
+            # ---- progress logs (throttled) ----
             if isinstance(progress, (int, float)):
                 prog_val = float(progress)
-                # only log when it changes by >= 1%
                 if last_progress is None or abs(prog_val - last_progress) >= 1.0:
-                    self.logger.info(f"WebODM progress: {prog_val:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    # avoid spamming 0% forever: only log once if it stays 0
+                    if not (prog_val == 0.0 and last_progress == 0.0):
+                        self.logger.info(f"WebODM progress: {prog_val:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
                     last_progress = prog_val
 
             if isinstance(upload_progress, (int, float)):
@@ -319,16 +406,17 @@ class WebODMProcessor:
                     self.logger.info(f"WebODM upload_progress: {up:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
                     last_upload_progress = up
 
-            # ---- periodic checkpoint log (for long runs) ----
-            if (elapsed - last_checkpoint) >= float(log_every_seconds):
+            # ---- periodic checkpoint ----
+            did_checkpoint = False
+            if (elapsed - last_checkpoint_elapsed) >= float(log_every_seconds):
                 self.logger.info(f"WebODM checkpoint | status={status} | elapsed={self.fmt_elapsed(elapsed)}")
-                last_checkpoint = elapsed
+                last_checkpoint_elapsed = elapsed
+                did_checkpoint = True
 
-            # ---- optional message (only on status change or checkpoint-ish) ----
+            # ---- optional message (only on status change or checkpoint) ----
             msg = task.get("message") or task.get("last_error") or ""
             if isinstance(msg, str) and msg.strip():
-                # only print with checkpoints or when status changes already triggered
-                if (elapsed - last_checkpoint) < 1e-6 or status != last_status:
+                if status_changed or did_checkpoint:
                     self.logger.info(f"WebODM message: {msg.strip()}")
 
             if is_terminal:
