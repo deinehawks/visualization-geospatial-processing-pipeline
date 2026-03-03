@@ -88,12 +88,17 @@ def run(
         "path": survey_path / "images" / "path",
         "cross_runs": survey_path / "images" / "cross-runs",
 
-        # outputs
+        # Ortho
         "ortho": survey_path / "ortho",
+
+        #DEM
         "odm": survey_path / "odm",
         "dem_odm": survey_path / "dem" / "odm",
         "dem_dtm": survey_path / "dem" / "odm" / "dtm",
         "dem_dsm": survey_path / "dem" / "odm" / "dsm",
+
+        # 3D
+        "3d": survey_path / "3d",
     }
 
     extra_folders = [

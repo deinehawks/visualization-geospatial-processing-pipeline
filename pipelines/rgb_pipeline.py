@@ -1,6 +1,7 @@
 from __future__ import annotations
+
 from pathlib import Path
-from typing import Dict, Any, Optional, Set,  List, Tuple
+from typing import Dict, Any, Optional, Set, List, Tuple
 from shared import get_logger, PipelineRepo, db_path, StageRunner
 from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
 
@@ -94,7 +95,7 @@ class RGBPipeline:
         if not self.rgb_path:
             raise RuntimeError("rgb_path is not set yet. Run data_segregation first.")
         return self.rgb_path
-    
+
     @staticmethod
     def _iter_jpeg_files(folder: Path) -> List[Path]:
         exts = {".jpg", ".jpeg"}
@@ -106,7 +107,6 @@ class RGBPipeline:
 
     @staticmethod
     def _fmt_bytes(num: int) -> str:
-        # simple human-readable formatter
         step = 1024.0
         for unit in ["B", "KB", "MB", "GB", "TB"]:
             if num < step:
@@ -125,9 +125,6 @@ class RGBPipeline:
     ) -> Tuple[Path, int]:
         """
         Copy JPEG images from src_dir to a local cache dir (fast local reads for upload).
-
-        - cache_root: e.g. <base_dir>/data/upload_cache/<run_id>
-        - require_free_multiplier: requires free_space >= total_bytes * multiplier
         Returns: (cache_dir, image_count)
         """
         src_dir = Path(src_dir)
@@ -140,16 +137,11 @@ class RGBPipeline:
 
         total_bytes = 0
         for p in images:
-            try:
-                total_bytes += p.stat().st_size
-            except OSError:
-                # If a file is temporarily inaccessible over SMB, fail early
-                raise
+            total_bytes += p.stat().st_size
 
         cache_dir = Path(cache_root)
         cache_dir.mkdir(parents=True, exist_ok=True)
 
-        # Free space check on the cache drive
         usage = shutil.disk_usage(str(cache_dir))
         free_bytes = usage.free
         needed = int(total_bytes * require_free_multiplier)
@@ -167,22 +159,16 @@ class RGBPipeline:
                 f"Cache root: {cache_dir}"
             )
 
-        # Copy
         copied = 0
         t0 = time.perf_counter()
 
         for src in images:
             dst = cache_dir / src.name
-            # Skip if already exists with same size (resume-friendly)
-            try:
-                if dst.exists() and dst.stat().st_size == src.stat().st_size:
-                    copied += 1
-                else:
-                    shutil.copy2(src, dst)
-                    copied += 1
-            except Exception as e:
-                logger.exception(f"Failed copying to upload cache: {src} -> {dst}")
-                raise
+            if dst.exists() and dst.stat().st_size == src.stat().st_size:
+                copied += 1
+            else:
+                shutil.copy2(src, dst)
+                copied += 1
 
             if copied % progress_every == 0 or copied == len(images):
                 elapsed = time.perf_counter() - t0
@@ -205,23 +191,18 @@ class RGBPipeline:
     # ============================================================
 
     def _pause_flag_path(self) -> Path:
-        # put it inside base_dir so it works anywhere you run the project
         return self.base_dir / "data" / "pause.flag"
 
     def _should_pause(self) -> bool:
         return self._pause_flag_path().exists()
 
     def _check_pause_or_raise(self, stage_name: str) -> None:
-        """
-        If pause.flag exists, mark run as paused and stop execution gracefully.
-        """
         if not self._should_pause():
             return
 
         reason = f"pause.flag detected before stage '{stage_name}'"
         self.loggers["pipeline"].warning(f"⏸ PAUSE  | {reason}")
 
-        # mark run paused in DB (requires repo methods you added earlier)
         try:
             self.repo.mark_run_paused(
                 self.run_id,
@@ -231,7 +212,6 @@ class RGBPipeline:
         except Exception:
             self.loggers["pipeline"].exception("Failed to mark run as paused in DB")
 
-        # raise a special exception that we handle in run()
         raise RuntimeError("__PIPELINE_PAUSED__")
 
     # ============================================================
@@ -252,7 +232,7 @@ class RGBPipeline:
         self.survey_id = summary["survey_id"]
         self.rgb_path = Path(summary["survey_path"])  # .../<year>/<survey_id>/rgb
 
-        # Rename KML to match survey ID (required by your standard)
+        # Rename KML to match survey ID
         boundary_dir = self.rgb_path / "boundary"
         kmls = sorted(boundary_dir.glob("*.kml"))
         if not kmls:
@@ -262,14 +242,12 @@ class RGBPipeline:
         new_kml_path = boundary_dir / f"{self.survey_id}.kml"
 
         if original_kml.name != new_kml_path.name:
-            # If already exists, overwrite behavior is up to you; keep safe:
             if new_kml_path.exists():
                 new_kml_path.unlink()
             original_kml.rename(new_kml_path)
 
         logger.info(f"KML renamed to: {new_kml_path.name}")
 
-        # Attach survey_id to this run (this is the big fix)
         self.repo.attach_survey_id(self.run_id, self.survey_id)
         self.repo.upsert_survey_running(self.survey_id)
 
@@ -289,7 +267,6 @@ class RGBPipeline:
         max_gap = int(filter_cfg.get("max_gap", 10))
         window = int(filter_cfg.get("window", 3))
 
-        # Toggle (default = False for safety)
         delete_raw_after = bool(filter_cfg.get("delete_raw_after_success", False))
 
         logger.info(f"Input (raw): {input_dir}")
@@ -304,33 +281,22 @@ class RGBPipeline:
             cross_run_window=window,
         )
 
-        # If your filter excluded any cross-run images => "xc", else "c"
         excluded = int(result.get("total_excluded") or 0)
         self.state["crossrun_flag"] = "xc" if excluded > 0 else "c"
 
-        # -------------------------
-        # Optional: delete raw after successful filter
-        # -------------------------
         if delete_raw_after:
             try:
-                # Safety check: confirm outputs exist and counts match
                 total_images = int(result.get("total_images") or 0)
                 kept = int(result.get("total_kept") or 0)
                 excl = int(result.get("total_excluded") or 0)
 
                 if total_images <= 0:
                     raise RuntimeError("Refusing to delete raw: total_images is 0 (unexpected).")
-
                 if kept + excl != total_images:
-                    raise RuntimeError(
-                        f"Refusing to delete raw: kept+excluded != total "
-                        f"({kept}+{excl}!={total_images})"
-                    )
-
+                    raise RuntimeError(f"Refusing to delete raw: kept+excluded != total ({kept}+{excl}!={total_images})")
                 if not output_dir.exists() or not excluded_dir.exists():
                     raise RuntimeError("Refusing to delete raw: output directories missing.")
 
-                # Extra check on filesystem counts (resume-safe)
                 kept_fs = len([p for p in output_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
                 excl_fs = len([p for p in excluded_dir.iterdir() if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
 
@@ -348,15 +314,12 @@ class RGBPipeline:
                 shutil.rmtree(input_dir)
                 logger.info("Raw folder deleted successfully.")
 
-                # (Optional) recreate empty raw dir so future code that expects it won't break
                 input_dir.mkdir(parents=True, exist_ok=True)
                 logger.info("Raw folder recreated (empty).")
 
-                # record in result/state for documentation
                 result["raw_deleted"] = True
 
             except Exception as e:
-                # Don’t fail the pipeline just because cleanup failed
                 logger.warning(f"Raw cleanup skipped/failed: {e}")
                 result["raw_deleted"] = False
                 result["raw_delete_error"] = str(e)
@@ -364,7 +327,6 @@ class RGBPipeline:
             result["raw_deleted"] = False
 
         return result
-
 
     def stage_kml_boundary(self) -> Dict[str, Any]:
         logger = self.loggers["kml"]
@@ -387,7 +349,6 @@ class RGBPipeline:
 
         boundary_ok = bool(geojson_path and Path(geojson_path).exists())
 
-        # Store resume-safe boundary info
         self.state["boundary_available"] = boundary_ok
         self.state["boundary_geojson_path"] = str(geojson_path) if geojson_path else None
 
@@ -408,50 +369,46 @@ class RGBPipeline:
         exports_cfg = self.config.get("exports", {})
         tools_cfg = (exports_cfg.get("tools") or {})
 
-        # dirs from data_segregation (NO hardcoding)
         ds = self.state.get("data_segregation") or {}
         dirs = ds.get("dirs") or {}
         if not dirs:
             raise RuntimeError("Missing data_segregation.dirs in state. Ensure segregation returns dirs mapping.")
 
-        def dir_from_key(key: str) -> Path:
+        def dir_from_key(key: str, *, fallback: Optional[Path] = None) -> Path:
             p = dirs.get(key)
-            if not p:
-                raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
-            return Path(p)
+            if p:
+                return Path(p)
+            if fallback is not None:
+                return Path(fallback)
+            raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
 
-        # Crossrun flag: prefer runtime detection from filter stage (resume-safe)
         crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
 
-        # Boundary presence from KML stage (resume-safe)
         boundary_available = bool(self.state.get("boundary_available"))
         boundary_geojson_path = self.state.get("boundary_geojson_path")
 
-        # Task flags
         boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
         boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
 
         task1_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
         task2_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
 
-        # canonical filtered images directory from dirs (fallback to rgb_path if not present)
+        task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
+        task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
+
         image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 
         # ---------------- Local Upload Cache ----------------
-        # Guarantee cache is local by defaulting to TEMP.
-        # Optional env/config override: config["paths"]["upload_cache_root"] if you add it later.
         upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
         if not upload_cache_root_cfg:
             upload_cache_root_cfg = os.getenv("UPLOAD_CACHE_ROOT")
         local_root = Path(upload_cache_root_cfg) if upload_cache_root_cfg else Path(os.getenv("TEMP", r"C:\temp"))
-
         cache_root = local_root / "automation-pipeline" / "upload_cache" / self.run_id
 
         cached_dir: Optional[Path] = None
         upload_folder: Path = image_folder
 
         try:
-            # Attempt caching; fallback to direct if caching fails
             try:
                 cached_dir, _ = self._stage_upload_cache(
                     src_dir=image_folder,
@@ -473,7 +430,6 @@ class RGBPipeline:
                 logger=logger,
             )
 
-            # If you set a project suffix (for restarts), prefer it; otherwise use survey_id
             project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
             project_name = f"{survey_id}{project_suffix}"
 
@@ -541,9 +497,9 @@ class RGBPipeline:
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
                 out_dir = dir_from_key(ortho_cfg["out_dir_key"])
-                epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+                epsg = int(ortho_cfg.get("reproject_epsg", 4326))  # per your doc: EPSG:4326
                 filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(
-                    flag=f"{crossrun_flag}{boundary_flag_task1}"
+                    flag=task1_flag
                 )
 
                 tmp_raw = out_dir / f"__tmp_raw_{filename}"
@@ -599,42 +555,97 @@ class RGBPipeline:
 
             # ---------------- Downloads after TASK 2 ----------------
             if exports_cfg.get("enabled", False):
-                if exports_cfg.get("dem", {}).get("enabled", False):
-                    dem_cfg = exports_cfg["dem"]
-                    epsg = int(dem_cfg.get("reproject_epsg", 3857))
+                # -------- DEM (config-driven, non-interactive) --------
+                dem_cfg = (exports_cfg.get("dem") or {})
+                dem_do_download = bool(dem_cfg.get("enabled", False)) and bool(dem_cfg.get("download", True))
+
+                if dem_do_download:
+                    epsg = int(dem_cfg.get("reproject_epsg", 3857))  # per your doc: EPSG:3857
                     dtm_dir = dir_from_key(dem_cfg["dtm_dir_key"])
                     dsm_dir = dir_from_key(dem_cfg["dsm_dir_key"])
+
+                    models = list(dem_cfg.get("models") or ["dtm", "dsm"])
                     colors = list(dem_cfg.get("colors") or [])
                     shadings = list(dem_cfg.get("shadings") or [])
                     tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
 
-                    for model in ("dtm", "dsm"):
-                        out_base = dtm_dir if model == "dtm" else dsm_dir
-                        for color in colors:
-                            for shading in shadings:
-                                fname = tmpl.format(color=color, shading=shading)
-                                tmp_raw = out_base / f"__tmp_raw_{fname}"
-                                final_out = out_base / fname
+                    if not colors or not shadings:
+                        logger.warning("DEM download enabled but colors/shadings not configured. Skipping DEM downloads.")
+                    else:
+                        for model in models:
+                            if model not in ("dtm", "dsm"):
+                                logger.warning(f"Unknown DEM model '{model}' (expected dtm/dsm). Skipping.")
+                                continue
 
-                                asset_type = f"{model}/{color}/{shading}"  # <-- adjust to your API
-                                ok = safe_download_asset(asset_type, tmp_raw)
-                                if ok:
-                                    run_gdalwarp(tmp_raw, final_out, epsg)
-                                    try:
-                                        tmp_raw.unlink(missing_ok=True)
-                                    except Exception:
-                                        pass
+                            out_base = dtm_dir if model == "dtm" else dsm_dir
 
-                    result["downloads"]["task2"]["dem_epsg"] = epsg
-                    result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
-                    result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
+                            for color in colors:
+                                for shading in shadings:
+                                    fname = tmpl.format(color=color, shading=shading)
+                                    tmp_raw = out_base / f"__tmp_raw_{fname}"
+                                    final_out = out_base / fname
 
+                                    asset_type = f"{model}/{color}/{shading}"  # adjust to your API once confirmed
+                                    ok = safe_download_asset(asset_type, tmp_raw)
+                                    if ok:
+                                        run_gdalwarp(tmp_raw, final_out, epsg)
+                                        try:
+                                            tmp_raw.unlink(missing_ok=True)
+                                        except Exception:
+                                            pass
+
+                        result["downloads"]["task2"]["dem_epsg"] = epsg
+                        result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
+                        result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
+
+                # ------------- Point Cloud (PLY) --------------
+                pc_cfg = (exports_cfg.get("pointcloud") or {})
+                pc_enabled = bool(pc_cfg.get("enabled", True))
+
+                if pc_enabled:
+                    pc_dir_key = str(pc_cfg.get("out_dir_key") or "3d")
+                    pc_dir = dir_from_key(pc_dir_key, fallback=(rgb_path / "3d"))
+                    pc_dir.mkdir(parents=True, exist_ok=True)
+
+                    filename_tmpl = str(pc_cfg.get("filename_template") or "{survey_id}-RGB-{flag}.ply")
+                    ply_filename = filename_tmpl.format(survey_id=survey_id, flag=task2_flag)
+                    ply_path = pc_dir / ply_filename
+
+                    ply_candidates = list(pc_cfg.get("asset_candidates") or [
+                        "model.ply",
+                        "odm_georeferencing/odm_georeferenced_model.ply",
+                        "odm_texturing/model.ply",
+                    ])
+
+                    downloaded_pc = False
+                    for asset_type in ply_candidates:
+                        if safe_download_asset(asset_type, ply_path):
+                            downloaded_pc = True
+                            result["downloads"]["task2"]["pointcloud_ply"] = str(ply_path)
+                            result["downloads"]["task2"]["pointcloud_asset_type"] = asset_type
+                            break
+
+                    if not downloaded_pc:
+                        required = bool(pc_cfg.get("required", True))
+                        msg = f"Point cloud download failed. candidates={ply_candidates}"
+                        if required:
+                            raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
+                        else:
+                            logger.warning(msg)
+                            result["downloads"]["task2"]["pointcloud_ply"] = None
+                            result["downloads"]["task2"]["pointcloud_error"] = msg
+                else:
+                    logger.info("Point cloud download skipped (EXPORT_POINTCLOUD=false).")
+                    result["downloads"]["task2"]["pointcloud_ply"] = None
+                    result["downloads"]["task2"]["pointcloud_skipped"] = True
+
+                # -------- All Assets ZIP (archive) --------
                 if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                     zcfg = exports_cfg["all_assets_zip"]
                     out_dir = dir_from_key(zcfg["out_dir_key"])
                     fname = zcfg.get("filename_template", "{survey_id}-RGB-{flag}-all.zip").format(
                         survey_id=survey_id,
-                        flag=f"{crossrun_flag}{boundary_flag_task1}",
+                        flag=task2_flag,  
                     )
                     zip_path = out_dir / fname
                     if safe_download_all_assets(zip_path):
@@ -643,10 +654,8 @@ class RGBPipeline:
             return result
 
         finally:
-            # ALWAYS clean cache if it was created (even if WebODM fails mid-way)
             if cached_dir is not None:
                 self._cleanup_upload_cache(cached_dir, logger)
-
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
@@ -671,7 +680,6 @@ class RGBPipeline:
         allowed_stages = {"load_dataset", "structure_from_motion", "multi_view_stereo", "texturing"}
 
         def _pick_default_task() -> tuple[str, str]:
-            """Default QA target: task2 if present else task1."""
             if task2.get("id"):
                 return str(task2["id"]), str(task2.get("name") or "task2")
             return str(task1["id"]), str(task1.get("name") or "task1")
@@ -698,7 +706,6 @@ class RGBPipeline:
             )
 
             processor.restart_task(project_id=int(project_id), task_id=str(task_id_to_restart), restart_from=restart_from)
-
             success, runtime, task_info = processor.wait_for_completion(int(project_id), str(task_id_to_restart))
 
             updated_task_state = {
@@ -711,7 +718,6 @@ class RGBPipeline:
                 "status": task_info.get("status"),
             }
 
-            # Write back into state
             if task2.get("id") and str(task2.get("id")) == str(task_id_to_restart):
                 task2.update(updated_task_state)
                 web["task2"] = task2
@@ -723,7 +729,6 @@ class RGBPipeline:
             return {"passed": None, "restarts": restarts, "task": updated_task_state}
 
         while True:
-            # refresh local refs in case they changed
             web = self.state.get("webodm") or {}
             task1 = web.get("task1") or {}
             task2 = web.get("task2") or {}
@@ -758,20 +763,14 @@ class RGBPipeline:
                 logger.warning("Quality gate FAILED by user.")
                 return {"passed": False, "restarts": restarts, "project_id": project_id}
 
-            # default restart (QA task)
             if raw == "restart":
                 res = restart_and_wait(default_task_id, default_task_name, "load_dataset")
                 if res.get("passed") is False:
                     return res
                 continue
 
-            # restart with target/stage
             if raw.startswith("restart "):
                 parts = raw.split()
-                # restart t1
-                # restart t2
-                # restart t1 texturing
-                # restart t2 load_dataset
                 if len(parts) not in (2, 3):
                     print("Invalid format. Use: restart | restart t1|t2 | restart t1|t2 <stage>")
                     continue
@@ -802,31 +801,6 @@ class RGBPipeline:
 
             print("Invalid input. Use: yes | fail | restart | restart t1|t2 [stage]")
 
-
-    def _log_summary(self):
-        p = self.loggers["pipeline"]
-
-        survey = self.survey_id or "?"
-        filt = self.state.get("cross_run_filter") or {}
-        kept = filt.get("total_kept")
-        excl = filt.get("total_excluded")
-
-        boundary_used = (self.state.get("webodm") or {}).get("boundary_used", False)
-
-        web = self.state.get("webodm") or {}
-        t1 = (web.get("task1") or {}).get("runtime_seconds")
-        t2 = (web.get("task2") or {}).get("runtime_seconds")
-
-        p.info("SUMMARY")
-        p.info(f"- survey: {survey}")
-        if kept is not None and excl is not None:
-            p.info(f"- filter: kept={kept} excluded={excl}")
-        p.info(f"- boundary used: {'yes' if boundary_used else 'no'}")
-        if t1 is not None:
-            p.info(f"- webodm task1: {t1:.1f}s")
-        if t2 is not None:
-            p.info(f"- webodm task2: {t2:.1f}s")
-
     # ============================================================
     # RUN
     # ============================================================
@@ -835,8 +809,6 @@ class RGBPipeline:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_logger.info(f"Starting RGB Pipeline | run_id={self.run_id}")
 
-        # If this run was previously paused, explicitly mark it running again
-        # (only if you implemented repo.mark_run_running)
         try:
             r = self.repo.get_run(self.run_id)
             if r and r.get("status") == "paused":
@@ -849,9 +821,7 @@ class RGBPipeline:
         force_stages = force_stages or set()
 
         try:
-            # ---- Pause checkpoints (before each stage) ----
             self._check_pause_or_raise("data_segregation")
-
             self.runner.run(
                 "data_segregation",
                 self.stage_data_segregation,
@@ -861,7 +831,6 @@ class RGBPipeline:
             )
 
             self._check_pause_or_raise("cross_run_filter")
-
             self.runner.run(
                 "cross_run_filter",
                 self.stage_cross_run_image_filter,
@@ -871,7 +840,6 @@ class RGBPipeline:
             )
 
             self._check_pause_or_raise("kml_boundary")
-
             self.runner.run(
                 "kml_boundary",
                 self.stage_kml_boundary,
@@ -881,7 +849,6 @@ class RGBPipeline:
             )
 
             self._check_pause_or_raise("webodm")
-
             self.runner.run(
                 "webodm",
                 self.stage_webodm,
@@ -891,7 +858,6 @@ class RGBPipeline:
             )
 
             self._check_pause_or_raise("quality_gate")
-
             self.runner.run(
                 "quality_gate",
                 self.stage_quality_gate,
@@ -900,7 +866,6 @@ class RGBPipeline:
                 force=("quality_gate" in force_stages) or (not resume),
             )
 
-            # Stop pipeline if quality gate failed
             q = self.state.get("quality_gate") or {}
             if q.get("passed") is False:
                 raise RuntimeError("Pipeline stopped due to failed Quality Gate.")
@@ -917,7 +882,6 @@ class RGBPipeline:
             return self.state
 
         except RuntimeError as e:
-            # Special pause stop (NOT a failure)
             if str(e) == "__PIPELINE_PAUSED__":
                 self.state["success"] = False
                 self.state["paused"] = True
@@ -925,14 +889,11 @@ class RGBPipeline:
                 pipeline_logger.warning(f"RGB Pipeline paused | run_id={self.run_id}")
                 return self.state
 
-            # Special cancel stop (NOT a failure)
             if str(e) == "__PIPELINE_CANCELED__":
                 self.state["success"] = False
                 self.state["canceled"] = True
                 self.state["error"] = "canceled_in_webodm_ui"
                 pipeline_logger.warning(f"RGB Pipeline canceled | run_id={self.run_id}")
-
-                # optional: store as paused in DB
                 try:
                     self.repo.mark_run_paused(
                         self.run_id,
@@ -941,11 +902,12 @@ class RGBPipeline:
                     )
                 except Exception:
                     pipeline_logger.exception("Failed to mark run paused after WebODM cancel")
-
                 return self.state
 
+            # any other RuntimeError -> treat as failure
+            raise
+
         except Exception as e:
-            # Any other exception -> failure
             self.state["success"] = False
             self.state["error"] = str(e)
 
