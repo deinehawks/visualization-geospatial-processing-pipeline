@@ -526,10 +526,6 @@ class RGBPipeline:
             )
             t1_success, t1_runtime, t1_info = processor.wait_for_completion(project_id, current_task_id, live=False)
 
-            status_label, _ = processor._normalize_status(t1_info.get("status"))
-            if status_label == "canceled":
-                raise RuntimeError("WEBODM_TASK_CANCELED")
-
             result: Dict[str, Any] = {
                 "project_id": project_id,
                 "project_name": project_name,
@@ -597,10 +593,6 @@ class RGBPipeline:
             )
 
             t2_success, t2_runtime, t2_info = processor.wait_for_completion(project_id, current_task_id, live=False)
-
-            status_label, _ = processor._normalize_status(t2_info.get("status"))
-            if status_label == "canceled":
-                raise RuntimeError("WEBODM_TASK_CANCELED")
 
             result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
             result["boundary_used"] = True

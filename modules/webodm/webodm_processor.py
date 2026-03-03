@@ -67,168 +67,6 @@ class WebODMProcessor:
         self.logger.info(f"Project created (ID={project_id})")
         return int(project_id)
 
-    def create_task_with_images(
-        self,
-        project_id: int,
-        name: str,
-        image_folder: str,
-        options: Optional[dict] = None,
-        *,
-        recursive: bool = False,
-        progress_every_percent: float = 2.0,  # log every +2%
-        live: bool = True,                    # single-line live progress in terminal
-    ) -> str:
-        from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
-
-        self.logger.info(f"Creating task: {name}")
-        self.logger.info(f"Image source: {image_folder}")
-
-        folder = Path(image_folder)
-        if not folder.exists():
-            raise FileNotFoundError(f"Image folder not found: {image_folder}")
-
-        # ------------------------------------------------------------
-        # Collect images (JPG/JPEG only), dedupe by case-insensitive filename
-        # ------------------------------------------------------------
-        if recursive:
-            candidates = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
-        else:
-            candidates = []
-            candidates += list(folder.glob("*.jpg"))
-            candidates += list(folder.glob("*.jpeg"))
-            candidates += list(folder.glob("*.JPG"))
-            candidates += list(folder.glob("*.JPEG"))
-
-        uniq: Dict[str, Path] = {}
-        for p in candidates:
-            key = p.name.lower()  # Windows/SMB safe dedupe
-            if key not in uniq:
-                uniq[key] = p
-
-        image_files = sorted(uniq.values(), key=lambda p: p.name.lower())
-
-        if not image_files:
-            self.logger.error("No JPG/JPEG images found")
-            raise ValueError(f"No JPG/JPEG images found in {image_folder}")
-
-        # size summary
-        total_bytes = 0
-        for p in image_files:
-            try:
-                total_bytes += p.stat().st_size
-            except OSError:
-                pass
-        gb = total_bytes / (1024**3)
-        self.logger.info(f"Found {len(image_files)} unique images | approx_size={gb:.2f} GB")
-
-        # ------------------------------------------------------------
-        # Build multipart fields (streaming) + progress monitor
-        # IMPORTANT: keep file handles open until after request completes
-        # ------------------------------------------------------------
-        opened = []
-        fields: list[tuple[str, object]] = []
-
-        # "name" field
-        fields.append(("name", name))
-
-        # "options" field (json string)
-        if options:
-            formatted_options = [{"name": k, "value": v} for k, v in options.items()]
-            fields.append(("options", json.dumps(formatted_options)))
-
-        # Repeated "images" fields
-        try:
-            for img in image_files:
-                f = open(img, "rb")
-                opened.append(f)
-                # (filename, fileobj, mimetype)
-                fields.append(("images", (img.name, f, "image/jpeg")))
-
-            encoder = MultipartEncoder(fields=fields)
-
-            # terminal live line helper
-            last_line_len = 0
-
-            def _emit_live(line: str) -> None:
-                nonlocal last_line_len
-                if not live:
-                    return
-                try:
-                    pad = " " * max(0, last_line_len - len(line))
-                    print("\r" + line + pad, end="", flush=True)
-                    last_line_len = len(line)
-                except Exception:
-                    pass
-
-            def _finalize_live() -> None:
-                if not live:
-                    return
-                try:
-                    print()
-                except Exception:
-                    pass
-
-            # progress throttling
-            last_logged_percent = -1.0
-            start = time.time()
-
-            def _callback(monitor: MultipartEncoderMonitor) -> None:
-                nonlocal last_logged_percent
-                if monitor.len <= 0:
-                    return
-
-                pct = (monitor.bytes_read / monitor.len) * 100.0
-                elapsed = time.time() - start
-
-                # live single-line progress (updates frequently)
-                _emit_live(f"Uploading to WebODM... {pct:6.2f}% | {self.fmt_elapsed(elapsed)}")
-
-                # log every N%
-                if pct - last_logged_percent >= float(progress_every_percent) or pct >= 100.0:
-                    self.logger.info(f"Upload progress: {pct:.1f}% | elapsed={self.fmt_elapsed(elapsed)}")
-                    last_logged_percent = pct
-
-            monitor = MultipartEncoderMonitor(encoder, _callback)
-
-            # NOTE: when using MultipartEncoder, do NOT use requests "files="
-            # Use "data=monitor" and set Content-Type manually.
-            headers = dict(self.headers)
-            headers["Content-Type"] = monitor.content_type
-
-            self.logger.info("Uploading images to WebODM (real progress enabled)...")
-
-            resp = self.session.post(
-                f"{self.base_url}/api/projects/{project_id}/tasks/",
-                headers=headers,
-                data=monitor,
-                timeout=(60, 7200),
-            )
-
-            _finalize_live()
-            resp.raise_for_status()
-
-            task_id = resp.json()["id"]
-            self.logger.info(f"Task created (ID={task_id})")
-            self.logger.info("Image upload complete")
-            return str(task_id)
-
-        except requests.HTTPError:
-            try:
-                body = (resp.text or "")[:500]  # type: ignore[name-defined]
-                self.logger.error(f"WebODM response snippet: {body}")
-            except Exception:
-                pass
-            self.logger.exception("Failed to create task")
-            raise
-
-        finally:
-            for f in opened:
-                try:
-                    f.close()
-                except Exception:
-                    pass
-
-
     def get_task(self, project_id: int, task_id: str) -> dict:
         """Canonical task fetch. Use this everywhere."""
         resp = self.session.get(
@@ -301,6 +139,83 @@ class WebODMProcessor:
 
         return "unknown", False
 
+    def wait_for_completion(
+        self,
+        project_id: int,
+        task_id: str,
+        *,
+        poll_seconds: int = 10,
+        timeout_seconds: Optional[int] = None,
+        live: bool = False,
+    ) -> Tuple[bool, float, Dict[str, Any]]:
+        """
+        Poll WebODM task until it reaches a terminal status:
+        completed / failed / canceled
+
+        Returns: (success, runtime_seconds, task_info)
+        """
+        start = time.time()
+        last_status: Optional[str] = None
+        last_line_len = 0
+
+        def _emit_live(line: str) -> None:
+            nonlocal last_line_len
+            if not live:
+                return
+            try:
+                pad = " " * max(0, last_line_len - len(line))
+                print("\r" + line + pad, end="", flush=True)
+                last_line_len = len(line)
+            except Exception:
+                pass
+
+        def _finalize_live() -> None:
+            if not live:
+                return
+            try:
+                print()
+            except Exception:
+                pass
+
+        while True:
+            # timeout guard
+            if timeout_seconds is not None and (time.time() - start) > float(timeout_seconds):
+                raise TimeoutError(f"WebODM task timed out after {timeout_seconds}s (task_id={task_id})")
+
+            task_info = self.get_task(project_id, task_id)
+            status_label, is_terminal = self._normalize_status(task_info.get("status"))
+
+            if status_label != last_status:
+                self.logger.info(f"WebODM status: {status_label}")
+                last_status = status_label
+
+            elapsed = time.time() - start
+            processing_time = task_info.get("processing_time")
+
+            _emit_live(
+                f"WebODM status={status_label} | processing_time={processing_time} | elapsed={self.fmt_elapsed(elapsed)}"
+            )
+
+            if is_terminal:
+                _finalize_live()
+
+                if status_label == "completed":
+                    return True, elapsed, task_info
+
+                if status_label == "canceled":
+                    raise RuntimeError("WEBODM_TASK_CANCELED")
+
+                # failed / unknown terminal
+                try:
+                    out = self.get_task_output(project_id, task_id)
+                    if out:
+                        self.logger.error(f"WebODM output tail:\n{out[-1000:]}")
+                except Exception:
+                    pass
+
+                return False, elapsed, task_info
+
+            time.sleep(poll_seconds)
 
     def create_task_with_images(
         self,
@@ -691,6 +606,34 @@ class WebODMProcessor:
             return resp.json()
         except Exception:
             return {"ok": True, "status_code": resp.status_code}
+        
+    def download_asset(self, project_id: int, task_id: str, asset_type: str, out_file: str) -> None:
+        """
+        Downloads a single asset (by asset_type) from WebODM task assets endpoint.
+        NOTE: asset_type values depend on WebODM (e.g. orthophoto.tif).
+        """
+        url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/download/{asset_type}"
+        with self.session.get(url, headers=self.headers, stream=True, timeout=(60, 7200)) as r:
+            r.raise_for_status()
+            os.makedirs(os.path.dirname(out_file), exist_ok=True)
+            with open(out_file, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
+
+    def download_all_assets(self, project_id: int, task_id: str, out_file: str) -> None:
+        """
+        Downloads the full task assets zip (if your WebODM exposes it).
+        Endpoint can vary by version; adjust if your API differs.
+        """
+        url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/download/all.zip"
+        with self.session.get(url, headers=self.headers, stream=True, timeout=(60, 7200)) as r:
+            r.raise_for_status()
+            os.makedirs(os.path.dirname(out_file), exist_ok=True)
+            with open(out_file, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1024 * 1024):
+                    if chunk:
+                        f.write(chunk)
 
 
     
