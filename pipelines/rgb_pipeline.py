@@ -479,6 +479,7 @@ class RGBPipeline:
                 name=task1_name,
                 image_folder=str(upload_folder),
                 options=task1_options,
+                processing_node=webodm_cfg.get("node_id"),
             )
             t1_success, t1_runtime, t1_info = processor.wait_for_completion(project_id, current_task_id, live=False)
 
@@ -546,6 +547,7 @@ class RGBPipeline:
                 name=task2_name,
                 image_folder=str(upload_folder),
                 options=task2_options,
+                processing_node=webodm_cfg.get("node_id"),
             )
 
             t2_success, t2_runtime, t2_info = processor.wait_for_completion(project_id, current_task_id, live=False)

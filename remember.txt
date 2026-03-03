@@ -4,3 +4,5 @@ Remember that in processing images with ODM, no images within a task should shar
 
 
 python -m experiments.rgb_experiment --survey TANGLAW_A2S_6.3Hai_12.7Hac_60m_85f75s_14.5kph_2sFrame --year 2026
+
+python -m experiments.rgb_experiment --survey BLC_A2S_2Ha_60m --year 2026

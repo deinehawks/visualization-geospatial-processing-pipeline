@@ -224,6 +224,7 @@ class WebODMProcessor:
         image_folder: str,
         options: Optional[dict] = None,
         *,
+        processing_node: Optional[int] = None,
         recursive: bool = False,
         progress_every_percent: float = 2.0,   # log every +2%
         live: bool = True,                     # single-line live progress in terminal
@@ -287,6 +288,10 @@ class WebODMProcessor:
 
         # ---- live one-line terminal output helpers ----
         last_line_len = 0
+
+        # add processing node (WebODM expects "processing_node")
+        if processing_node is not None:
+            fields.append(("processing_node", str(int(processing_node))))
 
         def _emit_live(line: str) -> None:
             nonlocal last_line_len
