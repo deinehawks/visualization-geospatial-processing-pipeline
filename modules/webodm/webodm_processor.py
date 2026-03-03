@@ -302,28 +302,81 @@ class WebODMProcessor:
         return "unknown", False
 
 
-    def wait_for_completion(
+    def create_task_with_images(
         self,
         project_id: int,
-        task_id: str,
-        poll_seconds: int = 10,
+        name: str,
+        image_folder: str,
+        options: Optional[dict] = None,
         *,
-        live: bool = True,
-        log_every_seconds: int = 600,     # normal log line every 10 minutes
-        pt_log_step_seconds: int = 300,   # log processing_time only when it advances by >= 5 minutes
-    ) -> Tuple[bool, float, dict]:
+        recursive: bool = False,
+        progress_every_percent: float = 2.0,   # log every +2%
+        live: bool = True,                     # single-line live progress in terminal
+        cancel_poll_seconds: int = 3,          # how often to check WebODM for cancel
+    ) -> str:
+        from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
+        import threading
 
-        start = time.time()
+        self.logger.info(f"Creating task: {name}")
+        self.logger.info(f"Image source: {image_folder}")
 
-        last_status: Optional[str] = None
-        last_progress: Optional[float] = None
-        last_upload_progress: Optional[float] = None
-        last_processing_time_bucket: Optional[int] = None
-        last_checkpoint_elapsed = 0.0
+        folder = Path(image_folder)
+        if not folder.exists():
+            raise FileNotFoundError(f"Image folder not found: {image_folder}")
+
+        # ------------------------------------------------------------
+        # Collect images (JPG/JPEG only), dedupe by case-insensitive filename
+        # ------------------------------------------------------------
+        if recursive:
+            candidates = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
+        else:
+            candidates = []
+            candidates += list(folder.glob("*.jpg"))
+            candidates += list(folder.glob("*.jpeg"))
+            candidates += list(folder.glob("*.JPG"))
+            candidates += list(folder.glob("*.JPEG"))
+
+        uniq: Dict[str, Path] = {}
+        for p in candidates:
+            key = p.name.lower()  # Windows/SMB safe dedupe
+            if key not in uniq:
+                uniq[key] = p
+
+        image_files = sorted(uniq.values(), key=lambda p: p.name.lower())
+
+        if not image_files:
+            self.logger.error("No JPG/JPEG images found")
+            raise ValueError(f"No JPG/JPEG images found in {image_folder}")
+
+        # size summary
+        total_bytes = 0
+        for p in image_files:
+            try:
+                total_bytes += p.stat().st_size
+            except OSError:
+                pass
+        gb = total_bytes / (1024**3)
+        self.logger.info(f"Found {len(image_files)} unique images | approx_size={gb:.2f} GB")
+
+        # ------------------------------------------------------------
+        # Build multipart fields + progress monitor
+        # ------------------------------------------------------------
+        opened = []
+        fields: list[tuple[str, object]] = []
+
+        fields.append(("name", name))
+
+        if options:
+            formatted_options = [{"name": k, "value": v} for k, v in options.items()]
+            fields.append(("options", json.dumps(formatted_options)))
+
+        # ---- live one-line terminal output helpers ----
         last_line_len = 0
 
         def _emit_live(line: str) -> None:
             nonlocal last_line_len
+            if not live:
+                return
             try:
                 pad = " " * max(0, last_line_len - len(line))
                 print("\r" + line + pad, end="", flush=True)
@@ -332,98 +385,171 @@ class WebODMProcessor:
                 pass
 
         def _finalize_live() -> None:
-            if live:
+            if not live:
+                return
+            try:
+                print()
+            except Exception:
+                pass
+
+        # ------------------------------------------------------------
+        # Cancel detection (best-effort)
+        # ------------------------------------------------------------
+        cancel_event = threading.Event()
+        stop_poller = threading.Event()
+        found_task_id: list[Optional[str]] = [None]  # mutable holder
+
+        def _poll_cancel() -> None:
+            """
+            Poll the project task list for a task with this name.
+            Once found, watch its status. If user cancels in UI -> set cancel_event.
+            """
+            # IMPORTANT: do NOT share self.session across threads
+            poll_sess = requests.Session()
+            try:
+                while not stop_poller.is_set():
+                    try:
+                        # list tasks for project
+                        r = poll_sess.get(
+                            f"{self.base_url}/api/projects/{project_id}/tasks/",
+                            headers=self.headers,
+                            timeout=30,
+                        )
+                        if r.status_code != 200:
+                            time.sleep(cancel_poll_seconds)
+                            continue
+
+                        payload = r.json()
+
+                        # WebODM list endpoints sometimes return {"results":[...]}
+                        tasks = payload.get("results") if isinstance(payload, dict) else payload
+                        if not isinstance(tasks, list):
+                            time.sleep(cancel_poll_seconds)
+                            continue
+
+                        # find by exact name (you can relax matching if needed)
+                        for t in tasks:
+                            if not isinstance(t, dict):
+                                continue
+                            if str(t.get("name", "")).strip() != name:
+                                continue
+
+                            tid = str(t.get("id") or "")
+                            if tid and found_task_id[0] is None:
+                                found_task_id[0] = tid
+
+                            status, _ = self._normalize_status(t.get("status"))
+                            if status == "canceled":
+                                cancel_event.set()
+                                return
+
+                        time.sleep(cancel_poll_seconds)
+                    except Exception:
+                        # poller should never crash your upload
+                        time.sleep(cancel_poll_seconds)
+            finally:
                 try:
-                    print()
+                    poll_sess.close()
                 except Exception:
                     pass
 
-        while True:
-            task = self.get_task(project_id, task_id)
+        poller_thread = threading.Thread(target=_poll_cancel, daemon=True)
 
-            raw_status = task.get("status")
-            # If WebODM returns status=None early, use pending_action as a nicer label
-            if raw_status is None:
-                pending = (task.get("pending_action") or "").strip()
-                status, is_terminal = ((pending.lower() if pending else "queued"), False)
-            else:
-                status, is_terminal = self._normalize_status(raw_status)
+        # ------------------------------------------------------------
+        # Upload with progress + cancel abort
+        # ------------------------------------------------------------
+        try:
+            for img in image_files:
+                f = open(img, "rb")
+                opened.append(f)
+                fields.append(("images", (img.name, f, "image/jpeg")))
 
-            progress = task.get("progress")
-            processing_time = task.get("processing_time")
-            upload_progress = task.get("upload_progress")
-            images_count = task.get("images_count")
+            encoder = MultipartEncoder(fields=fields)
 
-            elapsed = time.time() - start
+            last_logged_percent = -1.0
+            start = time.time()
 
-            # ---- live single-line UI (no spam in logs) ----
-            if live:
-                pt_txt = f"pt={int(processing_time)}s" if isinstance(processing_time, (int, float)) else "pt=?"
-                up_txt = f"up={float(upload_progress):.0f}%" if isinstance(upload_progress, (int, float)) else ""
-                pr_txt = f"p={float(progress):.0f}%" if isinstance(progress, (int, float)) else ""
-                imgs_txt = f"{images_count} imgs" if images_count is not None else ""
-                parts = [f"WebODM {status.upper()}", imgs_txt, self.fmt_elapsed(elapsed), pt_txt, up_txt, pr_txt]
-                _emit_live(" | ".join([p for p in parts if p]))
+            def _callback(monitor: MultipartEncoderMonitor) -> None:
+                nonlocal last_logged_percent
 
-            # ---- status change log ----
-            status_changed = (status != last_status)
-            if status_changed:
-                self.logger.info(
-                    f"WebODM status: {status.upper()} (raw={raw_status}) | elapsed={self.fmt_elapsed(elapsed)}"
-                )
-                last_status = status
+                # If UI cancel detected (task exists + canceled), abort the upload stream
+                if cancel_event.is_set():
+                    raise RuntimeError("Upload aborted: task was canceled in WebODM UI.")
 
-            # ---- processing_time bucket logs ----
-            if isinstance(processing_time, (int, float)):
-                pt = int(float(processing_time))
-                bucket = pt // int(pt_log_step_seconds)
-                if last_processing_time_bucket is None:
-                    last_processing_time_bucket = bucket
-                elif bucket > last_processing_time_bucket:
-                    self.logger.info(
-                        f"WebODM processing_time: {pt}s"
-                        + (f" | images={images_count}" if images_count is not None else "")
-                        + f" | elapsed={self.fmt_elapsed(elapsed)}"
-                    )
-                    last_processing_time_bucket = bucket
+                if monitor.len <= 0:
+                    return
 
-            # ---- progress logs (throttled) ----
-            if isinstance(progress, (int, float)):
-                prog_val = float(progress)
-                if last_progress is None or abs(prog_val - last_progress) >= 1.0:
-                    # avoid spamming 0% forever: only log once if it stays 0
-                    if not (prog_val == 0.0 and last_progress == 0.0):
-                        self.logger.info(f"WebODM progress: {prog_val:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
-                    last_progress = prog_val
+                pct = (monitor.bytes_read / monitor.len) * 100.0
+                elapsed = time.time() - start
 
-            if isinstance(upload_progress, (int, float)):
-                up = float(upload_progress)
-                if last_upload_progress is None or abs(up - last_upload_progress) >= 5.0:
-                    self.logger.info(f"WebODM upload_progress: {up:.0f}% | elapsed={self.fmt_elapsed(elapsed)}")
-                    last_upload_progress = up
+                # one-line live progress
+                _emit_live(f"Uploading to WebODM... {pct:6.2f}% | {self.fmt_elapsed(elapsed)}")
 
-            # ---- periodic checkpoint ----
-            did_checkpoint = False
-            if (elapsed - last_checkpoint_elapsed) >= float(log_every_seconds):
-                self.logger.info(f"WebODM checkpoint | status={status} | elapsed={self.fmt_elapsed(elapsed)}")
-                last_checkpoint_elapsed = elapsed
-                did_checkpoint = True
+                # log every N% (optional, still not too spammy)
+                if pct - last_logged_percent >= float(progress_every_percent) or pct >= 100.0:
+                    self.logger.info(f"Upload progress: {pct:.1f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    last_logged_percent = pct
 
-            # ---- optional message (only on status change or checkpoint) ----
-            msg = task.get("message") or task.get("last_error") or ""
-            if isinstance(msg, str) and msg.strip():
-                if status_changed or did_checkpoint:
-                    self.logger.info(f"WebODM message: {msg.strip()}")
+            monitor = MultipartEncoderMonitor(encoder, _callback)
 
-            if is_terminal:
-                _finalize_live()
-                success = status == "completed"
-                self.logger.info(
-                    f"WebODM finished: {status.upper()} | elapsed={self.fmt_elapsed(elapsed)} | task_id={task_id}"
-                )
-                return success, elapsed, task
+            headers = dict(self.headers)
+            headers["Content-Type"] = monitor.content_type
 
-            time.sleep(poll_seconds)
+            self.logger.info("Uploading images to WebODM (real progress enabled)...")
+            poller_thread.start()
+
+            resp = self.session.post(
+                f"{self.base_url}/api/projects/{project_id}/tasks/",
+                headers=headers,
+                data=monitor,
+                timeout=(60, 7200),
+            )
+
+            _finalize_live()
+            resp.raise_for_status()
+
+            task_id = str(resp.json()["id"])
+            self.logger.info(f"Task created (ID={task_id})")
+            self.logger.info("Image upload complete")
+            return task_id
+
+        except KeyboardInterrupt:
+            _finalize_live()
+            self.logger.warning("Upload interrupted by user (Ctrl+C).")
+            raise
+
+        except Exception as e:
+            _finalize_live()
+
+            # If this was triggered by UI cancel, report clearly
+            if "canceled in webodm ui" in str(e).lower() or "task was canceled" in str(e).lower():
+                self.logger.warning("Detected WebODM UI cancellation. Stopping upload/pipeline stage.")
+                raise RuntimeError("WEBODM_TASK_CANCELED") from e
+
+            # HTTP error info (if available)
+            try:
+                body = (resp.text or "")[:500]  # type: ignore[name-defined]
+                self.logger.error(f"WebODM response snippet: {body}")
+            except Exception:
+                pass
+
+            self.logger.exception("Failed to create task")
+            raise
+
+        finally:
+            stop_poller.set()
+            try:
+                # give poller a moment to exit cleanly
+                if poller_thread.is_alive():
+                    poller_thread.join(timeout=1.0)
+            except Exception:
+                pass
+
+            for f in opened:
+                try:
+                    f.close()
+                except Exception:
+                    pass
             
     # -------------------------
     # Documentation helpers (kept)
@@ -567,29 +693,4 @@ class WebODMProcessor:
             return {"ok": True, "status_code": resp.status_code}
 
 
-def find_geojson_file(folder_path: str, logger: logging.Logger) -> Optional[str]:
-    folder = Path(folder_path)
-    if not folder.exists():
-        return None
-
-    if folder.is_file():
-        return str(folder) if folder.suffix.lower() in (".geojson", ".json") else None
-
-    geojson_files = list(folder.rglob("*.geojson")) + list(folder.rglob("*.GeoJSON"))
-    if geojson_files:
-        logger.info(f"Found GeoJSON file: {geojson_files[0]}")
-        return str(geojson_files[0])
-
-    json_files = list(folder.rglob("*.json")) + list(folder.rglob("*.JSON"))
-    for jf in json_files:
-        try:
-            head = jf.read_text(encoding="utf-8", errors="ignore")[:200]
-            if "FeatureCollection" in head or "geometry" in head:
-                logger.info(f"Found GeoJSON-like JSON: {jf}")
-                return str(jf)
-        except Exception:
-            pass
-
-    return None
-
- 
+    

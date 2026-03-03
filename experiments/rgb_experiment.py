@@ -52,7 +52,6 @@ def force_webodm_node2():
                         pass
 
                 # Case 3: MultipartEncoder / MultipartEncoderMonitor (NOT iterable)
-                # They usually have .fields which is a dict-like mapping of form fields.
                 if hasattr(data, "fields") and isinstance(getattr(data, "fields"), dict):
                     data.fields["processing_node"] = str(WEBODM_NODE_ID)
                     kwargs["data"] = data

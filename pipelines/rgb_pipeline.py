@@ -524,7 +524,11 @@ class RGBPipeline:
                 image_folder=str(upload_folder),
                 options=task1_options,
             )
-            t1_success, t1_runtime, _ = processor.wait_for_completion(project_id, current_task_id, live=False)
+            t1_success, t1_runtime, t1_info = processor.wait_for_completion(project_id, current_task_id, live=False)
+
+            status_label, _ = processor._normalize_status(t1_info.get("status"))
+            if status_label == "canceled":
+                raise RuntimeError("WEBODM_TASK_CANCELED")
 
             result: Dict[str, Any] = {
                 "project_id": project_id,
@@ -591,7 +595,12 @@ class RGBPipeline:
                 image_folder=str(upload_folder),
                 options=task2_options,
             )
-            t2_success, t2_runtime, _ = processor.wait_for_completion(project_id, current_task_id, live=False)
+
+            t2_success, t2_runtime, t2_info = processor.wait_for_completion(project_id, current_task_id, live=False)
+
+            status_label, _ = processor._normalize_status(t2_info.get("status"))
+            if status_label == "canceled":
+                raise RuntimeError("WEBODM_TASK_CANCELED")
 
             result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
             result["boundary_used"] = True
@@ -924,18 +933,24 @@ class RGBPipeline:
                 pipeline_logger.warning(f"RGB Pipeline paused | run_id={self.run_id}")
                 return self.state
 
-            # Normal runtime errors -> failure
-            self.state["success"] = False
-            self.state["error"] = str(e)
+            # Special cancel stop (NOT a failure)
+            if str(e) == "__PIPELINE_CANCELED__":
+                self.state["success"] = False
+                self.state["canceled"] = True
+                self.state["error"] = "canceled_in_webodm_ui"
+                pipeline_logger.warning(f"RGB Pipeline canceled | run_id={self.run_id}")
 
-            total_runtime = time.perf_counter() - total_start
-            self.repo.mark_run_finished(self.run_id, success=False, total_runtime_seconds=total_runtime)
+                # optional: store as paused in DB
+                try:
+                    self.repo.mark_run_paused(
+                        self.run_id,
+                        paused_after_stage="webodm",
+                        reason="webodm_ui_cancel",
+                    )
+                except Exception:
+                    pipeline_logger.exception("Failed to mark run paused after WebODM cancel")
 
-            if self.survey_id:
-                self.repo.mark_survey_finished(self.survey_id, success=False, total_runtime_seconds=total_runtime)
-
-            pipeline_logger.exception(f"RGB Pipeline failed | run_id={self.run_id}")
-            return self.state
+                return self.state
 
         except Exception as e:
             # Any other exception -> failure

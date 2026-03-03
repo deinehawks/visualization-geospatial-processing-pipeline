@@ -99,6 +99,28 @@ class StageRunner:
 
             self.logger.info(f"\033[92m✔ DONE   | {stage_name} | {runtime:.2f}s\033[0m")
             return result
+        
+        except RuntimeError as e:
+            runtime = time.perf_counter() - start
+
+            # ---- SPECIAL: WebODM UI Cancel (soft stop) ----
+            if str(e) == "WEBODM_TASK_CANCELED":
+                # mark stage as failed in DB (since schema only has completed/failed),
+                # but do NOT treat as pipeline failure — pipeline will handle it.
+                self.repo.finish_stage(
+                    stage_id=stage_id,
+                    success=False,
+                    runtime_seconds=runtime,
+                    output=None,
+                    error_message="Canceled in WebODM UI",
+                )
+                self.logger.warning(f"\033[93m⏹ CANCELED | {stage_name} | {runtime:.2f}s\033[0m")
+
+                # bubble up a special pipeline-level signal (like your pause flag)
+                raise RuntimeError("__PIPELINE_CANCELED__") from e
+
+            # otherwise fall through to generic exception handler
+            raise
 
         except Exception as e:
             runtime = time.perf_counter() - start
