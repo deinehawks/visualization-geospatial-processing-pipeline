@@ -1,10 +1,9 @@
 from __future__ import annotations
-
-import argparse
 from pathlib import Path
-
 from shared.config import load_pipeline_config
 from pipelines.rgb_pipeline import RGBPipeline
+
+import argparse
 
 
 # --------------------------------------------------

@@ -1,11 +1,11 @@
 from __future__ import annotations
-
-import time
-from typing import Callable, Any, Optional, Dict
-import logging
-
 from shared.db.repo import PipelineRepo
 from shared.logging import line
+from typing import Callable, Any, Optional, Dict
+
+import time
+import logging
+
 
 
 class StageRunner:

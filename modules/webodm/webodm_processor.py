@@ -1,13 +1,12 @@
 from __future__ import annotations
+from datetime import datetime
+from pathlib import Path
+from typing import Optional, Tuple, Dict, Any
 
 import csv
 import json
 import os
 import time
-from datetime import datetime
-from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
-
 import logging
 import requests
 

@@ -18,15 +18,14 @@ Design:
 """
 
 from __future__ import annotations
+from pathlib import Path
+from statistics import mean, stdev
+from typing import Dict, List, Optional, Tuple, Set
 
 import math
 import shutil
 import logging
 import time
-from pathlib import Path
-from statistics import mean, stdev
-from typing import Dict, List, Optional, Tuple, Set
-
 import exifread
 
 
