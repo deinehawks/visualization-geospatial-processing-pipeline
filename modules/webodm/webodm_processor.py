@@ -67,15 +67,47 @@ class WebODMProcessor:
         self.logger.info(f"Project created (ID={project_id})")
         return int(project_id)
 
-    def get_task(self, project_id: int, task_id: str) -> dict:
-        """Canonical task fetch. Use this everywhere."""
-        resp = self.session.get(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/",
-            headers=self.headers,
-            timeout=60,
-        )
-        resp.raise_for_status()
-        return resp.json()
+    def get_task(self, project_id: int, task_id: str, *, retries: int = 5, backoff: float = 2.0) -> dict:
+        """
+        Canonical task fetch with resilience against transient network drops
+        (WinError 10053, ReadTimeout, ProtocolError, Docker hiccups).
+        """
+        url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/"
+
+        last_err: Optional[Exception] = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                resp = self.session.get(url, headers=self.headers, timeout=60)
+
+                # If JWT expired or session lost auth somehow
+                if resp.status_code in (401, 403):
+                    self.logger.warning(f"get_task auth error (status={resp.status_code}). Re-authenticating...")
+                    self._reset_session(reauth=True)
+                    continue
+
+                resp.raise_for_status()
+                return resp.json()
+
+            except (
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+            ) as e:
+                last_err = e
+                self.logger.warning(
+                    f"get_task transient network error (attempt {attempt}/{retries}): {e}. "
+                    f"Resetting session and retrying..."
+                )
+                self._reset_session(reauth=False)
+                time.sleep(backoff * attempt)
+                continue
+
+            except Exception as e:
+                # Non-transient error: bubble up immediately
+                raise
+
+        raise RuntimeError(f"get_task failed after {retries} retries: {last_err}") from last_err
 
     def get_task_output(self, project_id: int, task_id: str) -> str:
         resp = self.session.get(
@@ -147,16 +179,18 @@ class WebODMProcessor:
         poll_seconds: int = 10,
         timeout_seconds: Optional[int] = None,
         live: bool = False,
+        max_consecutive_poll_errors: int = 30,  # NEW
     ) -> Tuple[bool, float, Dict[str, Any]]:
         """
-        Poll WebODM task until it reaches a terminal status:
-        completed / failed / canceled
+        Poll WebODM task until terminal status: completed / failed / canceled.
 
-        Returns: (success, runtime_seconds, task_info)
+        Resilient to transient network errors by retrying get_task() and allowing
+        some consecutive poll failures before aborting.
         """
         start = time.time()
         last_status: Optional[str] = None
         last_line_len = 0
+        consecutive_errors = 0
 
         def _emit_live(line: str) -> None:
             nonlocal last_line_len
@@ -180,9 +214,33 @@ class WebODMProcessor:
         while True:
             # timeout guard
             if timeout_seconds is not None and (time.time() - start) > float(timeout_seconds):
+                _finalize_live()
                 raise TimeoutError(f"WebODM task timed out after {timeout_seconds}s (task_id={task_id})")
 
-            task_info = self.get_task(project_id, task_id)
+            try:
+                task_info = self.get_task(project_id, task_id)  # retry-safe
+                consecutive_errors = 0
+            except Exception as e:
+                consecutive_errors += 1
+                elapsed = time.time() - start
+
+                self.logger.warning(
+                    f"WebODM poll error ({consecutive_errors}/{max_consecutive_poll_errors}) "
+                    f"task_id={task_id} | elapsed={self.fmt_elapsed(elapsed)} | err={e}"
+                )
+
+                _emit_live(
+                    f"WebODM poll error {consecutive_errors}/{max_consecutive_poll_errors} | "
+                    f"elapsed={self.fmt_elapsed(elapsed)}"
+                )
+
+                if consecutive_errors >= max_consecutive_poll_errors:
+                    _finalize_live()
+                    raise  # fail the stage only after repeated failures
+
+                time.sleep(poll_seconds)
+                continue
+
             status_label, is_terminal = self._normalize_status(task_info.get("status"))
 
             if status_label != last_status:
@@ -474,6 +532,27 @@ class WebODMProcessor:
     # -------------------------
     # Documentation helpers (kept)
     # -------------------------
+
+    def _reset_session(self, *, reauth: bool = False) -> None:
+        """
+        Recreate requests.Session() to recover from broken keep-alive sockets
+        (common on Windows/Docker/WSL2 under load).
+
+        If reauth=True, re-run authenticate() to refresh JWT token.
+        """
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
+        self.session = requests.Session()
+
+        # Preserve auth header if we still have a token
+        if self.token:
+            self.headers = {"Authorization": f"JWT {self.token}"}
+
+        if reauth:
+            self.authenticate()
 
     def _format_time(self, seconds: float) -> str:
         hours = int(seconds // 3600)

@@ -1,0 +1,48 @@
+STM_1Ha_M3C_60m_85f75s_5mps
+
+Task 1: 63 Images
+
+Processing Time: 05:37
+Processing Node: Worker 1
+
+Task 2: 63 Images, With Boundary,  dsm, dtm
+
+Processing Node: Worker 1
+Processing Time: 16:26
+
+
+
+TANGLAW_A2S_6.3Hai_12.7Hac_60m_85f75s_14.5kph_2sFrame
+
+Task 1: 433 Images
+
+Processing Time: 34:17
+Processing Node: Worker 1
+
+Task 2: 433 Images, With Boundary,  dsm, dtm
+
+Processing Node: Worker 1
+Processing Time: 1:41:05
+
+
+
+BLC_A2S_2Ha_60m
+
+Task 1:128 Images
+
+Processing Time: 07:51
+Processing Node: Worker 1
+
+Task 2: 128 Images, With Boundary, dsm, dtm
+
+Processing Time: 
+Processing Node: Worker 1
+
+
+
+
+
+okay so while it is processing lets discuss about the qgis module focusing on rgb dataset shall we? i am going to give you our standard for qgis processing. so after generating and downloading the ODM-generated orthomosaic, the rasters are typically processed using QGIS for visualization purposes. Before proceeding, make sure that you have the following files available and properly sorted/stored using the data segregation guide:
+- Boundary KML
+- Unbounded orthomosaic TIF (Raw)
+- Bounded orthomosaic TIF (Raw)

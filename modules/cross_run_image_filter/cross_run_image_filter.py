@@ -1,5 +1,5 @@
 """
-Cross-Run Image Filter (Pipeline-ready)
+Cross-Run Image Filter 
 
 Filters drone images by detecting:
 - cross-run turns using bearing change distribution analysis
@@ -144,7 +144,6 @@ def calculate_distances_and_bearings(
 def calculate_adaptive_parameters(
     distances: List[float],
     bearing_changes: List[float],
-    logger: logging.Logger,
 ) -> Dict[str, float]:
     """Adaptive params based on dataset statistics."""
     sorted_distances = sorted([d for d in distances if d > 0])
