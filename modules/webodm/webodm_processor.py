@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any, Iterable, Optional
+from typing import Optional, Tuple, Dict, Any, Iterable
 
 import csv
 import json
@@ -708,7 +708,7 @@ class WebODMProcessor:
 
     def download_all_assets(self, project_id: int, task_id: str, out_file: str) -> None:
         """
-        Downloads the full task assets zip (if your WebODM exposes it).
+        Downloads the full task assets zip.
         Endpoint can vary by version; adjust if your API differs.
         """
         url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/download/all.zip"
@@ -811,7 +811,7 @@ class WebODMProcessor:
         return final_out
 
 
-    def export_pointcloud_laz_ply_pcd(
+    def export_pointcloud(
         self,
         project_id: int,
         task_id: str,
@@ -852,6 +852,29 @@ class WebODMProcessor:
             "pcd": str(pcd_path) if ok_pcd else None,
             "asset_type": used_asset,
         }
+    
+    def download_all_assets_safe(
+        self,
+        project_id: int,
+        task_id: str,
+        out_path: Path,
+        *,
+        skip_404: bool = True,
+    ) -> bool:
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.download_all_assets(project_id, task_id, str(out_path))
+            return True
+        except requests.HTTPError as e:
+            code = getattr(e.response, "status_code", None)
+            if skip_404 and code == 404:
+                self.logger.warning("all.zip not available (skip)")
+                return False
+            self.logger.exception(f"Failed downloading all-assets zip -> {out_path}")
+            return False
+        except Exception:
+            self.logger.exception(f"Failed downloading all-assets zip -> {out_path}")
+            return False
 
 
     

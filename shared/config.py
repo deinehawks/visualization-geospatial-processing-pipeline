@@ -106,6 +106,25 @@ def load_pipeline_config() -> dict:
             "task1_options": read_json_env("WEBODM_TASK1_OPTIONS_JSON", {}),
             "task2_options": read_json_env("WEBODM_TASK2_OPTIONS_JSON", {}),
         },
+        "qgis": {
+            "enabled": os.getenv("QGIS_ENABLED", "true").lower() == "true",
+            "tools": {
+                "gdalwarp_path": os.getenv("GDALWARP_PATH", "gdalwarp"),
+                "gdal2tiles_path": os.getenv("GDAL2TILES_PATH", "gdal2tiles.py"),
+            },
+            "clip": {
+                "enabled": os.getenv("QGIS_CLIP_ENABLED", "true").lower() == "true",
+                "filename_template": os.getenv("QGIS_CLIP_FILENAME_TEMPLATE", "orthomosaic-clipped--{flag}.tif"),
+                "dst_nodata": os.getenv("QGIS_CLIP_DST_NODATA", ""),  # empty = none
+            },
+            "tiles": {
+                "enabled": os.getenv("QGIS_TILES_ENABLED", "true").lower() == "true",
+                "zoom": os.getenv("QGIS_TILES_ZOOM", "11-24"),
+                "profile": os.getenv("QGIS_TILES_PROFILE", "mercator"),
+                "webviewer": os.getenv("QGIS_TILES_WEBVIEWER", "none"),
+                "copyright": os.getenv("QGIS_TILES_COPYRIGHT", "ASIMOV-HAWKS"),
+            },
+        }
     }
 
     # Basic validation

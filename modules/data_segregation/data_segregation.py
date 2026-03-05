@@ -99,6 +99,17 @@ def run(
 
         # 3D
         "3d": survey_path / "3d",
+
+        # QGIS
+        "qgis_root": survey_path / "qgis",
+        "qgis_clipped": survey_path / "qgis" / "clipped",
+        "qgis_clipped_ortho": survey_path / "qgis" / "clipped" / "ortho",
+
+        # Tiles
+        "tiles_root": survey_path / "tiles",
+        "tiles_ortho": survey_path / "tiles" / "ortho",
+        "tiles_ortho_sharp": survey_path / "tiles" / "ortho" / "sharp-corners",
+        "tiles_ortho_round": survey_path / "tiles" / "ortho" / "round-corners",
     }
 
     extra_folders = [
@@ -107,6 +118,9 @@ def run(
         survey_path / "object-detection",
         survey_path / "qgis" / "clipped",
         survey_path / "tiles",
+        survey_path / "qgis" / "clipped" / "ortho",
+        survey_path / "tiles" / "ortho" / "sharp-corners",
+        survey_path / "tiles" / "ortho" / "round-corners",
     ]
 
     for p in list(dirs.values()) + extra_folders:

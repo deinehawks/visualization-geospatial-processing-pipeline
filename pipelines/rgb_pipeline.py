@@ -10,7 +10,7 @@ import uuid
 import logging
 import os
 import shutil
-
+from modules import QGISTools
 
 class RGBPipeline:
     """
@@ -22,6 +22,7 @@ class RGBPipeline:
       3) kml_boundary      (kml -> geojson + csv)
       4) webodm            (task1 unbounded, task2 bounded)
       5) quality_gate      (placeholder)
+      5) qgis      
     """
 
     def __init__(
@@ -57,6 +58,7 @@ class RGBPipeline:
             "cross_run_filter": get_logger("rgb.cross_run_filter", self.logs_dir / "cross_run_filter.log"),
             "kml": get_logger("rgb.kml", self.logs_dir / "kml.log"),
             "webodm": get_logger("rgb.webodm", self.logs_dir / "webodm.log"),
+            "qgis": get_logger("rgb.qgis", self.logs_dir / "qgis.log"),
         }
 
         self.state: Dict[str, Any] = {
@@ -572,8 +574,8 @@ class RGBPipeline:
                                     tmp_raw = out_base / f"__tmp_raw_{fname}"
                                     final_out = out_base / fname
 
-                                    asset_type = f"{model}/{color}/{shading}"  # adjust to your API once confirmed
-                                    ok = processor.download_asset_safe(asset_type, tmp_raw)
+                                    asset_type = f"{model}/{color}/{shading}" 
+                                    ok = processor.download_asset_safe(project_id, current_task_id, asset_type, tmp_raw)
                                     if ok:
                                         processor.run_gdalwarp(tmp_raw, final_out, epsg)
                                         try:
@@ -596,7 +598,7 @@ class RGBPipeline:
                     laz_candidates = list(pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"])
                     pdal_path = tools_cfg.get("pdal_path") or "pdal"
 
-                    pc_out = processor.export_pointcloud_laz_ply_pcd(
+                    pc_out = processor.export_pointcloud(
                         project_id,
                         current_task_id,
                         out_dir=pc_dir,
@@ -626,17 +628,166 @@ class RGBPipeline:
                     out_dir = dir_from_key(zcfg["out_dir_key"])
                     fname = zcfg.get("filename_template", "{survey_id}-RGB-{flag}-all.zip").format(
                         survey_id=survey_id,
-                        flag=task2_flag,  
+                        flag=task2_flag,
                     )
                     zip_path = out_dir / fname
-                    if processor.download_asset_safe(zip_path):
+
+                    ok = processor.download_all_assets_safe(project_id, current_task_id, zip_path)
+                    if ok:
                         result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+                    else:
+                        logger.warning("All-assets zip was not downloaded (endpoint missing or failed).")
 
             return result
 
         finally:
             if cached_dir is not None:
                 self._cleanup_upload_cache(cached_dir, logger)
+
+    def stage_qgis(self) -> Dict[str, Any]:
+        logger = self.loggers["qgis"]
+        logger.info("Stage: QGIS Processing (clip + tiles)")
+
+        survey_id = self._require_survey_id()
+        rgb_path = self._require_rgb_path()
+
+        qgis_cfg = (self.config.get("qgis") or {})
+        if not bool(qgis_cfg.get("enabled", True)):
+            logger.info("QGIS stage disabled (qgis.enabled=false).")
+            return {"skipped": True}
+
+        exports_cfg = (self.config.get("exports") or {})
+        tools_cfg = (exports_cfg.get("tools") or {})
+        ortho_cfg = (exports_cfg.get("ortho") or {})
+
+        # --- dirs map ---
+        ds = self.state.get("data_segregation") or {}
+        dirs = ds.get("dirs") or {}
+        if not dirs:
+            raise RuntimeError("Missing data_segregation.dirs in state.")
+
+        def dir_from_key(key: str, *, fallback: Optional[Path] = None) -> Path:
+            p = dirs.get(key)
+            if p:
+                return Path(p)
+            if fallback is not None:
+                return Path(fallback)
+            raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
+
+        # --- boundary ---
+        boundary_geojson_path = self.state.get("boundary_geojson_path")
+        if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+            raise RuntimeError("QGIS stage requires boundary_geojson_path (missing).")
+
+        # --- orthos from WebODM stage ---
+        web = self.state.get("webodm") or {}
+        dls = web.get("downloads") or {}
+        t1 = (dls.get("task1") or {})
+        t2 = (dls.get("task2") or {})
+
+        unbounded_ortho = t1.get("orthomosaic")
+        bounded_ortho = t2.get("orthomosaic")  # may be None if task2 skipped
+
+        if not unbounded_ortho or not Path(unbounded_ortho).exists():
+            raise RuntimeError("QGIS stage requires Task 1 orthomosaic (unbounded) downloaded first.")
+
+        # --- naming flags (consistent) ---
+        naming_cfg = self.config.get("naming", {})
+        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
+        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
+        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
+        task1_flag = f"{crossrun_flag}{boundary_flag_task1}"  # ex: xcxb
+        task2_flag = f"{crossrun_flag}{boundary_flag_task2}"  # ex: xcb
+
+        # --- output dirs ---
+        clipped_ortho_dir = dir_from_key("qgis_clipped_ortho", fallback=(rgb_path / "qgis" / "clipped" / "ortho"))
+        tiles_sharp_dir = dir_from_key("tiles_ortho_sharp", fallback=(rgb_path / "tiles" / "ortho" / "sharp-corners"))
+        tiles_round_dir = dir_from_key("tiles_ortho_round", fallback=(rgb_path / "tiles" / "ortho" / "round-corners"))
+
+        # --- output filenames ---
+        unbounded_clipped = clipped_ortho_dir / f"orthomosaic-clipped--{task1_flag}.tif"
+        bounded_clipped = clipped_ortho_dir / f"orthomosaic-clipped--{task2_flag}.tif"
+
+        # --- tool paths/options ---
+        gdalwarp_path = str(tools_cfg.get("gdalwarp_path") or "gdalwarp")
+        gdal2tiles_path = str(qgis_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
+        zoom = str(qgis_cfg.get("zoom_levels") or "11-24")
+        profile = str(qgis_cfg.get("tile_profile") or "mercator")
+        copyright_text = str(qgis_cfg.get("copyright") or "ASIMOV-HAWKS")
+
+        # --- QGIS tools wrapper ---
+        tools = QGISTools(
+            logger=logger,
+            gdalwarp_path=gdalwarp_path,
+            gdal2tiles_path=gdal2tiles_path,
+        )
+
+        logger.info(f"Boundary (GeoJSON): {boundary_geojson_path}")
+
+        # 1) Clip unbounded -> always
+        logger.info(f"Clipping UNBOUNDED ortho -> {unbounded_clipped.name}")
+        tools.clip_raster_by_mask(
+            input_tif=Path(unbounded_ortho),
+            mask_geojson=Path(boundary_geojson_path),
+            output_tif=unbounded_clipped,
+        )
+
+        # 2) Clip bounded -> only if exists
+        bounded_ok = False
+        if bounded_ortho and Path(bounded_ortho).exists():
+            logger.info(f"Clipping BOUNDED ortho -> {bounded_clipped.name}")
+            tools.clip_raster_by_mask(
+                input_tif=Path(bounded_ortho),
+                mask_geojson=Path(boundary_geojson_path),
+                output_tif=bounded_clipped,
+            )
+            bounded_ok = True
+        else:
+            logger.warning("Bounded orthomosaic missing. Skipping bounded clip + round-corners tiles.")
+
+        # 3) Tiles
+        # unbounded -> sharp-corners
+        logger.info(f"Generating tiles (sharp-corners) from {unbounded_clipped.name}")
+        tools.generate_tiles(
+            input_tif=unbounded_clipped,
+            output_dir=tiles_sharp_dir,
+            zoom=zoom,
+            profile=profile,
+            webviewer="none",
+            copyright_text=copyright_text,
+            clean=True,   # recommended for pipeline reproducibility
+            resume=False,
+        )
+
+        # bounded -> round-corners
+        if bounded_ok:
+            logger.info(f"Generating tiles (round-corners) from {bounded_clipped.name}")
+            tools.generate_tiles(
+                input_tif=bounded_clipped,
+                output_dir=tiles_round_dir,
+                zoom=zoom,
+                profile=profile,
+                webviewer="none",
+                copyright_text=copyright_text,
+                clean=True,
+                resume=False,
+            )
+
+        return {
+            "boundary_geojson": str(boundary_geojson_path),
+            "unbounded": {
+                "input": str(unbounded_ortho),
+                "clipped": str(unbounded_clipped),
+                "tiles_dir": str(tiles_sharp_dir),
+            },
+            "bounded": {
+                "input": str(bounded_ortho) if bounded_ortho else None,
+                "clipped": str(bounded_clipped) if bounded_ok else None,
+                "tiles_dir": str(tiles_round_dir) if bounded_ok else None,
+            },
+            "zoom_levels": zoom,
+            "tile_profile": profile,
+        }
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
@@ -824,7 +975,7 @@ class RGBPipeline:
             self.runner.run(
                 "kml_boundary",
                 self.stage_kml_boundary,
-                output_key="kml",
+                output_key="kml_boundary",
                 state=self.state,
                 force=("kml_boundary" in force_stages) or (not resume),
             )
@@ -838,6 +989,15 @@ class RGBPipeline:
                 force=("webodm" in force_stages) or (not resume),
             )
 
+            self._check_pause_or_raise("qgis")
+            self.runner.run(
+                "qgis",
+                self.stage_qgis,
+                output_key="qgis",
+                state=self.state,
+                force=("qgis" in force_stages) or (not resume),
+            )
+            
             self._check_pause_or_raise("quality_gate")
             self.runner.run(
                 "quality_gate",
