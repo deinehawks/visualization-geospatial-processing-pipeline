@@ -35,8 +35,9 @@ Processing Node: Worker 1
 
 Task 2: 128 Images, With Boundary, dsm, dtm
 
-Processing Time: 
+Processing Time: 13:04
 Processing Node: Worker 1
+
 
 
 

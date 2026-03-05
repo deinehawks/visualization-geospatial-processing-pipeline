@@ -1,7 +1,7 @@
 from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Iterable, Optional
 
 import csv
 import json
@@ -9,7 +9,8 @@ import os
 import time
 import logging
 import requests
-
+import subprocess
+import shutil
 
 class WebODMProcessor:
     def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
@@ -718,6 +719,139 @@ class WebODMProcessor:
                 for chunk in r.iter_content(chunk_size=1024 * 1024):
                     if chunk:
                         f.write(chunk)
+
+    def download_asset_safe(
+        self,
+        project_id: int,
+        task_id: str,
+        asset_type: str,
+        out_path: Path,
+        *,
+        skip_404: bool = True,
+    ) -> bool:
+        try:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            self.download_asset(project_id, task_id, asset_type, str(out_path))
+            return True
+        except requests.HTTPError as e:
+            code = getattr(e.response, "status_code", None)
+            if skip_404 and code == 404:
+                self.logger.warning(f"Asset not available (skip): {asset_type}")
+                return False
+            self.logger.exception(f"Failed downloading asset='{asset_type}' -> {out_path}")
+            return False
+        except Exception:
+            self.logger.exception(f"Failed downloading asset='{asset_type}' -> {out_path}")
+            return False
+
+
+    def run_gdalwarp(self, src: Path, dst: Path, epsg: int, *, gdalwarp_path: str = "gdalwarp") -> None:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [str(gdalwarp_path), "-t_srs", f"EPSG:{epsg}", str(src), str(dst)]
+        self.logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+        except FileNotFoundError:
+            self.logger.warning("gdalwarp not found. Skipping reprojection (keeping raw).")
+            shutil.copy2(src, dst)
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"gdalwarp failed. Keeping raw. stderr={e.stderr[:200] if e.stderr else ''}")
+            shutil.copy2(src, dst)
+
+
+    def run_pdal_translate(self, src: Path, dst: Path, *, pdal_path: str = "pdal") -> bool:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        cmd = [str(pdal_path), "translate", str(src), str(dst)]
+        self.logger.info(f"PDAL translate -> {dst.name}")
+        try:
+            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            return True
+        except FileNotFoundError:
+            self.logger.warning("pdal not found. Skipping conversion.")
+            return False
+        except subprocess.CalledProcessError as e:
+            self.logger.warning(f"pdal translate failed for {dst.name}. stderr={e.stderr[:200] if e.stderr else ''}")
+            return False
+
+
+    def export_orthomosaic(
+        self,
+        project_id: int,
+        task_id: str,
+        *,
+        out_dir: Path,
+        filename: str,
+        epsg: int,
+        candidates: Iterable[str] = ("orthophoto.tif",),
+        gdalwarp_path: str = "gdalwarp",
+    ) -> Optional[Path]:
+        out_dir.mkdir(parents=True, exist_ok=True)
+        tmp_raw = out_dir / f"__tmp_raw_{filename}"
+        final_out = out_dir / filename
+
+        downloaded = False
+        used_asset = None
+        for asset in candidates:
+            if self.download_asset_safe(project_id, task_id, asset, tmp_raw):
+                downloaded = True
+                used_asset = asset
+                break
+
+        if not downloaded:
+            self.logger.warning(f"Orthomosaic download failed. candidates={list(candidates)}")
+            return None
+
+        self.logger.info(f"Orthomosaic downloaded using asset={used_asset}")
+        self.run_gdalwarp(tmp_raw, final_out, epsg, gdalwarp_path=gdalwarp_path)
+        try:
+            tmp_raw.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+        return final_out
+
+
+    def export_pointcloud_laz_ply_pcd(
+        self,
+        project_id: int,
+        task_id: str,
+        *,
+        out_dir: Path,
+        laz_archive_name: str,
+        ply_name: str = "model.ply",
+        pcd_name: str = "odm.pcd",
+        candidates: Iterable[str] = ("georeferenced_model.laz",),
+        pdal_path: str = "pdal",
+    ) -> dict:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        laz_path = out_dir / laz_archive_name
+        downloaded = False
+        used_asset = None
+        for asset in candidates:
+            if self.download_asset_safe(project_id, task_id, asset, laz_path):
+                downloaded = True
+                used_asset = asset
+                break
+
+        if not downloaded:
+            self.logger.warning(f"LAZ download failed. candidates={list(candidates)}")
+            return {"laz": None, "ply": None, "pcd": None, "asset_type": None}
+
+        self.logger.info(f"Pointcloud downloaded using asset={used_asset}")
+
+        ply_path = out_dir / ply_name
+        pcd_path = out_dir / pcd_name
+
+        ok_ply = self.run_pdal_translate(laz_path, ply_path, pdal_path=pdal_path)
+        ok_pcd = self.run_pdal_translate(laz_path, pcd_path, pdal_path=pdal_path)
+
+        return {
+            "laz": str(laz_path),
+            "ply": str(ply_path) if ok_ply else None,
+            "pcd": str(pcd_path) if ok_pcd else None,
+            "asset_type": used_asset,
+        }
 
 
     

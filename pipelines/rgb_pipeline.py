@@ -8,7 +8,6 @@ from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
 import time
 import uuid
 import logging
-import subprocess
 import os
 import shutil
 
@@ -438,40 +437,6 @@ class RGBPipeline:
                 description="RGB automated processing",
             )
 
-            # ---------------- helpers ----------------
-
-            def run_gdalwarp(src: Path, dst: Path, epsg: int) -> None:
-                gdalwarp = tools_cfg.get("gdalwarp_path") or "gdalwarp"
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                cmd = [str(gdalwarp), "-t_srs", f"EPSG:{epsg}", str(src), str(dst)]
-                logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
-                try:
-                    subprocess.run(cmd, check=True, capture_output=True, text=True)
-                except FileNotFoundError:
-                    logger.warning("gdalwarp not found. Skipping reprojection (keeping raw download).")
-                    shutil.copy2(src, dst)
-                except subprocess.CalledProcessError as e:
-                    logger.warning(f"gdalwarp failed. Keeping raw download. stderr={e.stderr[:200] if e.stderr else ''}")
-                    shutil.copy2(src, dst)
-
-            def safe_download_asset(asset_type: str, out_path: Path) -> bool:
-                try:
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    processor.download_asset(project_id, current_task_id, asset_type, str(out_path))
-                    return True
-                except Exception:
-                    logger.exception(f"Failed downloading asset_type='{asset_type}' to {out_path}")
-                    return False
-
-            def safe_download_all_assets(out_path: Path) -> bool:
-                try:
-                    out_path.parent.mkdir(parents=True, exist_ok=True)
-                    processor.download_all_assets(project_id, current_task_id, str(out_path))
-                    return True
-                except Exception:
-                    logger.exception(f"Failed downloading all-assets zip to {out_path}")
-                    return False
-
             # ---------------- TASK 1 (always) ----------------
             task1_options = dict(webodm_cfg.get("task1_options", {}))
             current_task_id = processor.create_task_with_images(
@@ -498,32 +463,26 @@ class RGBPipeline:
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
                 out_dir = dir_from_key(ortho_cfg["out_dir_key"])
-                epsg = int(ortho_cfg.get("reproject_epsg", 4326))  # per your doc: EPSG:4326
-                filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(
-                    flag=task1_flag
+                epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+
+                filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(flag=task1_flag)
+                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
+
+                out_path = processor.export_orthomosaic(
+                    project_id,
+                    current_task_id,
+                    out_dir=out_dir,
+                    filename=filename,
+                    epsg=epsg,
+                    candidates=candidates,
+                    gdalwarp_path=(tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                 )
 
-                tmp_raw = out_dir / f"__tmp_raw_{filename}"
-                final_out = out_dir / filename
-
-                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
-                downloaded = False
-                for asset_type in candidates:
-                    if safe_download_asset(asset_type, tmp_raw):
-                        downloaded = True
-                        result["downloads"]["task1"]["orthomosaic_raw"] = str(tmp_raw)
-                        break
-
-                if downloaded:
-                    run_gdalwarp(tmp_raw, final_out, epsg)
-                    try:
-                        tmp_raw.unlink(missing_ok=True)
-                    except Exception:
-                        pass
-                    result["downloads"]["task1"]["orthomosaic"] = str(final_out)
+                if out_path:
+                    result["downloads"]["task1"]["orthomosaic"] = str(out_path)
                     result["downloads"]["task1"]["epsg"] = epsg
                 else:
-                    logger.warning("Could not download orthomosaic (no candidate succeeded).")
+                    logger.warning("Could not download orthomosaic for Task 1.")
 
             # ---------------- TASK 2 (only if boundary exists) ----------------
             if not boundary_available:
@@ -555,11 +514,37 @@ class RGBPipeline:
             result["task2"] = {"id": current_task_id, "name": task2_name, "success": t2_success, "runtime_seconds": t2_runtime}
             result["boundary_used"] = True
 
+            # ---------------- Task 2 bounded orthomosaic ----------------
+            if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
+                ortho_cfg = exports_cfg["ortho"]
+                out_dir = dir_from_key(ortho_cfg["out_dir_key"])
+                epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+
+                filename = ortho_cfg.get("filename_template", "orthomosaic--{flag}.tif").format(flag=task2_flag)
+                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
+
+                out_path = processor.export_orthomosaic(
+                    project_id,
+                    current_task_id,
+                    out_dir=out_dir,
+                    filename=filename,
+                    epsg=epsg,
+                    candidates=candidates,
+                    gdalwarp_path=(tools_cfg.get("gdalwarp_path") or "gdalwarp"),
+                )
+
+                if out_path:
+                    result["downloads"]["task2"]["orthomosaic"] = str(out_path)
+                    result["downloads"]["task2"]["epsg"] = epsg
+                else:
+                    logger.warning("Could not download bounded orthomosaic for Task 2.")
+
             # ---------------- Downloads after TASK 2 ----------------
             if exports_cfg.get("enabled", False):
                 # -------- DEM (config-driven, non-interactive) --------
                 dem_cfg = (exports_cfg.get("dem") or {})
-                dem_do_download = bool(dem_cfg.get("enabled", False)) and bool(dem_cfg.get("download", True))
+                # dem_do_download = bool(dem_cfg.get("enabled", False)) and bool(dem_cfg.get("download", True))
+                dem_do_download = False  # MVP: disable DSM/DTM downloads until web/app supports DEM outputs
 
                 if dem_do_download:
                     epsg = int(dem_cfg.get("reproject_epsg", 3857))  # per your doc: EPSG:3857
@@ -588,9 +573,9 @@ class RGBPipeline:
                                     final_out = out_base / fname
 
                                     asset_type = f"{model}/{color}/{shading}"  # adjust to your API once confirmed
-                                    ok = safe_download_asset(asset_type, tmp_raw)
+                                    ok = processor.download_asset_safe(asset_type, tmp_raw)
                                     if ok:
-                                        run_gdalwarp(tmp_raw, final_out, epsg)
+                                        processor.run_gdalwarp(tmp_raw, final_out, epsg)
                                         try:
                                             tmp_raw.unlink(missing_ok=True)
                                         except Exception:
@@ -600,45 +585,39 @@ class RGBPipeline:
                         result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
                         result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
 
-                # ------------- Point Cloud (PLY) --------------
+                # ------------- Point Cloud (LAZ -> PLY/PCD) --------------
                 pc_cfg = (exports_cfg.get("pointcloud") or {})
                 pc_enabled = bool(pc_cfg.get("enabled", True))
 
                 if pc_enabled:
                     pc_dir_key = str(pc_cfg.get("out_dir_key") or "3d")
                     pc_dir = dir_from_key(pc_dir_key, fallback=(rgb_path / "3d"))
-                    pc_dir.mkdir(parents=True, exist_ok=True)
 
-                    filename_tmpl = str(pc_cfg.get("filename_template") or "{survey_id}-RGB-{flag}.ply")
-                    ply_filename = filename_tmpl.format(survey_id=survey_id, flag=task2_flag)
-                    ply_path = pc_dir / ply_filename
+                    laz_candidates = list(pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"])
+                    pdal_path = tools_cfg.get("pdal_path") or "pdal"
 
-                    ply_candidates = list(pc_cfg.get("asset_candidates") or [
-                        "model.ply",
-                        "odm_georeferencing/odm_georeferenced_model.ply",
-                        "odm_texturing/model.ply",
-                    ])
+                    pc_out = processor.export_pointcloud_laz_ply_pcd(
+                        project_id,
+                        current_task_id,
+                        out_dir=pc_dir,
+                        laz_archive_name=f"{survey_id}-RGB-{task2_flag}.laz",
+                        ply_name="model.ply",
+                        pcd_name="odm.pcd",
+                        candidates=laz_candidates,
+                        pdal_path=pdal_path,
+                    )
 
-                    downloaded_pc = False
-                    for asset_type in ply_candidates:
-                        if safe_download_asset(asset_type, ply_path):
-                            downloaded_pc = True
-                            result["downloads"]["task2"]["pointcloud_ply"] = str(ply_path)
-                            result["downloads"]["task2"]["pointcloud_asset_type"] = asset_type
-                            break
+                    result["downloads"]["task2"]["pointcloud_laz"] = pc_out.get("laz")
+                    result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get("ply")
+                    result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get("pcd")
+                    result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get("asset_type")
 
-                    if not downloaded_pc:
-                        required = bool(pc_cfg.get("required", True))
-                        msg = f"Point cloud download failed. candidates={ply_candidates}"
-                        if required:
-                            raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
-                        else:
-                            logger.warning(msg)
-                            result["downloads"]["task2"]["pointcloud_ply"] = None
-                            result["downloads"]["task2"]["pointcloud_error"] = msg
+                    # If you still want to fail hard when LAZ download fails:
+                    if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
+                        raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
+
                 else:
-                    logger.info("Point cloud download skipped (EXPORT_POINTCLOUD=false).")
-                    result["downloads"]["task2"]["pointcloud_ply"] = None
+                    logger.info("Point cloud download skipped (pointcloud.enabled=false).")
                     result["downloads"]["task2"]["pointcloud_skipped"] = True
 
                 # -------- All Assets ZIP (archive) --------
@@ -650,7 +629,7 @@ class RGBPipeline:
                         flag=task2_flag,  
                     )
                     zip_path = out_dir / fname
-                    if safe_download_all_assets(zip_path):
+                    if processor.download_asset_safe(zip_path):
                         result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
 
             return result

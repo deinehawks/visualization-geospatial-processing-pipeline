@@ -144,6 +144,7 @@ def calculate_distances_and_bearings(
 def calculate_adaptive_parameters(
     distances: List[float],
     bearing_changes: List[float],
+    logger=None,
 ) -> Dict[str, float]:
     """Adaptive params based on dataset statistics."""
     sorted_distances = sorted([d for d in distances if d > 0])
