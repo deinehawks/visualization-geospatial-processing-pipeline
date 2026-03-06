@@ -82,9 +82,11 @@ def load_pipeline_config() -> dict:
                 "asset_candidates": read_csv_env(
                     "POINTCLOUD_ASSET_CANDIDATES",
                     [
-                        "model.ply",
-                        "odm_georeferencing/odm_georeferenced_model.ply",
-                        "odm_texturing/model.ply",
+                        "georeferenced_model.laz",
+                        "odm_georeferencing/georeferenced_model.laz",
+                        "odm_georeferencing/odm_georeferenced_model.laz",
+                        "odm_georeferencing/odm_georeferenced_model.laz.zip",
+                        "odm_georeferencing/georeferenced_model.laz.zip",
                     ],
                 ),
                 # if enabled but download fails: fail stage or just warn?

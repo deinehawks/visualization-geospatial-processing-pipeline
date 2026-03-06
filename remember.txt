@@ -15,3 +15,6 @@ AH-026002 = TANGLAW_A2S_6.3Hai_12.7Hac_60m_85f75s_14.5kph_2sFrame -- 16x9
 AH-026003 = BLC_A2S_2Ha_60m -- 16x9
 AH-026004 = STM_1Ha_A2S_60m_85f75s_4mps -- 16x9
 
+
+Find gdalwarp in disk C
+Get-ChildItem -Path C:\ -Filter gdalwarp.exe -File -Recurse -ErrorAction SilentlyContinue

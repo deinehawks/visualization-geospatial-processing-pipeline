@@ -312,11 +312,11 @@ class RGBPipeline:
                     f"(total={total_images}, kept={kept_fs}, excluded={excl_fs})"
                 )
 
-                shutil.rmtree(input_dir)
-                logger.info("Raw folder deleted successfully.")
-
-                input_dir.mkdir(parents=True, exist_ok=True)
-                logger.info("Raw folder recreated (empty).")
+                if input_dir.name == "raw" and input_dir.exists():
+                    shutil.rmtree(input_dir)
+                    logger.info(f"Raw folder deleted after filtering: {input_dir}")
+                else:
+                    logger.warning(f"Refusing to delete unexpected folder: {input_dir}")
 
                 result["raw_deleted"] = True
 
@@ -368,7 +368,7 @@ class RGBPipeline:
         webodm_cfg = self.config["webodm"]
         naming_cfg = self.config.get("naming", {})
         exports_cfg = self.config.get("exports", {})
-        tools_cfg = (exports_cfg.get("tools") or {})
+        qgis_tools_cfg = (exports_cfg.get("tools") or {})
 
         ds = self.state.get("data_segregation") or {}
         dirs = ds.get("dirs") or {}
@@ -477,7 +477,7 @@ class RGBPipeline:
                     filename=filename,
                     epsg=epsg,
                     candidates=candidates,
-                    gdalwarp_path=(tools_cfg.get("gdalwarp_path") or "gdalwarp"),
+                    gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                 )
 
                 if out_path:
@@ -532,7 +532,7 @@ class RGBPipeline:
                     filename=filename,
                     epsg=epsg,
                     candidates=candidates,
-                    gdalwarp_path=(tools_cfg.get("gdalwarp_path") or "gdalwarp"),
+                    gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                 )
 
                 if out_path:
@@ -596,7 +596,7 @@ class RGBPipeline:
                     pc_dir = dir_from_key(pc_dir_key, fallback=(rgb_path / "3d"))
 
                     laz_candidates = list(pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"])
-                    pdal_path = tools_cfg.get("pdal_path") or "pdal"
+                    pdal_path = qgis_tools_cfg.get("pdal_path") or "pdal"
 
                     pc_out = processor.export_pointcloud(
                         project_id,
@@ -656,17 +656,13 @@ class RGBPipeline:
             logger.info("QGIS stage disabled (qgis.enabled=false).")
             return {"skipped": True}
 
-        exports_cfg = (self.config.get("exports") or {})
-        tools_cfg = (exports_cfg.get("tools") or {})
-        ortho_cfg = (exports_cfg.get("ortho") or {})
-
         # --- dirs map ---
         ds = self.state.get("data_segregation") or {}
         dirs = ds.get("dirs") or {}
         if not dirs:
             raise RuntimeError("Missing data_segregation.dirs in state.")
 
-        def dir_from_key(key: str, *, fallback: Optional[Path] = None) -> Path:
+        def dir_from_key(key: str, fallback: Optional[Path] = None) -> Path:
             p = dirs.get(key)
             if p:
                 return Path(p)
@@ -704,16 +700,36 @@ class RGBPipeline:
         tiles_sharp_dir = dir_from_key("tiles_ortho_sharp", fallback=(rgb_path / "tiles" / "ortho" / "sharp-corners"))
         tiles_round_dir = dir_from_key("tiles_ortho_round", fallback=(rgb_path / "tiles" / "ortho" / "round-corners"))
 
-        # --- output filenames ---
-        unbounded_clipped = clipped_ortho_dir / f"orthomosaic-clipped--{task1_flag}.tif"
-        bounded_clipped = clipped_ortho_dir / f"orthomosaic-clipped--{task2_flag}.tif"
+        # --- output filenames (use config template) ---
+        clip_cfg = (qgis_cfg.get("clip") or {})
+        clip_enabled = bool(clip_cfg.get("enabled", True))
+        clip_tmpl = str(clip_cfg.get("filename_template") or "orthomosaic-clipped--{flag}.tif")
 
-        # --- tool paths/options ---
-        gdalwarp_path = str(tools_cfg.get("gdalwarp_path") or "gdalwarp")
-        gdal2tiles_path = str(qgis_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
-        zoom = str(qgis_cfg.get("zoom_levels") or "11-24")
-        profile = str(qgis_cfg.get("tile_profile") or "mercator")
-        copyright_text = str(qgis_cfg.get("copyright") or "ASIMOV-HAWKS")
+        unbounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task1_flag)
+        bounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task2_flag)
+
+        # --- tool paths/options (FIXED: read from qgis.tools + qgis.tiles) ---
+        qgis_tools_cfg = (qgis_cfg.get("tools") or {})
+        gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
+        gdal2tiles_path = str(qgis_tools_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
+
+        tiles_cfg = (qgis_cfg.get("tiles") or {})
+        tiles_enabled = bool(tiles_cfg.get("enabled", True))
+        zoom = str(tiles_cfg.get("zoom") or "11-24")
+        profile = str(tiles_cfg.get("profile") or "mercator")
+        webviewer = str(tiles_cfg.get("webviewer") or "none")
+        copyright_text = str(tiles_cfg.get("copyright") or "ASIMOV-HAWKS")
+
+        # --- optional nodata ---
+        dst_nodata_raw = (clip_cfg.get("dst_nodata") or "")
+        dst_nodata = None
+        if isinstance(dst_nodata_raw, (int, float)):
+            dst_nodata = float(dst_nodata_raw)
+        elif isinstance(dst_nodata_raw, str) and dst_nodata_raw.strip() != "":
+            try:
+                dst_nodata = float(dst_nodata_raw.strip())
+            except ValueError:
+                raise ValueError(f"Invalid QGIS_CLIP_DST_NODATA value: '{dst_nodata_raw}' (must be a number or empty)")
 
         # --- QGIS tools wrapper ---
         tools = QGISTools(
@@ -723,70 +739,97 @@ class RGBPipeline:
         )
 
         logger.info(f"Boundary (GeoJSON): {boundary_geojson_path}")
+        logger.info(f"Using gdalwarp: {gdalwarp_path}")
+        logger.info(f"Using gdal2tiles: {gdal2tiles_path}")
 
-        # 1) Clip unbounded -> always
-        logger.info(f"Clipping UNBOUNDED ortho -> {unbounded_clipped.name}")
-        tools.clip_raster_by_mask(
-            input_tif=Path(unbounded_ortho),
-            mask_geojson=Path(boundary_geojson_path),
-            output_tif=unbounded_clipped,
-        )
+        # 1) Clip unbounded -> always (unless disabled)
+        if clip_enabled:
+            logger.info(f"Clipping UNBOUNDED ortho -> {unbounded_clipped.name}")
+            tools.clip_raster_by_mask(
+                input_tif=Path(unbounded_ortho),
+                mask_geojson=Path(boundary_geojson_path),
+                output_tif=unbounded_clipped,
+                dst_nodata=dst_nodata,
+            )
+        else:
+            logger.warning("QGIS clip disabled (qgis.clip.enabled=false). Using unbounded orthomosaic directly.")
+            unbounded_clipped = Path(unbounded_ortho)
 
-        # 2) Clip bounded -> only if exists
+        # 2) Clip bounded -> only if exists (unless disabled)
         bounded_ok = False
         if bounded_ortho and Path(bounded_ortho).exists():
-            logger.info(f"Clipping BOUNDED ortho -> {bounded_clipped.name}")
-            tools.clip_raster_by_mask(
-                input_tif=Path(bounded_ortho),
-                mask_geojson=Path(boundary_geojson_path),
-                output_tif=bounded_clipped,
-            )
-            bounded_ok = True
+            if clip_enabled:
+                logger.info(f"Clipping BOUNDED ortho -> {bounded_clipped.name}")
+                tools.clip_raster_by_mask(
+                    input_tif=Path(bounded_ortho),
+                    mask_geojson=Path(boundary_geojson_path),
+                    output_tif=bounded_clipped,
+                    dst_nodata=dst_nodata,
+                )
+                bounded_ok = True
+            else:
+                bounded_clipped = Path(bounded_ortho)
+                bounded_ok = True
         else:
             logger.warning("Bounded orthomosaic missing. Skipping bounded clip + round-corners tiles.")
 
-        # 3) Tiles
-        # unbounded -> sharp-corners
-        logger.info(f"Generating tiles (sharp-corners) from {unbounded_clipped.name}")
-        tools.generate_tiles(
-            input_tif=unbounded_clipped,
-            output_dir=tiles_sharp_dir,
-            zoom=zoom,
-            profile=profile,
-            webviewer="none",
-            copyright_text=copyright_text,
-            clean=True,   # recommended for pipeline reproducibility
-            resume=False,
-        )
-
-        # bounded -> round-corners
-        if bounded_ok:
-            logger.info(f"Generating tiles (round-corners) from {bounded_clipped.name}")
+        # 3) Tiles (doc rule: unbounded → sharp-corners, bounded → round-corners)
+        if tiles_enabled:
+            logger.info(f"Generating tiles (sharp-corners) from {Path(unbounded_clipped).name}")
             tools.generate_tiles(
-                input_tif=bounded_clipped,
-                output_dir=tiles_round_dir,
+                input_tif=Path(unbounded_clipped),
+                output_dir=tiles_sharp_dir,
                 zoom=zoom,
                 profile=profile,
-                webviewer="none",
+                webviewer=webviewer,
                 copyright_text=copyright_text,
                 clean=True,
                 resume=False,
             )
 
+            if bounded_ok:
+                logger.info(f"Generating tiles (round-corners) from {Path(bounded_clipped).name}")
+                tools.generate_tiles(
+                    input_tif=Path(bounded_clipped),
+                    output_dir=tiles_round_dir,
+                    zoom=zoom,
+                    profile=profile,
+                    webviewer=webviewer,
+                    copyright_text=copyright_text,
+                    clean=True,
+                    resume=False,
+                )
+        else:
+            logger.warning("QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation.")
+
         return {
             "boundary_geojson": str(boundary_geojson_path),
+            "tools": {
+                "gdalwarp_path": gdalwarp_path,
+                "gdal2tiles_path": gdal2tiles_path,
+            },
+            "clip": {
+                "enabled": clip_enabled,
+                "dst_nodata": dst_nodata,
+                "filename_template": clip_tmpl,
+            },
+            "tiles": {
+                "enabled": tiles_enabled,
+                "zoom": zoom,
+                "profile": profile,
+                "webviewer": webviewer,
+                "copyright": copyright_text,
+            },
             "unbounded": {
                 "input": str(unbounded_ortho),
                 "clipped": str(unbounded_clipped),
-                "tiles_dir": str(tiles_sharp_dir),
+                "tiles_dir": str(tiles_sharp_dir) if tiles_enabled else None,
             },
             "bounded": {
                 "input": str(bounded_ortho) if bounded_ortho else None,
                 "clipped": str(bounded_clipped) if bounded_ok else None,
-                "tiles_dir": str(tiles_round_dir) if bounded_ok else None,
+                "tiles_dir": str(tiles_round_dir) if (tiles_enabled and bounded_ok) else None,
             },
-            "zoom_levels": zoom,
-            "tile_profile": profile,
         }
 
     def stage_quality_gate(self) -> Dict[str, Any]:
