@@ -95,11 +95,9 @@ class QGISTools:
         Equivalent to QGIS:
         GDAL -> Raster miscellaneous -> gdal2tiles
 
-        resume=False -> default behavior, regenerates tiles into output_dir
-        clean=True -> delete output_dir before generating
+        On Windows/QGIS, gdal2tiles.py should be run with the QGIS-bundled
+        Python interpreter, not the project venv Python.
         """
-        import sys
-
         input_tif = Path(input_tif)
         output_dir = Path(output_dir)
 
@@ -111,14 +109,22 @@ class QGISTools:
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        gdal2tiles_path = str(self.gdal2tiles_path)
+        gdal2tiles_path = Path(self.gdal2tiles_path)
 
-        # Windows fix:
-        # if path points to a .py script, run it with Python
-        if gdal2tiles_path.lower().endswith(".py"):
+        # If path points to a Python script, use QGIS Python beside it
+        if gdal2tiles_path.suffix.lower() == ".py":
+            # Example:
+            # C:/Program Files/QGIS 3.40.7/apps/Python312/Scripts/gdal2tiles.py
+            qgis_python = gdal2tiles_path.parent.parent / "python.exe"
+
+            if not qgis_python.exists():
+                raise RuntimeError(
+                    f"QGIS Python interpreter not found beside gdal2tiles: {qgis_python}"
+                )
+
             cmd = [
-                sys.executable,
-                gdal2tiles_path,
+                str(qgis_python),
+                str(gdal2tiles_path),
                 "-p", profile,
                 "-z", zoom,
                 "-w", webviewer,
@@ -126,7 +132,7 @@ class QGISTools:
             ]
         else:
             cmd = [
-                gdal2tiles_path,
+                str(gdal2tiles_path),
                 "-p", profile,
                 "-z", zoom,
                 "-w", webviewer,
@@ -144,8 +150,8 @@ class QGISTools:
         except FileNotFoundError:
             raise RuntimeError(f"gdal2tiles not found: {self.gdal2tiles_path}")
         except subprocess.CalledProcessError as e:
-            stderr = (e.stderr or "")[:1000]
-            stdout = (e.stdout or "")[:1000]
+            stderr = (e.stderr or "")[:2000]
+            stdout = (e.stdout or "")[:2000]
             raise RuntimeError(
                 f"gdal2tiles failed.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
             )
