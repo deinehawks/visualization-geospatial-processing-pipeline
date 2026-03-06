@@ -98,6 +98,8 @@ class QGISTools:
         resume=False -> default behavior, regenerates tiles into output_dir
         clean=True -> delete output_dir before generating
         """
+        import sys
+
         input_tif = Path(input_tif)
         output_dir = Path(output_dir)
 
@@ -109,17 +111,27 @@ class QGISTools:
 
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        cmd = [
-            str(self.gdal2tiles_path),
-            "-p",
-            profile,
-            "-z",
-            zoom,
-            "-w",
-            webviewer,
-            "--copyright",
-            copyright_text,
-        ]
+        gdal2tiles_path = str(self.gdal2tiles_path)
+
+        # Windows fix:
+        # if path points to a .py script, run it with Python
+        if gdal2tiles_path.lower().endswith(".py"):
+            cmd = [
+                sys.executable,
+                gdal2tiles_path,
+                "-p", profile,
+                "-z", zoom,
+                "-w", webviewer,
+                "--copyright", copyright_text,
+            ]
+        else:
+            cmd = [
+                gdal2tiles_path,
+                "-p", profile,
+                "-z", zoom,
+                "-w", webviewer,
+                "--copyright", copyright_text,
+            ]
 
         if resume:
             cmd.append("--resume")
@@ -133,6 +145,9 @@ class QGISTools:
             raise RuntimeError(f"gdal2tiles not found: {self.gdal2tiles_path}")
         except subprocess.CalledProcessError as e:
             stderr = (e.stderr or "")[:1000]
-            raise RuntimeError(f"gdal2tiles failed: {stderr}")
+            stdout = (e.stdout or "")[:1000]
+            raise RuntimeError(
+                f"gdal2tiles failed.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
+            )
 
         return output_dir

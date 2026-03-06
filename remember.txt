@@ -5,7 +5,7 @@ Remember that in processing images with ODM, no images within a task should shar
 
 python -m experiments.rgb_experiment --survey TANGLAW_A2S_6.3Hai_12.7Hac_60m_85f75s_14.5kph_2sFrame --year 2026
 
-python -m experiments.rgb_experiment --survey STM_1Ha_A2S_60m_85f75s_4mps --year 2026
+python -m experiments.rgb_experiment --survey STM_1Ha_A2S_50m_85f75s_3mps --year 2026
 
 
 Surveys:
@@ -17,4 +17,4 @@ AH-026004 = STM_1Ha_A2S_60m_85f75s_4mps -- 16x9
 
 
 Find gdalwarp in disk C
-Get-ChildItem -Path C:\ -Filter gdalwarp.exe -File -Recurse -ErrorAction SilentlyContinue
+Get-ChildItem -Path C:\ -Filter pdal.exe -File -Recurse -ErrorAction SilentlyContinue

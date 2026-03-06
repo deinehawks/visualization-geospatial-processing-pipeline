@@ -113,6 +113,7 @@ def load_pipeline_config() -> dict:
             "tools": {
                 "gdalwarp_path": os.getenv("GDALWARP_PATH", "gdalwarp"),
                 "gdal2tiles_path": os.getenv("GDAL2TILES_PATH", "gdal2tiles.py"),
+                "pdal_path": os.getenv("PDAL_PATH", "pdal"),
             },
             "clip": {
                 "enabled": os.getenv("QGIS_CLIP_ENABLED", "true").lower() == "true",
