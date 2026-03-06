@@ -710,6 +710,7 @@ class RGBPipeline:
 
         # --- tool paths/options (FIXED: read from qgis.tools + qgis.tiles) ---
         qgis_tools_cfg = (qgis_cfg.get("tools") or {})
+        qgis_root = str(qgis_tools_cfg.get("qgis_root") or "")
         gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
         gdal2tiles_path = str(qgis_tools_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
 
@@ -734,6 +735,7 @@ class RGBPipeline:
         # --- QGIS tools wrapper ---
         tools = QGISTools(
             logger=logger,
+            qgis_root=qgis_root,
             gdalwarp_path=gdalwarp_path,
             gdal2tiles_path=gdal2tiles_path,
         )

@@ -158,6 +158,7 @@ def load_pipeline_config() -> dict:
         "qgis": {
             "enabled": read_bool_env("QGIS_ENABLED", True),
             "tools": {
+                "qgis_root": read_str_env("QGIS_ROOT", ""),
                 "gdalwarp_path": read_str_env("GDALWARP_PATH", "gdalwarp"),
                 "gdal2tiles_path": read_str_env("GDAL2TILES_PATH", "gdal2tiles.py"),
             },
