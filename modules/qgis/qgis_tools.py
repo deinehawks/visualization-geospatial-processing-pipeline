@@ -28,9 +28,6 @@ class QGISTools:
         self.gdalwarp_path = gdalwarp_path
         self.gdal2tiles_path = gdal2tiles_path
 
-    # -------------------------
-    # Clip raster by mask layer
-    # -------------------------
     def clip_raster_by_mask(
         self,
         *,
@@ -63,7 +60,6 @@ class QGISTools:
             "GTiff",
         ]
 
-        # optional nodata handling
         if dst_nodata is not None:
             cmd += ["-dstnodata", str(dst_nodata)]
 
@@ -80,9 +76,6 @@ class QGISTools:
 
         return output_tif
 
-    # -------------------------
-    # gdal2tiles
-    # -------------------------
     def generate_tiles(
         self,
         *,
@@ -98,9 +91,6 @@ class QGISTools:
         """
         Equivalent to QGIS:
         GDAL -> Raster miscellaneous -> gdal2tiles
-
-        On Windows/QGIS, run gdal2tiles.py through the QGIS batch environment
-        so GDAL Python bindings and DLLs load correctly.
         """
         input_tif = Path(input_tif)
         output_dir = Path(output_dir)
@@ -114,8 +104,8 @@ class QGISTools:
         output_dir.mkdir(parents=True, exist_ok=True)
 
         gdal2tiles_path = Path(self.gdal2tiles_path)
+        bat_path = None
 
-        # Windows + QGIS Python script case
         if os.name == "nt" and gdal2tiles_path.suffix.lower() == ".py":
             qgis_root = Path(self.qgis_root) if self.qgis_root else gdal2tiles_path.parents[3]
 
@@ -124,28 +114,39 @@ class QGISTools:
             py_env = qgis_root / "bin" / "py3_env.bat"
             qgis_python = qgis_root / "apps" / "Python312" / "python.exe"
 
-            for required in (o4w_env, qt_env, py_env, qgis_python, gdal2tiles_path):
+            for required in (qgis_python, gdal2tiles_path):
                 if not required.exists():
                     raise RuntimeError(f"Required QGIS file not found: {required}")
 
-            resume_flag = "--resume" if resume else ""
+            # Build bat file lines — avoids all cmd.exe nested-quote parsing issues
+            bat_lines = ["@echo off"]
 
-            cmd = [
-                "cmd.exe",
-                "/c",
-                (
-                    f'call "{o4w_env}" && '
-                    f'call "{qt_env}" && '
-                    f'call "{py_env}" && '
-                    f'"{qgis_python}" "{gdal2tiles_path}" '
-                    f'-p {profile} '
-                    f'-z {zoom} '
-                    f'-w {webviewer} '
-                    f'--copyright "{copyright_text}" '
-                    f'{resume_flag} '
-                    f'"{input_tif}" "{output_dir}"'
-                ),
-            ]
+            if o4w_env.exists():
+                bat_lines.append(f'call "{o4w_env}"')
+            if qt_env.exists():
+                bat_lines.append(f'call "{qt_env}"')
+            if py_env.exists():
+                bat_lines.append(f'call "{py_env}"')
+
+            gdal2tiles_cmd = (
+                f'"{qgis_python}" "{gdal2tiles_path}"'
+                f' -p {profile}'
+                f' -z {zoom}'
+                f' -w {webviewer}'
+                f' --copyright "{copyright_text}"'
+            )
+            if resume:
+                gdal2tiles_cmd += " --resume"
+            gdal2tiles_cmd += f' "{input_tif}" "{output_dir}"'
+
+            bat_lines.append(gdal2tiles_cmd)
+
+            # Write temp bat file next to output dir
+            bat_path = output_dir.parent / "_gdal2tiles_run.bat"
+            bat_path.write_text("\r\n".join(bat_lines), encoding="utf-8")
+
+            cmd = ["cmd.exe", "/c", str(bat_path)]
+
         else:
             cmd = [
                 str(gdal2tiles_path),
@@ -169,5 +170,12 @@ class QGISTools:
             raise RuntimeError(
                 f"gdal2tiles failed.\nSTDERR:\n{stderr}\nSTDOUT:\n{stdout}"
             )
+        finally:
+            # Clean up temp bat file
+            if bat_path is not None:
+                try:
+                    bat_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
 
         return output_dir
