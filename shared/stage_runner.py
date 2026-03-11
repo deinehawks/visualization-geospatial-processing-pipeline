@@ -1,24 +1,50 @@
 from __future__ import annotations
-from shared.db.repo import PipelineRepo
-from shared.logging import line
-from typing import Callable, Any, Optional, Dict
 
-import time
 import logging
+import time
+from typing import Any, Callable, Dict, Optional
+
+from shared.db.repo import PipelineRepo
+from shared.logging import (
+    log_output_loaded,
+    log_stage_canceled,
+    log_stage_done,
+    log_stage_fail,
+    log_stage_retry,
+    log_stage_skip,
+    log_stage_start,
+    log_stale_stage,
+    set_stage_context,
+)
 
 
 class StageRunner:
     """
-    Wraps stage execution with DB + logging + resume support.
+    Wraps stage execution with DB tracking, structured logging, and
+    resume / retry support.
+
+    Every log record emitted through *logger* will automatically carry
+    ``run_id`` and ``stage_name`` fields (injected by the
+    :class:`~shared.logging.ContextFilter` that
+    :func:`~shared.logging.get_logger` attaches).
     """
 
-    def __init__(self, repo: PipelineRepo, run_id: str, logger: logging.Logger):
+    def __init__(
+        self,
+        repo: PipelineRepo,
+        run_id: str,
+        logger: logging.Logger,
+    ) -> None:
         self.repo = repo
         self.run_id = run_id
         self.logger = logger
 
-        # FK safety
+        # FK safety — ensure the run row exists before any stage writes
         self.repo.create_run(self.run_id)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
 
     def run(
         self,
@@ -30,88 +56,95 @@ class StageRunner:
         force: bool = False,
         load_output_on_skip: bool = True,
         stale_running_policy: str = "fail_then_rerun",
-        retry_attempts: int = 3,          # NEW
-        retry_delay_seconds: int = 5,     # NEW
+        retry_attempts: int = 3,
+        retry_delay_seconds: int = 5,
     ) -> Any:
+        """
+        Execute *fn* as a named pipeline stage.
 
+        Args:
+            stage_name:           Unique name used for DB tracking and logs.
+            fn:                   Zero-argument callable that performs the work.
+            output_key:           If set, the return value is stored in *state*
+                                  under this key and persisted to the DB.
+            state:                Shared pipeline state dict mutated in-place.
+            force:                Re-run even if the stage already completed.
+            load_output_on_skip:  Reload saved output into *state* on skip.
+            stale_running_policy: ``"fail_then_rerun"`` (default) marks a
+                                  leftover ``running`` record as failed before
+                                  re-executing; ``"rerun"`` skips the update.
+            retry_attempts:       Number of attempts before giving up on
+                                  transient errors (default 3).
+            retry_delay_seconds:  Seconds to wait between retry attempts.
+        """
         latest = self.repo.get_latest_stage(self.run_id, stage_name)
 
-        # ----------------------------
-        # Handle stale "running"
-        # ----------------------------
+        # ── Handle stale "running" record from a previous crash ──────────
         if latest and latest.get("status") == "running":
-            self.logger.warning(f"⚠ Stale stage detected: {stage_name}")
+            log_stale_stage(self.logger, stage_name)
 
             if stale_running_policy == "fail_then_rerun":
                 try:
                     self.repo.finish_stage(
                         stage_id=int(latest["id"]),
                         success=False,
-                        runtime_seconds=float(latest.get("runtime_seconds") or 0.0),
+                        runtime_seconds=float(
+                            latest.get("runtime_seconds") or 0.0),
                         output=None,
                         error_message="Stale running stage (previous crash).",
                     )
-                    self.logger.warning("Marked stale stage as failed. Rerunning.")
                 except Exception:
-                    self.logger.exception("Failed to update stale stage. Continuing rerun.")
+                    self.logger.exception(
+                        "Could not update stale stage record — continuing anyway."
+                    )
 
             latest = self.repo.get_latest_stage(self.run_id, stage_name)
 
-        # ----------------------------
-        # Resume skip
-        # ----------------------------
+        # ── Resume skip ──────────────────────────────────────────────────
         if not force and latest and latest.get("status") == "completed":
-            self.logger.info(f"\033[93m⏭ SKIP   | {stage_name} (already completed)\033[0m")
+            log_stage_skip(self.logger, stage_name)
 
             if load_output_on_skip and state is not None and output_key:
-                output = self.repo.get_latest_stage_output(self.run_id, stage_name)
+                output = self.repo.get_latest_stage_output(
+                    self.run_id, stage_name)
                 if output is not None:
                     state[output_key] = output
-                    self.logger.info(f"↳ Loaded saved output into state['{output_key}']")
+                    log_output_loaded(self.logger, output_key)
 
             return self.repo.get_latest_stage_output(self.run_id, stage_name)
 
-        # ----------------------------
-        # Run stage
-        # ----------------------------
-        self.logger.info(line())
-        self.logger.info(f"\033[94m▶ START  | {stage_name}\033[0m")
-        self.logger.info(line())
+        # ── Execute stage ────────────────────────────────────────────────
+        log_stage_start(self.logger, stage_name)
 
         stage_id = self.repo.start_stage(self.run_id, stage_name)
-        start = time.perf_counter()
-
+        wall_start = time.perf_counter()
         attempt = 0
 
         while True:
             try:
                 result = fn()
-                runtime = time.perf_counter() - start
+                runtime = time.perf_counter() - wall_start
 
                 if state is not None and output_key:
                     state[output_key] = result
-
-                output_payload = result if isinstance(result, dict) else None
 
                 self.repo.finish_stage(
                     stage_id=stage_id,
                     success=True,
                     runtime_seconds=runtime,
-                    output=output_payload,
+                    output=result if isinstance(result, dict) else None,
                     error_message=None,
                 )
 
-                self.logger.info(f"\033[92m✔ DONE   | {stage_name} | {runtime:.2f}s\033[0m")
+                log_stage_done(self.logger, stage_name, runtime)
                 return result
 
-            # ----------------------------
-            # WebODM UI Cancel (clean stop)
-            # ----------------------------
-            except RuntimeError as e:
+            # ── WebODM UI cancel — clean propagation ─────────────────────
+            except RuntimeError as exc:
+                msg = str(exc)
 
-                if str(e) == "WEBODM_TASK_CANCELED":
-                    runtime = time.perf_counter() - start
-
+                if msg == "WEBODM_TASK_CANCELED":
+                    runtime = time.perf_counter() - wall_start
                     self.repo.finish_stage(
                         stage_id=stage_id,
                         success=False,
@@ -119,43 +152,38 @@ class StageRunner:
                         output=None,
                         error_message="Canceled in WebODM UI",
                     )
+                    log_stage_canceled(self.logger, stage_name, runtime)
+                    raise RuntimeError("__PIPELINE_CANCELED__") from exc
 
-                    self.logger.warning(f"\033[93m⏹ CANCELED | {stage_name} | {runtime:.2f}s\033[0m")
-
-                    # propagate special signal
-                    raise RuntimeError("__PIPELINE_CANCELED__") from e
-
-                if str(e) == "__PIPELINE_CANCELED__":
+                if msg == "__PIPELINE_CANCELED__":
                     raise
 
                 raise
 
-            # ----------------------------
-            # Retry for transient errors
-            # ----------------------------
-            except Exception as e:
-
+            # ── Retry on transient errors ─────────────────────────────────
+            except Exception as exc:
                 attempt += 1
 
                 if attempt < retry_attempts:
-                    self.logger.warning(
-                        f"⚠ Stage '{stage_name}' failed (attempt {attempt}/{retry_attempts}). "
-                        f"Retrying in {retry_delay_seconds}s..."
+                    log_stage_retry(
+                        self.logger,
+                        stage_name,
+                        attempt=attempt,
+                        max_attempts=retry_attempts,
+                        delay=retry_delay_seconds,
+                        error=exc,
                     )
-                    self.logger.warning(str(e))
                     time.sleep(retry_delay_seconds)
                     continue
 
-                runtime = time.perf_counter() - start
-
+                runtime = time.perf_counter() - wall_start
                 self.repo.finish_stage(
                     stage_id=stage_id,
                     success=False,
                     runtime_seconds=runtime,
                     output=None,
-                    error_message=str(e),
+                    error_message=str(exc),
                 )
-
-                self.logger.error(f"\033[91m✗ FAILED | {stage_name} | {runtime:.2f}s\033[0m")
-                self.logger.exception(e)
+                log_stage_fail(self.logger, stage_name, runtime)
+                self.logger.exception(exc)
                 raise
