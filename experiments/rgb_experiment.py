@@ -156,7 +156,15 @@ def main():
                         help="Survey folder name inside FIELD_DATA_ROOT")
     parser.add_argument("--year", type=int, default=2026)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--run-id",
+        default=None,
+        help="Run ID to resume (required when --resume is set)",
+    )
     args = parser.parse_args()
+
+    if args.resume and not args.run_id:
+        parser.error("--run-id is required when using --resume")
 
     config = load_pipeline_config()
 
@@ -183,6 +191,7 @@ def main():
         source_dir=source_dir,
         surveys_root=surveys_root,
         year=args.year,
+        run_id=args.run_id,
     )
 
     result = pipeline.run(resume=args.resume)

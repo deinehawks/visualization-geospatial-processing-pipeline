@@ -123,6 +123,23 @@ class RGBPipeline:
                 "rgb_path is not set yet. Run data_segregation first.")
         return self.rgb_path
 
+    def _hydrate_from_state(self) -> None:
+        """
+        Re-populate instance variables from self.state after a stage runs or
+        is skipped on resume. Ensures self.survey_id, self.rgb_path, and
+        other attributes are always set before the next stage reads them.
+        """
+        state = self.state
+
+        seg = state.get("data_segregation") or {}
+        if seg.get("survey_id"):
+            self.survey_id = seg["survey_id"]
+        if seg.get("survey_path"):
+            self.rgb_path = Path(seg["survey_path"])
+
+        if state.get("crossrun_flag"):
+            pass
+
     @staticmethod
     def _iter_jpeg_files(folder: Path) -> List[Path]:
         exts = {".jpg", ".jpeg"}
@@ -316,7 +333,9 @@ class RGBPipeline:
         )
 
         excluded = int(result.get("total_excluded") or 0)
-        self.state["crossrun_flag"] = "xc" if excluded > 0 else "c"
+        crossrun_flag = "xc" if excluded > 0 else "c"
+        self.state["crossrun_flag"] = crossrun_flag
+        result["crossrun_flag"] = crossrun_flag
 
         if delete_raw_after:
             try:
@@ -397,6 +416,11 @@ class RGBPipeline:
         if not boundary_ok:
             logger.warning(
                 "No valid polygon boundary produced (GeoJSON missing). Pipeline will run Task 1 only.")
+
+        # Embed into returned dict so StageRunner persists them to DB
+        summary["boundary_available"] = boundary_ok
+        summary["boundary_geojson_path"] = str(
+            geojson_path) if geojson_path else None
 
         return summary
 
@@ -1119,7 +1143,6 @@ class RGBPipeline:
             return (name in force_stages) or (not resume)
 
         try:
-            # ── 1. Data Segregation ───────────────────────────────
             self._check_pause_or_raise("data_segregation")
             self.runner.run(
                 "data_segregation",
@@ -1128,8 +1151,8 @@ class RGBPipeline:
                 state=self.state,
                 force=_force("data_segregation"),
             )
+            self._hydrate_from_state()
 
-            # ── 2. Cross-run Image Filter ─────────────────────────
             self._check_pause_or_raise("cross_run_filter")
             self.runner.run(
                 "cross_run_filter",
@@ -1138,8 +1161,8 @@ class RGBPipeline:
                 state=self.state,
                 force=_force("cross_run_filter"),
             )
+            self._hydrate_from_state()
 
-            # ── 3. KML Boundary ───────────────────────────────────
             self._check_pause_or_raise("kml_boundary")
             self.runner.run(
                 "kml_boundary",
@@ -1148,8 +1171,8 @@ class RGBPipeline:
                 state=self.state,
                 force=_force("kml_boundary"),
             )
+            self._hydrate_from_state()
 
-            # ── 4. WebODM ─────────────────────────────────────────
             self._check_pause_or_raise("webodm")
             self.runner.run(
                 "webodm",
@@ -1158,8 +1181,8 @@ class RGBPipeline:
                 state=self.state,
                 force=_force("webodm"),
             )
+            self._hydrate_from_state()
 
-            # ── 5. Quality Gate ───────────────────────────────────
             self._check_pause_or_raise("quality_gate")
             self.runner.run(
                 "quality_gate",
@@ -1168,12 +1191,12 @@ class RGBPipeline:
                 state=self.state,
                 force=_force("quality_gate"),
             )
+            self._hydrate_from_state()
 
             q = self.state.get("quality_gate") or {}
             if q.get("passed") is False:
                 raise RuntimeError("Pipeline stopped: Quality Gate failed.")
 
-            # ── 6. QGIS ───────────────────────────────────────────
             self._check_pause_or_raise("qgis")
             self.runner.run(
                 "qgis",
@@ -1183,7 +1206,6 @@ class RGBPipeline:
                 force=_force("qgis"),
             )
 
-            # ── Success ───────────────────────────────────────────
             self.state["success"] = True
             total_runtime = time.perf_counter() - total_start
 
