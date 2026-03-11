@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Dict, Any, Optional, Set, List, Tuple
 from shared import get_logger, PipelineRepo, db_path, StageRunner
 from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
-from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, update_stage_context
+from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
 
 import time
 import uuid
@@ -96,6 +96,13 @@ class RGBPipeline:
             repo=self.repo,
             run_id=self.run_id,
             logger=self.loggers["pipeline"],
+            extra_loggers=[
+                self.loggers["segregation"],
+                self.loggers["cross_run_filter"],
+                self.loggers["kml"],
+                self.loggers["webodm"],
+                self.loggers["qgis"],
+            ],
         )
 
         self.rgb_path: Optional[Path] = None
@@ -681,7 +688,6 @@ class RGBPipeline:
                     result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get(
                         "asset_type")
 
-                    # If you still want to fail hard when LAZ download fails:
                     if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
                         raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
 
@@ -690,7 +696,6 @@ class RGBPipeline:
                         "Point cloud download skipped (pointcloud.enabled=false).")
                     result["downloads"]["task2"]["pointcloud_skipped"] = True
 
-                # -------- All Assets ZIP (archive) --------
                 if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                     zcfg = exports_cfg["all_assets_zip"]
                     out_dir = dir_from_key(zcfg["out_dir_key"])
@@ -727,7 +732,6 @@ class RGBPipeline:
             logger.info("QGIS stage disabled (qgis.enabled=false).")
             return {"skipped": True}
 
-        # --- dirs map ---
         ds = self.state.get("data_segregation") or {}
         dirs = ds.get("dirs") or {}
         if not dirs:
@@ -741,26 +745,23 @@ class RGBPipeline:
                 return Path(fallback)
             raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
 
-        # --- boundary ---
         boundary_geojson_path = self.state.get("boundary_geojson_path")
         if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
             raise RuntimeError(
                 "QGIS stage requires boundary_geojson_path (missing).")
 
-        # --- orthos from WebODM stage ---
         web = self.state.get("webodm") or {}
         dls = web.get("downloads") or {}
         t1 = (dls.get("task1") or {})
         t2 = (dls.get("task2") or {})
 
         unbounded_ortho = t1.get("orthomosaic")
-        bounded_ortho = t2.get("orthomosaic")  # may be None if task2 skipped
+        bounded_ortho = t2.get("orthomosaic")
 
         if not unbounded_ortho or not Path(unbounded_ortho).exists():
             raise RuntimeError(
                 "QGIS stage requires Task 1 orthomosaic (unbounded) downloaded first.")
 
-        # --- naming flags (consistent) ---
         naming_cfg = self.config.get("naming", {})
         crossrun_flag = self.state.get(
             "crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
@@ -769,7 +770,6 @@ class RGBPipeline:
         task1_flag = f"{crossrun_flag}{boundary_flag_task1}"  # ex: xcxb
         task2_flag = f"{crossrun_flag}{boundary_flag_task2}"  # ex: xcb
 
-        # --- output dirs ---
         clipped_ortho_dir = dir_from_key("qgis_clipped_ortho", fallback=(
             rgb_path / "qgis" / "clipped" / "ortho"))
         tiles_sharp_dir = dir_from_key("tiles_ortho_sharp", fallback=(
@@ -777,7 +777,6 @@ class RGBPipeline:
         tiles_round_dir = dir_from_key("tiles_ortho_round", fallback=(
             rgb_path / "tiles" / "ortho" / "round-corners"))
 
-        # --- output filenames (use config template) ---
         clip_cfg = (qgis_cfg.get("clip") or {})
         clip_enabled = bool(clip_cfg.get("enabled", True))
         clip_tmpl = str(clip_cfg.get("filename_template")
@@ -787,7 +786,6 @@ class RGBPipeline:
             clip_tmpl.format(flag=task1_flag)
         bounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task2_flag)
 
-        # --- tool paths/options (FIXED: read from qgis.tools + qgis.tiles) ---
         qgis_tools_cfg = (qgis_cfg.get("tools") or {})
         qgis_root = str(qgis_tools_cfg.get("qgis_root") or "")
         gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
@@ -801,7 +799,6 @@ class RGBPipeline:
         webviewer = str(tiles_cfg.get("webviewer") or "none")
         copyright_text = str(tiles_cfg.get("copyright") or "ASIMOV-HAWKS")
 
-        # --- optional nodata ---
         dst_nodata_raw = (clip_cfg.get("dst_nodata") or "")
         dst_nodata = None
         if isinstance(dst_nodata_raw, (int, float)):
@@ -825,7 +822,7 @@ class RGBPipeline:
         logger.info(f"Using gdalwarp: {gdalwarp_path}")
         logger.info(f"Using gdal2tiles: {gdal2tiles_path}")
 
-        # 1) Clip unbounded -> always (unless disabled)
+        # 1) Clip unbounded -> always
         if clip_enabled:
             logger.info(
                 f"Clipping UNBOUNDED ortho -> {unbounded_clipped.name}")
@@ -840,7 +837,7 @@ class RGBPipeline:
                 "QGIS clip disabled (qgis.clip.enabled=false). Using unbounded orthomosaic directly.")
             unbounded_clipped = Path(unbounded_ortho)
 
-        # 2) Clip bounded -> only if exists (unless disabled)
+        # 2) Clip bounded -> only if exists
         bounded_ok = False
         if bounded_ortho and Path(bounded_ortho).exists():
             if clip_enabled:
@@ -860,7 +857,7 @@ class RGBPipeline:
             logger.warning(
                 "Bounded orthomosaic missing. Skipping bounded clip + round-corners tiles.")
 
-        # 3) Tiles (doc rule: unbounded → sharp-corners, bounded → round-corners)
+        # 3) Tiles
         if tiles_enabled:
             logger.info(
                 f"Generating tiles (sharp-corners) from {Path(unbounded_clipped).name}")
@@ -924,7 +921,7 @@ class RGBPipeline:
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
-        update_stage_context(logger, stage_name="quality_gate")
+        set_stage_context(logger, stage_name="quality_gate")
         logger.info("Stage: Quality Gate Check")
 
         survey_id = self.survey_id or "?"

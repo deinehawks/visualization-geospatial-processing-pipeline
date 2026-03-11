@@ -12,6 +12,7 @@ import requests
 import subprocess
 import shutil
 
+
 class WebODMProcessor:
     def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
         self.base_url = url.rstrip("/")
@@ -83,7 +84,8 @@ class WebODMProcessor:
 
                 # If JWT expired or session lost auth somehow
                 if resp.status_code in (401, 403):
-                    self.logger.warning(f"get_task auth error (status={resp.status_code}). Re-authenticating...")
+                    self.logger.warning(
+                        f"get_task auth error (status={resp.status_code}). Re-authenticating...")
                     self._reset_session(reauth=True)
                     continue
 
@@ -108,7 +110,8 @@ class WebODMProcessor:
                 # Non-transient error: bubble up immediately
                 raise
 
-        raise RuntimeError(f"get_task failed after {retries} retries: {last_err}") from last_err
+        raise RuntimeError(
+            f"get_task failed after {retries} retries: {last_err}") from last_err
 
     def get_task_output(self, project_id: int, task_id: str) -> str:
         resp = self.session.get(
@@ -132,7 +135,7 @@ class WebODMProcessor:
         if m:
             return f"{m}m {s}s"
         return f"{s}s"
-    
+
     @staticmethod
     def _normalize_status(raw_status) -> tuple[str, bool]:
         if raw_status is None:
@@ -156,7 +159,8 @@ class WebODMProcessor:
             return label, label in ("completed", "failed", "canceled")
 
         if isinstance(raw_status, dict):
-            label = raw_status.get("label") or raw_status.get("name") or raw_status.get("code")
+            label = raw_status.get("label") or raw_status.get(
+                "name") or raw_status.get("code")
             if label is None:
                 return "unknown", False
             label = str(label).lower().strip()
@@ -216,7 +220,8 @@ class WebODMProcessor:
             # timeout guard
             if timeout_seconds is not None and (time.time() - start) > float(timeout_seconds):
                 _finalize_live()
-                raise TimeoutError(f"WebODM task timed out after {timeout_seconds}s (task_id={task_id})")
+                raise TimeoutError(
+                    f"WebODM task timed out after {timeout_seconds}s (task_id={task_id})")
 
             try:
                 task_info = self.get_task(project_id, task_id)  # retry-safe
@@ -242,7 +247,8 @@ class WebODMProcessor:
                 time.sleep(poll_seconds)
                 continue
 
-            status_label, is_terminal = self._normalize_status(task_info.get("status"))
+            status_label, is_terminal = self._normalize_status(
+                task_info.get("status"))
 
             if status_label != last_status:
                 self.logger.info(f"WebODM status: {status_label}")
@@ -268,7 +274,8 @@ class WebODMProcessor:
                 try:
                     out = self.get_task_output(project_id, task_id)
                     if out:
-                        self.logger.error(f"WebODM output tail:\n{out[-1000:]}")
+                        self.logger.error(
+                            f"WebODM output tail:\n{out[-1000:]}")
                 except Exception:
                     pass
 
@@ -303,7 +310,8 @@ class WebODMProcessor:
         # Collect images (JPG/JPEG only), dedupe by case-insensitive filename
         # ------------------------------------------------------------
         if recursive:
-            candidates = [p for p in folder.rglob("*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
+            candidates = [p for p in folder.rglob(
+                "*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
         else:
             candidates = []
             candidates += list(folder.glob("*.jpg"))
@@ -331,7 +339,8 @@ class WebODMProcessor:
             except OSError:
                 pass
         gb = total_bytes / (1024**3)
-        self.logger.info(f"Found {len(image_files)} unique images | approx_size={gb:.2f} GB")
+        self.logger.info(
+            f"Found {len(image_files)} unique images | approx_size={gb:.2f} GB")
 
         # ------------------------------------------------------------
         # Build multipart fields + progress monitor
@@ -342,7 +351,8 @@ class WebODMProcessor:
         fields.append(("name", name))
 
         if options:
-            formatted_options = [{"name": k, "value": v} for k, v in options.items()]
+            formatted_options = [{"name": k, "value": v}
+                                 for k, v in options.items()]
             fields.append(("options", json.dumps(formatted_options)))
 
         # ---- live one-line terminal output helpers ----
@@ -400,13 +410,12 @@ class WebODMProcessor:
 
                         payload = r.json()
 
-                        # WebODM list endpoints sometimes return {"results":[...]}
-                        tasks = payload.get("results") if isinstance(payload, dict) else payload
+                        tasks = payload.get("results") if isinstance(
+                            payload, dict) else payload
                         if not isinstance(tasks, list):
                             time.sleep(cancel_poll_seconds)
                             continue
 
-                        # find by exact name (you can relax matching if needed)
                         for t in tasks:
                             if not isinstance(t, dict):
                                 continue
@@ -424,7 +433,6 @@ class WebODMProcessor:
 
                         time.sleep(cancel_poll_seconds)
                     except Exception:
-                        # poller should never crash your upload
                         time.sleep(cancel_poll_seconds)
             finally:
                 try:
@@ -451,9 +459,9 @@ class WebODMProcessor:
             def _callback(monitor: MultipartEncoderMonitor) -> None:
                 nonlocal last_logged_percent
 
-                # If UI cancel detected (task exists + canceled), abort the upload stream
                 if cancel_event.is_set():
-                    raise RuntimeError("Upload aborted: task was canceled in WebODM UI.")
+                    raise RuntimeError(
+                        "Upload aborted: task was canceled in WebODM UI.")
 
                 if monitor.len <= 0:
                     return
@@ -461,12 +469,14 @@ class WebODMProcessor:
                 pct = (monitor.bytes_read / monitor.len) * 100.0
                 elapsed = time.time() - start
 
-                # one-line live progress
-                _emit_live(f"Uploading to WebODM... {pct:6.2f}% | {self.fmt_elapsed(elapsed)}")
+                _emit_live(
+                    f"  Uploading  {pct:6.2f}%  {self.fmt_elapsed(elapsed)}"
+                    f"  {'█' * int(pct / 6.25):░<16}"
+                )
 
-                # log every N% (optional, still not too spammy)
                 if pct - last_logged_percent >= float(progress_every_percent) or pct >= 100.0:
-                    self.logger.info(f"Upload progress: {pct:.1f}% | elapsed={self.fmt_elapsed(elapsed)}")
+                    self.logger.debug(
+                        f"upload progress: {pct:.1f}% elapsed={self.fmt_elapsed(elapsed)}")
                     last_logged_percent = pct
 
             monitor = MultipartEncoderMonitor(encoder, _callback)
@@ -474,7 +484,8 @@ class WebODMProcessor:
             headers = dict(self.headers)
             headers["Content-Type"] = monitor.content_type
 
-            self.logger.info("Uploading images to WebODM (real progress enabled)...")
+            self.logger.info(
+                "Uploading images to WebODM (real progress enabled)...")
             poller_thread.start()
 
             resp = self.session.post(
@@ -487,9 +498,12 @@ class WebODMProcessor:
             _finalize_live()
             resp.raise_for_status()
 
+            _finalize_live()
             task_id = str(resp.json()["id"])
-            self.logger.info(f"Task created (ID={task_id})")
-            self.logger.info("Image upload complete")
+            self.logger.info(
+                f"Upload complete | task_id={task_id} "
+                f"| images={len(image_files)} | elapsed={self.fmt_elapsed(time.time() - start)}"
+            )
             return task_id
 
         except KeyboardInterrupt:
@@ -500,14 +514,13 @@ class WebODMProcessor:
         except Exception as e:
             _finalize_live()
 
-            # If this was triggered by UI cancel, report clearly
             if "canceled in webodm ui" in str(e).lower() or "task was canceled" in str(e).lower():
-                self.logger.warning("Detected WebODM UI cancellation. Stopping upload/pipeline stage.")
+                self.logger.warning(
+                    "Detected WebODM UI cancellation. Stopping upload/pipeline stage.")
                 raise RuntimeError("WEBODM_TASK_CANCELED") from e
 
-            # HTTP error info (if available)
             try:
-                body = (resp.text or "")[:500]  # type: ignore[name-defined]
+                body = (resp.text or "")[:500]
                 self.logger.error(f"WebODM response snippet: {body}")
             except Exception:
                 pass
@@ -518,7 +531,6 @@ class WebODMProcessor:
         finally:
             stop_poller.set()
             try:
-                # give poller a moment to exit cleanly
                 if poller_thread.is_alive():
                     poller_thread.join(timeout=1.0)
             except Exception:
@@ -529,18 +541,12 @@ class WebODMProcessor:
                     f.close()
                 except Exception:
                     pass
-            
+
     # -------------------------
     # Documentation helpers (kept)
     # -------------------------
 
     def _reset_session(self, *, reauth: bool = False) -> None:
-        """
-        Recreate requests.Session() to recover from broken keep-alive sockets
-        (common on Windows/Docker/WSL2 under load).
-
-        If reauth=True, re-run authenticate() to refresh JWT token.
-        """
         try:
             self.session.close()
         except Exception:
@@ -606,20 +612,25 @@ class WebODMProcessor:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         os.makedirs(output_folder, exist_ok=True)
 
-        json_file = os.path.join(output_folder, f"processing_log_{timestamp}.json")
+        json_file = os.path.join(
+            output_folder, f"processing_log_{timestamp}.json")
         with open(json_file, "w", encoding="utf-8") as f:
             json.dump(
-                {"project_name": project_name, "processing_date": datetime.now().isoformat(), "tasks": self.processing_log},
+                {"project_name": project_name, "processing_date": datetime.now(
+                ).isoformat(), "tasks": self.processing_log},
                 f,
                 indent=2,
             )
         self.logger.info(f"Detailed log saved to: {json_file}")
 
-        csv_file = os.path.join(output_folder, f"processing_summary_{timestamp}.csv")
+        csv_file = os.path.join(
+            output_folder, f"processing_summary_{timestamp}.csv")
         with open(csv_file, "w", newline="", encoding="utf-8") as f:
             if self.processing_log:
-                fieldnames = ["timestamp", "task_name", "project_id", "task_id", "success", "runtime_formatted", "image_count", "webodm_url"]
-                option_keys = list((self.processing_log[0].get("options") or {}).keys())
+                fieldnames = ["timestamp", "task_name", "project_id", "task_id",
+                              "success", "runtime_formatted", "image_count", "webodm_url"]
+                option_keys = list(
+                    (self.processing_log[0].get("options") or {}).keys())
                 fieldnames.extend([f"option_{k}" for k in option_keys])
 
                 writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -637,7 +648,8 @@ class WebODMProcessor:
                         "webodm_url": log["webodm_url"],
                     }
                     for key in option_keys:
-                        row[f"option_{key}"] = (log.get("options") or {}).get(key, "")
+                        row[f"option_{key}"] = (
+                            log.get("options") or {}).get(key, "")
                     writer.writerow(row)
 
         self.logger.info(f"Summary saved to: {csv_file}")
@@ -659,7 +671,8 @@ class WebODMProcessor:
 
         Returns JSON response (if any).
         """
-        self.logger.warning(f"Restarting WebODM task {task_id} from '{restart_from}'")
+        self.logger.warning(
+            f"Restarting WebODM task {task_id} from '{restart_from}'")
 
         url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/restart/"
 
@@ -677,7 +690,8 @@ class WebODMProcessor:
 
         # If backend doesn't like JSON, retry with form data once
         if resp.status_code in (400, 415):
-            self.logger.warning(f"Restart JSON payload rejected (status={resp.status_code}). Retrying as form-data...")
+            self.logger.warning(
+                f"Restart JSON payload rejected (status={resp.status_code}). Retrying as form-data...")
             resp = self.session.post(
                 url,
                 headers=self.headers,
@@ -691,7 +705,7 @@ class WebODMProcessor:
             return resp.json()
         except Exception:
             return {"ok": True, "status_code": resp.status_code}
-        
+
     def download_asset(self, project_id: int, task_id: str, asset_type: str, out_file: str) -> None:
         """
         Downloads a single asset (by asset_type) from WebODM task assets endpoint.
@@ -736,28 +750,32 @@ class WebODMProcessor:
         except requests.HTTPError as e:
             code = getattr(e.response, "status_code", None)
             if skip_404 and code == 404:
-                self.logger.warning(f"Asset not available (skip): {asset_type}")
+                self.logger.warning(
+                    f"Asset not available (skip): {asset_type}")
                 return False
-            self.logger.exception(f"Failed downloading asset='{asset_type}' -> {out_path}")
+            self.logger.exception(
+                f"Failed downloading asset='{asset_type}' -> {out_path}")
             return False
         except Exception:
-            self.logger.exception(f"Failed downloading asset='{asset_type}' -> {out_path}")
+            self.logger.exception(
+                f"Failed downloading asset='{asset_type}' -> {out_path}")
             return False
-
 
     def run_gdalwarp(self, src: Path, dst: Path, epsg: int, *, gdalwarp_path: str = "gdalwarp") -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [str(gdalwarp_path), "-t_srs", f"EPSG:{epsg}", str(src), str(dst)]
+        cmd = [str(gdalwarp_path), "-t_srs",
+               f"EPSG:{epsg}", str(src), str(dst)]
         self.logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
         except FileNotFoundError:
-            self.logger.warning("gdalwarp not found. Skipping reprojection (keeping raw).")
+            self.logger.warning(
+                "gdalwarp not found. Skipping reprojection (keeping raw).")
             shutil.copy2(src, dst)
         except subprocess.CalledProcessError as e:
-            self.logger.warning(f"gdalwarp failed. Keeping raw. stderr={e.stderr[:200] if e.stderr else ''}")
+            self.logger.warning(
+                f"gdalwarp failed. Keeping raw. stderr={e.stderr[:200] if e.stderr else ''}")
             shutil.copy2(src, dst)
-
 
     def run_pdal_translate(self, src: Path, dst: Path, *, pdal_path: str = "pdal") -> bool:
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -770,9 +788,9 @@ class WebODMProcessor:
             self.logger.warning("pdal not found. Skipping conversion.")
             return False
         except subprocess.CalledProcessError as e:
-            self.logger.warning(f"pdal translate failed for {dst.name}. stderr={e.stderr[:200] if e.stderr else ''}")
+            self.logger.warning(
+                f"pdal translate failed for {dst.name}. stderr={e.stderr[:200] if e.stderr else ''}")
             return False
-
 
     def export_orthomosaic(
         self,
@@ -798,18 +816,19 @@ class WebODMProcessor:
                 break
 
         if not downloaded:
-            self.logger.warning(f"Orthomosaic download failed. candidates={list(candidates)}")
+            self.logger.warning(
+                f"Orthomosaic download failed. candidates={list(candidates)}")
             return None
 
         self.logger.info(f"Orthomosaic downloaded using asset={used_asset}")
-        self.run_gdalwarp(tmp_raw, final_out, epsg, gdalwarp_path=gdalwarp_path)
+        self.run_gdalwarp(tmp_raw, final_out, epsg,
+                          gdalwarp_path=gdalwarp_path)
         try:
             tmp_raw.unlink(missing_ok=True)
         except Exception:
             pass
 
         return final_out
-
 
     def export_pointcloud(
         self,
@@ -835,7 +854,8 @@ class WebODMProcessor:
                 break
 
         if not downloaded:
-            self.logger.warning(f"LAZ download failed. candidates={list(candidates)}")
+            self.logger.warning(
+                f"LAZ download failed. candidates={list(candidates)}")
             return {"laz": None, "ply": None, "pcd": None, "asset_type": None}
 
         self.logger.info(f"Pointcloud downloaded using asset={used_asset}")
@@ -843,8 +863,10 @@ class WebODMProcessor:
         ply_path = out_dir / ply_name
         pcd_path = out_dir / pcd_name
 
-        ok_ply = self.run_pdal_translate(laz_path, ply_path, pdal_path=pdal_path)
-        ok_pcd = self.run_pdal_translate(laz_path, pcd_path, pdal_path=pdal_path)
+        ok_ply = self.run_pdal_translate(
+            laz_path, ply_path, pdal_path=pdal_path)
+        ok_pcd = self.run_pdal_translate(
+            laz_path, pcd_path, pdal_path=pdal_path)
 
         return {
             "laz": str(laz_path),
@@ -852,7 +874,7 @@ class WebODMProcessor:
             "pcd": str(pcd_path) if ok_pcd else None,
             "asset_type": used_asset,
         }
-    
+
     def download_all_assets_safe(
         self,
         project_id: int,
@@ -870,11 +892,10 @@ class WebODMProcessor:
             if skip_404 and code == 404:
                 self.logger.warning("all.zip not available (skip)")
                 return False
-            self.logger.exception(f"Failed downloading all-assets zip -> {out_path}")
+            self.logger.exception(
+                f"Failed downloading all-assets zip -> {out_path}")
             return False
         except Exception:
-            self.logger.exception(f"Failed downloading all-assets zip -> {out_path}")
+            self.logger.exception(
+                f"Failed downloading all-assets zip -> {out_path}")
             return False
-
-
-    

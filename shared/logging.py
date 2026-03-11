@@ -112,11 +112,18 @@ class ColorFormatter(logging.Formatter):
 # Format strings
 # ================================
 
-_LOG_FORMAT = (
+_LOG_FORMAT_FILE = (
     "%(asctime)s | %(levelname)-8s | %(name)s"
     " | %(run_id)s | %(stage_name)s"
     " | %(message)s"
 )
+
+_LOG_FORMAT_CONSOLE = (
+    "%(asctime)s | %(levelname)-8s | %(name)s"
+    " | %(stage_name)s"
+    " | %(message)s"
+)
+
 DATE_FORMAT = "%H:%M:%S"
 
 
@@ -154,13 +161,15 @@ def get_logger(
         fh = logging.FileHandler(log_path, encoding="utf-8")
         fh.setLevel(level)
         fh.addFilter(StripAnsiFilter())
-        fh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=DATE_FORMAT))
+        fh.setFormatter(logging.Formatter(
+            _LOG_FORMAT_FILE, datefmt=DATE_FORMAT))
         logger.addHandler(fh)
 
     if to_console:
         ch = logging.StreamHandler(sys.stdout)
         ch.setLevel(level)
-        ch.setFormatter(ColorFormatter(_LOG_FORMAT, datefmt=DATE_FORMAT))
+        ch.setFormatter(ColorFormatter(
+            _LOG_FORMAT_CONSOLE, datefmt=DATE_FORMAT))
         logger.addHandler(ch)
 
     logger._configured = True

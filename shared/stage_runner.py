@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, List
 
 from shared.db.repo import PipelineRepo
 from shared.logging import (
@@ -34,12 +34,12 @@ class StageRunner:
         repo: PipelineRepo,
         run_id: str,
         logger: logging.Logger,
+        extra_loggers: Optional[List[logging.Logger]] = None,
     ) -> None:
         self.repo = repo
         self.run_id = run_id
         self.logger = logger
-
-        # FK safety — ensure the run row exists before any stage writes
+        self.extra_loggers = extra_loggers or []
         self.repo.create_run(self.run_id)
 
     # ------------------------------------------------------------------
@@ -79,7 +79,6 @@ class StageRunner:
         """
         latest = self.repo.get_latest_stage(self.run_id, stage_name)
 
-        # ── Handle stale "running" record from a previous crash ──────────
         if latest and latest.get("status") == "running":
             log_stale_stage(self.logger, stage_name)
 
@@ -115,6 +114,8 @@ class StageRunner:
 
         # ── Execute stage ────────────────────────────────────────────────
         log_stage_start(self.logger, stage_name)
+        for _lg in self.extra_loggers:
+            set_stage_context(_lg, stage_name)
 
         stage_id = self.repo.start_stage(self.run_id, stage_name)
         wall_start = time.perf_counter()
@@ -137,6 +138,8 @@ class StageRunner:
                 )
 
                 log_stage_done(self.logger, stage_name, runtime)
+                for _lg in self.extra_loggers:
+                    set_stage_context(_lg, "")
                 return result
 
             # ── WebODM UI cancel — clean propagation ─────────────────────
@@ -153,6 +156,8 @@ class StageRunner:
                         error_message="Canceled in WebODM UI",
                     )
                     log_stage_canceled(self.logger, stage_name, runtime)
+                    for _lg in self.extra_loggers:
+                        set_stage_context(_lg, "")
                     raise RuntimeError("__PIPELINE_CANCELED__") from exc
 
                 if msg == "__PIPELINE_CANCELED__":
@@ -185,5 +190,7 @@ class StageRunner:
                     error_message=str(exc),
                 )
                 log_stage_fail(self.logger, stage_name, runtime)
+                for _lg in self.extra_loggers:
+                    set_stage_context(_lg, "")
                 self.logger.exception(exc)
                 raise
