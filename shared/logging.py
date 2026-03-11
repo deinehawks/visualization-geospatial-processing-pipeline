@@ -1,11 +1,10 @@
-# shared/logging.py
 from __future__ import annotations
-from pathlib import Path
-from typing import Optional
 
 import logging
 import re
 import sys
+from pathlib import Path
+from typing import Optional
 
 
 # ================================
@@ -22,6 +21,7 @@ BLUE = "\033[94m"
 MAGENTA = "\033[95m"
 CYAN = "\033[96m"
 WHITE = "\033[97m"
+GREY = "\033[90m"
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
@@ -31,41 +31,73 @@ def strip_ansi(s: str) -> str:
 
 
 # ================================
+# Context Filter
+# ================================
+
+class ContextFilter(logging.Filter):
+
+    def __init__(self, run_id: str = "", stage_name: str = "") -> None:
+        super().__init__()
+        self.run_id:     str = run_id
+        self.stage_name: str = stage_name
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.run_id = self.run_id
+        record.stage_name = self.stage_name
+        return True
+
+
+def get_context_filter(logger: logging.Logger) -> Optional[ContextFilter]:
+    for f in logger.filters:
+        if isinstance(f, ContextFilter):
+            return f
+    return None
+
+
+def set_stage_context(logger: logging.Logger, stage_name: str) -> None:
+    ctx = get_context_filter(logger)
+    if ctx is not None:
+        ctx.stage_name = stage_name
+
+
+# ================================
 # Filters / Formatters
 # ================================
 
 class StripAnsiFilter(logging.Filter):
-    """Ensures file logs never contain ANSI escape codes (even if message includes them)."""
 
     def filter(self, record: logging.LogRecord) -> bool:
         if isinstance(record.msg, str):
             record.msg = strip_ansi(record.msg)
-        # If args contain strings with ANSI codes, you could strip them too:
         if record.args:
-            new_args = []
-            for a in record.args:
-                if isinstance(a, str):
-                    new_args.append(strip_ansi(a))
-                else:
-                    new_args.append(a)
-            record.args = tuple(new_args)
+            record.args = tuple(
+                strip_ansi(a) if isinstance(a, str) else a
+                for a in record.args
+            )
+        if not hasattr(record, "run_id"):
+            record.run_id = ""
+        if not hasattr(record, "stage_name"):
+            record.stage_name = ""
         return True
 
 
 class ColorFormatter(logging.Formatter):
     LEVEL_COLORS = {
-        "INFO": WHITE,
-        "WARNING": YELLOW,
-        "ERROR": RED,
+        "DEBUG":    CYAN,
+        "INFO":     WHITE,
+        "WARNING":  YELLOW,
+        "ERROR":    RED,
         "CRITICAL": RED + BOLD,
-        "DEBUG": CYAN,
     }
 
     def format(self, record: logging.LogRecord) -> str:
-        # IMPORTANT: don't permanently mutate the record (shared by handlers)
+        if not hasattr(record, "run_id"):
+            record.run_id = ""
+        if not hasattr(record, "stage_name"):
+            record.stage_name = ""
+
         original_levelname = record.levelname
         original_name = record.name
-
         try:
             color = self.LEVEL_COLORS.get(original_levelname, WHITE)
             record.levelname = f"{color}{original_levelname:<8}{RESET}"
@@ -76,56 +108,67 @@ class ColorFormatter(logging.Formatter):
             record.name = original_name
 
 
-LOG_FORMAT = "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
+# ================================
+# Format strings
+# ================================
+
+_LOG_FORMAT = (
+    "%(asctime)s | %(levelname)-8s | %(name)s"
+    " | %(run_id)s | %(stage_name)s"
+    " | %(message)s"
+)
 DATE_FORMAT = "%H:%M:%S"
 
+
+# ================================
+# Logger factory
+# ================================
 
 def get_logger(
     name: str,
     log_file: Optional[Path | str] = None,
     level: int = logging.INFO,
     to_console: bool = True,
+    *,
+    run_id: str = "",
 ) -> logging.Logger:
-    """
-    Create or return a configured logger.
 
-    - Safe to call multiple times (won't duplicate handlers).
-    - File handler: clean logs (no ANSI)
-    - Console handler: colored logs
-    """
     logger = logging.getLogger(name)
     logger.setLevel(level)
     logger.propagate = False
 
     if getattr(logger, "_configured", False):
+        if run_id:
+            ctx = get_context_filter(logger)
+            if ctx is not None:
+                ctx.run_id = run_id
         return logger
 
-    # ---- File handler (NO COLORS + STRIP ANSI) ----
+    # ---- Context filter (run_id / stage_name) ----
+    logger.addFilter(ContextFilter(run_id=run_id))
+
     if log_file is not None:
         log_path = Path(log_file)
         log_path.parent.mkdir(parents=True, exist_ok=True)
 
-        file_handler = logging.FileHandler(log_path, encoding="utf-8")
-        file_handler.setLevel(level)
-        file_handler.addFilter(StripAnsiFilter()) 
-        file_formatter = logging.Formatter(LOG_FORMAT, datefmt=DATE_FORMAT)
-        file_handler.setFormatter(file_formatter)
-        logger.addHandler(file_handler)
+        fh = logging.FileHandler(log_path, encoding="utf-8")
+        fh.setLevel(level)
+        fh.addFilter(StripAnsiFilter())
+        fh.setFormatter(logging.Formatter(_LOG_FORMAT, datefmt=DATE_FORMAT))
+        logger.addHandler(fh)
 
-    # ---- Console handler (WITH COLORS) ----
     if to_console:
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(level)
-        console_formatter = ColorFormatter(LOG_FORMAT, datefmt=DATE_FORMAT)
-        console_handler.setFormatter(console_formatter)
-        logger.addHandler(console_handler)
+        ch = logging.StreamHandler(sys.stdout)
+        ch.setLevel(level)
+        ch.setFormatter(ColorFormatter(_LOG_FORMAT, datefmt=DATE_FORMAT))
+        logger.addHandler(ch)
 
-    logger._configured = True  # type: ignore[attr-defined]
+    logger._configured = True
     return logger
 
 
 # ================================
-# Pretty CLI Helpers
+# Pretty dividers / banners
 # ================================
 
 def line(width: int = 70) -> str:
@@ -134,27 +177,232 @@ def line(width: int = 70) -> str:
 
 def stage_banner(logger: logging.Logger, title: str) -> None:
     logger.info(f"{BLUE}{line()}{RESET}")
-    logger.info(f"{BLUE}{BOLD}▶ {title}{RESET}")
+    logger.info(f"{BLUE}{BOLD} {title}{RESET}")
     logger.info(f"{BLUE}{line()}{RESET}")
 
 
 def pipeline_header(logger: logging.Logger, run_id: str) -> None:
     logger.info(f"{MAGENTA}{line()}{RESET}")
-    logger.info(f"{MAGENTA}{BOLD}🚀 RGB PIPELINE START{RESET}")
-    logger.info(f"{MAGENTA}Run ID: {run_id}{RESET}")
+    logger.info(f"{MAGENTA}{BOLD} RGB PIPELINE START{RESET}")
+    logger.info(f"{MAGENTA}Run ID : {run_id}{RESET}")
     logger.info(f"{MAGENTA}{line()}{RESET}")
 
 
-def pipeline_footer(logger: logging.Logger, runtime_seconds: float, success: bool) -> None:
+def pipeline_footer(
+    logger: logging.Logger,
+    runtime_seconds: float,
+    success: bool,
+) -> None:
     logger.info(f"{MAGENTA}{line()}{RESET}")
     if success:
-        logger.info(f"{GREEN}{BOLD}✅ PIPELINE FINISHED SUCCESSFULLY{RESET}")
+        logger.info(f"{GREEN}{BOLD} PIPELINE FINISHED SUCCESSFULLY{RESET}")
     else:
-        logger.info(f"{RED}{BOLD}❌ PIPELINE FAILED{RESET}")
-    logger.info(f"{MAGENTA}Total runtime: {runtime_seconds:.2f}s{RESET}")
+        logger.info(f"{RED}{BOLD} PIPELINE FAILED{RESET}")
+    logger.info(f"{MAGENTA}Total runtime : {runtime_seconds:.2f}s{RESET}")
     logger.info(f"{MAGENTA}{line()}{RESET}")
+
+
+def pipeline_paused(logger: logging.Logger, run_id: str, after_stage: str) -> None:
+    logger.warning(f"{YELLOW}{line()}{RESET}")
+    logger.warning(f"{YELLOW}{BOLD} PIPELINE PAUSED{RESET}")
+    logger.warning(f"{YELLOW}   Run ID      : {run_id}{RESET}")
+    logger.warning(f"{YELLOW}   After stage : {after_stage}{RESET}")
+    logger.warning(
+        f"{YELLOW}   Delete pause.flag and re-run to resume.{RESET}")
+    logger.warning(f"{YELLOW}{line()}{RESET}")
+
+
+def pipeline_canceled(logger: logging.Logger, run_id: str) -> None:
+    logger.warning(f"{YELLOW}{line()}{RESET}")
+    logger.warning(f"{YELLOW}{BOLD} PIPELINE CANCELED (WebODM UI){RESET}")
+    logger.warning(f"{YELLOW}   Run ID : {run_id}{RESET}")
+    logger.warning(f"{YELLOW}{line()}{RESET}")
 
 
 def survey_log_path(base_dir: Path | str, survey_id: str, module_name: str) -> Path:
-    base = Path(base_dir)
-    return base / "data" / "logs" / survey_id / f"{module_name}.log"
+    return Path(base_dir) / "data" / "logs" / survey_id / f"{module_name}.log"
+
+
+# ================================
+# Module-level progress helpers
+# ================================
+
+def log_section(logger: logging.Logger, title: str, *, width: int = 52) -> None:
+    bar = "═" * width
+    logger.info(f"{CYAN}{bar}{RESET}")
+    logger.info(f"{CYAN}{BOLD}◆  {title}{RESET}")
+    logger.info(f"{CYAN}{bar}{RESET}")
+
+
+def log_step(logger: logging.Logger, index: int, title: str) -> None:
+    logger.info(f"{BLUE}┌─ [{index}] {title}{RESET}")
+
+
+def log_ok(logger: logging.Logger, message: str) -> None:
+    logger.info(f"{GREEN}└─ {message}{RESET}")
+
+
+def log_warn(logger: logging.Logger, message: str) -> None:
+    logger.warning(f"{YELLOW}└─ {message}{RESET}")
+
+
+def log_progress(
+    logger: logging.Logger,
+    message: str,
+    *,
+    current: int,
+    total: int,
+    elapsed: float,
+    width: int = 80,
+) -> None:
+
+    pct = int(current / total * 100) if total else 0
+
+    # ── terminal bar ─────────────────────────────────────────────────────────
+    bar_width = 16
+    filled = int(bar_width * current / total) if total else 0
+    bar = f"{'█' * filled}{'░' * (bar_width - filled)}"
+
+    term_line = (
+        f"{CYAN}{message}{RESET}  "
+        f"{WHITE}{current:>{len(str(total))}}/{total}{RESET}  "
+        f"{YELLOW}{pct:>3}%{RESET}  "
+        f"{GREY}|{bar}|{RESET}  "
+        f"{GREY}{elapsed:.1f}s{RESET}"
+    )
+
+    plain_len = len(strip_ansi(term_line))
+    padded = term_line + " " * max(0, width - plain_len)
+
+    sys.stdout.write(f"\r{padded}")
+    sys.stdout.flush()
+
+    logger.debug(
+        f"{message} {current}/{total} ({pct}%) elapsed={elapsed:.1f}s")
+
+
+def log_progress_done(logger: logging.Logger, message: str, total: int, elapsed: float) -> None:
+
+    sys.stdout.write("\n")
+    sys.stdout.flush()
+    logger.info(
+        f"{GREEN}└─ {message} — {total} files in {elapsed:.1f}s{RESET}")
+
+
+# ================================
+# Stage lifecycle log helpers
+# Called exclusively by StageRunner
+# ================================
+
+def log_stage_start(logger: logging.Logger, stage_name: str) -> None:
+    set_stage_context(logger, stage_name)
+    logger.info(f"{BLUE}{line()}{RESET}")
+    logger.info(f"{BLUE}{BOLD} START   | {stage_name}{RESET}")
+    logger.info(f"{BLUE}{line()}{RESET}")
+
+
+def log_stage_done(logger: logging.Logger, stage_name: str, runtime: float) -> None:
+    logger.info(
+        f"{GREEN}{BOLD} DONE    | {stage_name} | {runtime:.2f}s{RESET}")
+    set_stage_context(logger, "")
+
+
+def log_stage_skip(logger: logging.Logger, stage_name: str) -> None:
+    logger.info(f"{YELLOW} SKIP    | {stage_name} (already completed){RESET}")
+
+
+def log_stage_fail(logger: logging.Logger, stage_name: str, runtime: float) -> None:
+    logger.error(f"{RED}{BOLD} FAILED  | {stage_name} | {runtime:.2f}s{RESET}")
+    set_stage_context(logger, "")
+
+
+def log_stage_canceled(logger: logging.Logger, stage_name: str, runtime: float) -> None:
+    logger.warning(f"{YELLOW} CANCELED | {stage_name} | {runtime:.2f}s{RESET}")
+    set_stage_context(logger, "")
+
+
+def log_stage_retry(
+    logger: logging.Logger,
+    stage_name: str,
+    attempt: int,
+    max_attempts: int,
+    delay: int,
+    error: Exception,
+) -> None:
+
+    logger.warning(
+        f"{YELLOW} RETRY   | {stage_name} | attempt {attempt}/{max_attempts} "
+        f"— retrying in {delay}s | {error}{RESET}"
+    )
+
+
+def log_stale_stage(logger: logging.Logger, stage_name: str) -> None:
+
+    logger.warning(
+        f"{YELLOW} STALE   | {stage_name} "
+        f"— previous run did not finish cleanly; marking failed and rerunning.{RESET}"
+    )
+
+
+def log_output_loaded(logger: logging.Logger, output_key: str) -> None:
+
+    logger.info(
+        f"{GREY}  ↳ Loaded saved output → state['{output_key}']{RESET}")
+
+
+# ================================
+# Quality Gate CLI helper
+# ================================
+
+_QG_WIDTH = 54
+
+
+def _qg_line(char: str = "─") -> str:
+    return char * _QG_WIDTH
+
+
+def quality_gate_prompt(
+    logger: logging.Logger,
+    survey_id: str,
+    project_id: int | str,
+    task1: dict,
+    task2: dict,
+    webodm_url: str = "",
+) -> str:
+
+    t1_label = f"{task1.get('name', '—')}  (id={task1.get('id', '—')})"
+    t2_label = (
+        f"{task2.get('name', '—')}  (id={task2.get('id', '—')})"
+        if task2
+        else "—"
+    )
+    dashboard = f"{webodm_url}/dashboard/{project_id}" if webodm_url else "—"
+
+    panel = [
+        f"{MAGENTA}{BOLD}{_qg_line('═')}{RESET}",
+        f"{MAGENTA}{BOLD}  QUALITY GATE{RESET}",
+        f"{MAGENTA}{_qg_line()}{RESET}",
+        f"  Survey     : {CYAN}{survey_id}{RESET}",
+        f"  Project ID : {CYAN}{project_id}{RESET}",
+        f"  Task 1     : {WHITE}{t1_label}{RESET}",
+        f"  Task 2     : {WHITE}{t2_label}{RESET}",
+        f"  Dashboard  : {GREY}{dashboard}{RESET}",
+        f"{MAGENTA}{_qg_line()}{RESET}",
+        f"  {BOLD}Commands{RESET}",
+        f"  {GREEN}yes{RESET}                    → Approve and continue",
+        f"  {RED}fail{RESET}                   → Mark pipeline as failed",
+        f"  {YELLOW}restart{RESET}                → Restart QA task (load_dataset)",
+        f"  {YELLOW}restart t1|t2{RESET}          → Restart specific task",
+        f"  {YELLOW}restart t1|t2 <stage>{RESET}  → Restart from a stage",
+        f"{MAGENTA}{_qg_line()}{RESET}",
+        f"  {GREY}Stages: load_dataset · structure_from_motion{RESET}",
+        f"  {GREY}        multi_view_stereo · texturing{RESET}",
+        f"{MAGENTA}{_qg_line('═')}{RESET}",
+    ]
+
+    for ln in panel:
+        logger.info(ln)
+
+    sys.stdout.write(f"\n{BOLD}  Your decision:{RESET} ")
+    sys.stdout.flush()
+    return input().strip().lower()
