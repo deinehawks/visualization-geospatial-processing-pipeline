@@ -818,10 +818,6 @@ class RGBPipeline:
             gdal2tiles_path=gdal2tiles_path,
         )
 
-        logger.info(f"Boundary (GeoJSON): {boundary_geojson_path}")
-        logger.info(f"Using gdalwarp: {gdalwarp_path}")
-        logger.info(f"Using gdal2tiles: {gdal2tiles_path}")
-
         # 1) Clip unbounded -> always
         if clip_enabled:
             logger.info(
@@ -1024,13 +1020,12 @@ class RGBPipeline:
             default_task_id, default_task_name = _pick_default_task()
 
             raw = quality_gate_prompt(
+                logger=logger,
                 survey_id=survey_id,
                 project_id=int(project_id),
                 task1=task1,
                 task2=task2 if task2.get("id") else {},
-                restarts=restarts,
-                max_restarts=max_restarts,
-                allowed_stages=allowed_stages,
+                webodm_url=self.config.get("webodm", {}).get("url", ""),
             )
 
             # ── yes ────────────────────────────────────────────────

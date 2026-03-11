@@ -340,7 +340,7 @@ class WebODMProcessor:
                 pass
         gb = total_bytes / (1024**3)
         self.logger.info(
-            f"Found {len(image_files)} unique images | approx_size={gb:.2f} GB")
+            f"Found {len(image_files)} unique images | approximate size = {gb:.2f} GB")
 
         # ------------------------------------------------------------
         # Build multipart fields + progress monitor
@@ -485,7 +485,7 @@ class WebODMProcessor:
             headers["Content-Type"] = monitor.content_type
 
             self.logger.info(
-                "Uploading images to WebODM (real progress enabled)...")
+                "Uploading images to WebODM")
             poller_thread.start()
 
             resp = self.session.post(
@@ -754,11 +754,11 @@ class WebODMProcessor:
                     f"Asset not available (skip): {asset_type}")
                 return False
             self.logger.exception(
-                f"Failed downloading asset='{asset_type}' -> {out_path}")
+                f"Failed downloading asset ='{asset_type}' -> {out_path}")
             return False
         except Exception:
             self.logger.exception(
-                f"Failed downloading asset='{asset_type}' -> {out_path}")
+                f"Failed downloading asset ='{asset_type}' -> {out_path}")
             return False
 
     def run_gdalwarp(self, src: Path, dst: Path, epsg: int, *, gdalwarp_path: str = "gdalwarp") -> None:
@@ -820,7 +820,7 @@ class WebODMProcessor:
                 f"Orthomosaic download failed. candidates={list(candidates)}")
             return None
 
-        self.logger.info(f"Orthomosaic downloaded using asset={used_asset}")
+        self.logger.info(f"Orthomosaic downloaded using asset = {used_asset}")
         self.run_gdalwarp(tmp_raw, final_out, epsg,
                           gdalwarp_path=gdalwarp_path)
         try:
@@ -858,7 +858,7 @@ class WebODMProcessor:
                 f"LAZ download failed. candidates={list(candidates)}")
             return {"laz": None, "ply": None, "pcd": None, "asset_type": None}
 
-        self.logger.info(f"Pointcloud downloaded using asset={used_asset}")
+        self.logger.info(f"Pointcloud downloaded using asset = {used_asset}")
 
         ply_path = out_dir / ply_name
         pcd_path = out_dir / pcd_name

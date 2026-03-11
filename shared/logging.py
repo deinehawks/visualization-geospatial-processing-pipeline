@@ -192,7 +192,7 @@ def stage_banner(logger: logging.Logger, title: str) -> None:
 
 def pipeline_header(logger: logging.Logger, run_id: str) -> None:
     logger.info(f"{MAGENTA}{line()}{RESET}")
-    logger.info(f"{MAGENTA}{BOLD} RGB PIPELINE START{RESET}")
+    logger.info(f"{MAGENTA}{BOLD}RGB PIPELINE START{RESET}")
     logger.info(f"{MAGENTA}Run ID : {run_id}{RESET}")
     logger.info(f"{MAGENTA}{line()}{RESET}")
 
@@ -204,16 +204,16 @@ def pipeline_footer(
 ) -> None:
     logger.info(f"{MAGENTA}{line()}{RESET}")
     if success:
-        logger.info(f"{GREEN}{BOLD} PIPELINE FINISHED SUCCESSFULLY{RESET}")
+        logger.info(f"{GREEN}{BOLD}PIPELINE FINISHED SUCCESSFULLY{RESET}")
     else:
-        logger.info(f"{RED}{BOLD} PIPELINE FAILED{RESET}")
+        logger.info(f"{RED}{BOLD}PIPELINE FAILED{RESET}")
     logger.info(f"{MAGENTA}Total runtime : {runtime_seconds:.2f}s{RESET}")
     logger.info(f"{MAGENTA}{line()}{RESET}")
 
 
 def pipeline_paused(logger: logging.Logger, run_id: str, after_stage: str) -> None:
     logger.warning(f"{YELLOW}{line()}{RESET}")
-    logger.warning(f"{YELLOW}{BOLD} PIPELINE PAUSED{RESET}")
+    logger.warning(f"{YELLOW}{BOLD}PIPELINE PAUSED{RESET}")
     logger.warning(f"{YELLOW}   Run ID      : {run_id}{RESET}")
     logger.warning(f"{YELLOW}   After stage : {after_stage}{RESET}")
     logger.warning(
@@ -223,7 +223,7 @@ def pipeline_paused(logger: logging.Logger, run_id: str, after_stage: str) -> No
 
 def pipeline_canceled(logger: logging.Logger, run_id: str) -> None:
     logger.warning(f"{YELLOW}{line()}{RESET}")
-    logger.warning(f"{YELLOW}{BOLD} PIPELINE CANCELED (WebODM UI){RESET}")
+    logger.warning(f"{YELLOW}{BOLD}PIPELINE CANCELED (WebODM UI){RESET}")
     logger.warning(f"{YELLOW}   Run ID : {run_id}{RESET}")
     logger.warning(f"{YELLOW}{line()}{RESET}")
 
@@ -312,21 +312,21 @@ def log_stage_start(logger: logging.Logger, stage_name: str) -> None:
 
 def log_stage_done(logger: logging.Logger, stage_name: str, runtime: float) -> None:
     logger.info(
-        f"{GREEN}{BOLD} DONE    | {stage_name} | {runtime:.2f}s{RESET}")
+        f"{GREEN}{BOLD}DONE    | {stage_name} | {runtime:.2f}s{RESET}")
     set_stage_context(logger, "")
 
 
 def log_stage_skip(logger: logging.Logger, stage_name: str) -> None:
-    logger.info(f"{YELLOW} SKIP    | {stage_name} (already completed){RESET}")
+    logger.info(f"{YELLOW}SKIP    | {stage_name} (already completed){RESET}")
 
 
 def log_stage_fail(logger: logging.Logger, stage_name: str, runtime: float) -> None:
-    logger.error(f"{RED}{BOLD} FAILED  | {stage_name} | {runtime:.2f}s{RESET}")
+    logger.error(f"{RED}{BOLD}FAILED  | {stage_name} | {runtime:.2f}s{RESET}")
     set_stage_context(logger, "")
 
 
 def log_stage_canceled(logger: logging.Logger, stage_name: str, runtime: float) -> None:
-    logger.warning(f"{YELLOW} CANCELED | {stage_name} | {runtime:.2f}s{RESET}")
+    logger.warning(f"{YELLOW}CANCELED | {stage_name} | {runtime:.2f}s{RESET}")
     set_stage_context(logger, "")
 
 
@@ -340,7 +340,7 @@ def log_stage_retry(
 ) -> None:
 
     logger.warning(
-        f"{YELLOW} RETRY   | {stage_name} | attempt {attempt}/{max_attempts} "
+        f"{YELLOW}RETRY   | {stage_name} | attempt {attempt}/{max_attempts} "
         f"— retrying in {delay}s | {error}{RESET}"
     )
 
@@ -348,7 +348,7 @@ def log_stage_retry(
 def log_stale_stage(logger: logging.Logger, stage_name: str) -> None:
 
     logger.warning(
-        f"{YELLOW} STALE   | {stage_name} "
+        f"{YELLOW}STALE   | {stage_name} "
         f"— previous run did not finish cleanly; marking failed and rerunning.{RESET}"
     )
 
@@ -356,7 +356,7 @@ def log_stale_stage(logger: logging.Logger, stage_name: str) -> None:
 def log_output_loaded(logger: logging.Logger, output_key: str) -> None:
 
     logger.info(
-        f"{GREY}  ↳ Loaded saved output → state['{output_key}']{RESET}")
+        f"{GREY} ↳ Loaded saved output → state['{output_key}']{RESET}")
 
 
 # ================================
