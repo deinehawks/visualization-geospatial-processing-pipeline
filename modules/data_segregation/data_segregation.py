@@ -13,17 +13,27 @@ Responsible for:
 """
 
 from __future__ import annotations
-from pathlib import Path
-from typing import Dict, Any, Optional
-from datetime import datetime
 
-import re
-import shutil
 import json
 import logging
-import zipfile
+import re
+import shutil
 import tempfile
 import time
+import zipfile
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from shared.logging import (
+    log_ok,
+    log_progress,
+    log_progress_done,
+    log_section,
+    log_step,
+    log_warn,
+)
+
 
 # ============================================================
 # SURVEY ID GENERATOR
@@ -37,20 +47,15 @@ def generate_next_survey_id(surveys_root: Path, year: int, logger: logging.Logge
     pattern = re.compile(rf"{prefix}(\d{{3}})")
 
     max_number = 0
-
     for folder in year_dir.iterdir():
         if not folder.is_dir():
             continue
-
         match = pattern.fullmatch(folder.name)
         if match:
-            number = int(match.group(1))
-            max_number = max(max_number, number)
+            max_number = max(max_number, int(match.group(1)))
 
-    next_number = max_number + 1
-    survey_id = f"{prefix}{next_number:03d}"
-
-    logger.info(f"Generated new survey ID: {survey_id}")
+    survey_id = f"{prefix}{max_number + 1:03d}"
+    log_ok(logger, f"Survey ID generated: {survey_id}")
     return survey_id
 
 
@@ -66,112 +71,83 @@ def run(
     *,
     force: bool = False,
 ) -> Dict[str, Any]:
-    # ... keep everything you already have above ...
 
+    log_section(logger, "DATA SEGREGATION")
+
+    log_step(logger, 1, "Generate survey ID")
     survey_id = generate_next_survey_id(surveys_root, year, logger)
     survey_path = surveys_root / str(year) / survey_id / "rgb"
 
     if survey_path.exists() and not force:
         raise FileExistsError(f"Survey path already exists: {survey_path}")
 
-    logger.info(f"Creating survey directory: {survey_path}")
+    log_step(logger, 2, "Create folder structure")
 
-    # --------------------------------------------------------
-    # Create standard folder structure
-    # --------------------------------------------------------
-    dirs = {
-        "rgb_root": survey_path,
-        "boundary": survey_path / "boundary",
-
-        # images
-        "raw": survey_path / "images" / "raw",
-        "path": survey_path / "images" / "path",
-        "cross_runs": survey_path / "images" / "cross-runs",
-
-        # Ortho
-        "ortho": survey_path / "ortho",
-
-        #DEM
-        "odm": survey_path / "odm",
-        "dem_odm": survey_path / "dem" / "odm",
-        "dem_dtm": survey_path / "dem" / "odm" / "dtm",
-        "dem_dsm": survey_path / "dem" / "odm" / "dsm",
-
-        # 3D
-        "3d": survey_path / "3d",
-
-        # QGIS
-        "qgis_root": survey_path / "qgis",
-        "qgis_clipped": survey_path / "qgis" / "clipped",
+    dirs: Dict[str, Path] = {
+        "rgb_root":          survey_path,
+        "boundary":          survey_path / "boundary",
+        "raw":               survey_path / "images" / "raw",
+        "path":              survey_path / "images" / "path",
+        "cross_runs":        survey_path / "images" / "cross-runs",
+        "ortho":             survey_path / "ortho",
+        "odm":               survey_path / "odm",
+        "dem_odm":           survey_path / "dem" / "odm",
+        "dem_dtm":           survey_path / "dem" / "odm" / "dtm",
+        "dem_dsm":           survey_path / "dem" / "odm" / "dsm",
+        "3d":                survey_path / "3d",
+        "qgis_root":         survey_path / "qgis",
+        "qgis_clipped":      survey_path / "qgis" / "clipped",
         "qgis_clipped_ortho": survey_path / "qgis" / "clipped" / "ortho",
-
-        # Tiles
-        "tiles_root": survey_path / "tiles",
-        "tiles_ortho": survey_path / "tiles" / "ortho",
+        "tiles_root":        survey_path / "tiles",
+        "tiles_ortho":       survey_path / "tiles" / "ortho",
         "tiles_ortho_sharp": survey_path / "tiles" / "ortho" / "sharp-corners",
         "tiles_ortho_round": survey_path / "tiles" / "ortho" / "round-corners",
     }
 
     extra_folders = [
-        survey_path / "3d",
         survey_path / "dem" / "lidar",
         survey_path / "object-detection",
-        survey_path / "qgis" / "clipped",
-        survey_path / "tiles",
-        survey_path / "qgis" / "clipped" / "ortho",
-        survey_path / "tiles" / "ortho" / "sharp-corners",
-        survey_path / "tiles" / "ortho" / "round-corners",
     ]
 
     for p in list(dirs.values()) + extra_folders:
         p.mkdir(parents=True, exist_ok=True)
 
-    # --------------------------------------------------------
-    # Validate + Copy Images
-    # --------------------------------------------------------
-    image_extensions = (".jpg", ".jpeg", ".JPG", ".JPEG")
+    log_ok(logger, f"Folder structure created: {survey_path}")
+
+    log_step(logger, 3, "Discover source images")
+
+    image_extensions = {".jpg", ".jpeg", ".JPG", ".JPEG"}
     images = [f for f in source_dir.rglob("*") if f.suffix in image_extensions]
 
-    if len(images) == 0:
+    if not images:
         raise ValueError("No JPG/JPEG images found in source directory.")
 
-    logger.info(f"Found {len(images)} images")
+    total_bytes = sum(p.stat().st_size for p in images)
+    gb = total_bytes / (1024 ** 3)
+    log_ok(logger, f"Found {len(images)} images ({gb:.2f} GB)")
 
-    # Use images/raw as canonical input folder
+    log_step(logger, 4, "Copy images → raw")
+
     raw_dir = dirs["raw"]
-
-    logger.info(f"Copying images -> {raw_dir}")
-
-    copied = 0
     total = len(images)
     t0 = time.perf_counter()
 
-    for img in images:
+    for i, img in enumerate(images, 1):
         shutil.copy2(img, raw_dir / img.name)
-        copied += 1
+        if i % 25 == 0 or i == total:
+            log_progress(
+                logger, "Copying images",
+                current=i, total=total,
+                elapsed=time.perf_counter() - t0,
+            )
 
-        if copied % 50 == 0 or copied == total:
-            elapsed = time.perf_counter() - t0
-            msg = f"Copying images: {copied}/{total} | elapsed={elapsed:.1f}s"
-            print(msg.ljust(80), end="\r", flush=True)  # one-line update
+    log_progress_done(logger, "Copying images", total=total,
+                      elapsed=time.perf_counter() - t0)
 
-    # finish the line cleanly
-    print("".ljust(80), end="\r", flush=True)
+    log_step(logger, 5, "Locate and copy boundary file (KML/KMZ)")
 
-    elapsed = time.perf_counter() - t0
-    logger.info(f"Images copied to raw | total={total} | time={elapsed:.1f}s")
-    
-    # (optional) also mirror to images/raw if you still want it
-    # raw_dir = dirs["raw"]
-    # for img in images:
-    #     shutil.copy2(img, raw_dir / img.name)
-
-    # --------------------------------------------------------
-    # Validate + Copy KML/KMZ -> boundary/<survey_id>.kml
-    # --------------------------------------------------------
     kml_files = list(source_dir.rglob("*.kml"))
     kmz_files = list(source_dir.rglob("*.kmz"))
-
     boundary_dir = dirs["boundary"]
     selected_kml_path: Optional[Path] = None
 
@@ -179,73 +155,80 @@ def run(
         src_kml = kml_files[0]
         selected_kml_path = boundary_dir / f"{survey_id}.kml"
         shutil.copy2(src_kml, selected_kml_path)
+        log_ok(
+            logger, f"KML copied: {src_kml.name} → {selected_kml_path.name}")
 
     elif kmz_files:
         kmz_path = kmz_files[0]
-        logger.info(f"KMZ detected: {kmz_path.name} — extracting KML")
+        log_ok(logger, f"KMZ detected: {kmz_path.name} — extracting KML")
 
         with zipfile.ZipFile(kmz_path, "r") as zf:
-            kml_members = [m for m in zf.namelist() if m.lower().endswith(".kml")]
+            kml_members = [
+                m for m in zf.namelist() if m.lower().endswith(".kml")]
             if not kml_members:
                 raise ValueError("KMZ file does not contain any KML file.")
 
-            member = kml_members[0]
-
             with tempfile.TemporaryDirectory() as tmpdir:
-                zf.extract(member, path=tmpdir)
-                extracted_path = Path(tmpdir) / member
-
-                if not extracted_path.exists():
-                    extracted_path = next(Path(tmpdir).rglob("*.kml"), None)
-
-                if not extracted_path:
+                zf.extract(kml_members[0], path=tmpdir)
+                extracted = Path(tmpdir) / kml_members[0]
+                if not extracted.exists():
+                    extracted = next(Path(tmpdir).rglob("*.kml"), None)
+                if not extracted:
                     raise ValueError("Failed to extract KML from KMZ.")
 
                 selected_kml_path = boundary_dir / f"{survey_id}.kml"
-                shutil.copy2(extracted_path, selected_kml_path)
+                shutil.copy2(extracted, selected_kml_path)
+
+        log_ok(logger, f"KML extracted and saved: {selected_kml_path.name}")
 
     else:
         raise ValueError("No KML or KMZ file found in source directory.")
 
-    logger.info(f"KML saved as: {selected_kml_path.name}")
+    log_step(logger, 6, "Audit ignored files")
 
-    # --------------------------------------------------------
-    # Ignored Files
-    # --------------------------------------------------------
     ignored_counts: Dict[str, int] = {}
     for file in source_dir.rglob("*"):
         if file.is_file():
             ext = file.suffix.lower()
-            if ext not in (".kml", ".kmz") and ext not in (e.lower() for e in image_extensions):
+            if ext not in {".kml", ".kmz"} and ext not in {e.lower() for e in image_extensions}:
                 ignored_counts[ext] = ignored_counts.get(ext, 0) + 1
 
-    # --------------------------------------------------------
-    # Manifest
-    # --------------------------------------------------------
+    if ignored_counts:
+        log_warn(logger, f"Ignored file types: {ignored_counts}")
+    else:
+        log_ok(logger, "No unexpected file types found")
+
+    log_step(logger, 7, "Write manifest")
+
     manifest = {
-        "survey_id": survey_id,
-        "year": year,
+        "survey_id":     survey_id,
+        "year":          year,
         "source_folder": str(source_dir),
-        "created_at": datetime.now().isoformat(),
-        "image_count": len(images),
-        "kml_file": f"{survey_id}.kml",
+        "created_at":    datetime.now().isoformat(),
+        "image_count":   len(images),
+        "kml_file":      f"{survey_id}.kml",
         "ignored_files": ignored_counts,
     }
 
     manifest_path = survey_path / "manifest.json"
-    with open(manifest_path, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    logger.info("Manifest written")
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    log_ok(logger, f"Manifest written: {manifest_path.name}")
 
-    summary = {
-        "survey_id": survey_id,
+    # ── Summary ───────────────────────────────────────────────────────────
+    log_section(logger, "DATA SEGREGATION COMPLETE")
+    logger.info(
+        f"survey_id={survey_id} | images={len(images)} | "
+        f"kml={selected_kml_path.name if selected_kml_path else '—'}"
+    )
+
+    return {
+        "survey_id":   survey_id,
         "survey_path": str(survey_path),
         "image_count": len(images),
-        "kml_file": f"{survey_id}.kml",
-        "manifest": str(manifest_path),
-        "dirs": {k: str(v) for k, v in dirs.items()},  
+        "kml_file":    f"{survey_id}.kml",
+        "manifest":    str(manifest_path),
+        "dirs":        {k: str(v) for k, v in dirs.items()},
     }
 
-    logger.info("Data segregation stage completed successfully")
-    return summary
 
+run_data_segregation = run
