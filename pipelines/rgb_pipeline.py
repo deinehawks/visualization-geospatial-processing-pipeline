@@ -107,10 +107,7 @@ class RGBPipeline:
 
         self.rgb_path: Optional[Path] = None
 
-    # ============================================================
     # Helpers
-    # ============================================================
-
     def _require_survey_id(self) -> str:
         if not self.survey_id:
             raise RuntimeError(
@@ -124,11 +121,6 @@ class RGBPipeline:
         return self.rgb_path
 
     def _hydrate_from_state(self) -> None:
-        """
-        Re-populate instance variables from self.state after a stage runs or
-        is skipped on resume. Ensures self.survey_id, self.rgb_path, and
-        other attributes are always set before the next stage reads them.
-        """
         state = self.state
 
         seg = state.get("data_segregation") or {}
@@ -137,7 +129,58 @@ class RGBPipeline:
         if seg.get("survey_path"):
             self.rgb_path = Path(seg["survey_path"])
 
-        if state.get("crossrun_flag"):
+        flt = state.get("cross_run_filter") or {}
+        if flt.get("crossrun_flag"):
+            self.state["crossrun_flag"] = flt["crossrun_flag"]
+
+        kml = state.get("kml_boundary") or {}
+        if "boundary_available" in kml:
+            self.state["boundary_available"] = kml["boundary_available"]
+        if kml.get("boundary_geojson_path"):
+            self.state["boundary_geojson_path"] = kml["boundary_geojson_path"]
+
+        if not state.get("webodm"):
+            ckpt = self._load_webodm_checkpoint()
+            if ckpt:
+                self.loggers["pipeline"].info(
+                    f"Loaded webodm checkpoint: project_id={ckpt.get('project_id')} "
+                    f"task1={(ckpt.get('task1') or {}).get('id')} "
+                    f"task2={(ckpt.get('task2') or {}).get('id')}"
+                )
+                self.state["webodm"] = ckpt
+
+    # Checkpoint helpers
+    def _webodm_checkpoint_path(self) -> Path:
+        return self.base_dir / "data" / "logs" / f"webodm_checkpoint_{self.run_id}.json"
+
+    def _save_webodm_checkpoint(self, data: dict) -> None:
+        import json
+        path = self._webodm_checkpoint_path()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
+        except Exception as e:
+            self.loggers["webodm"].warning(
+                f"Could not save webodm checkpoint: {e}")
+
+    def _load_webodm_checkpoint(self) -> dict:
+        import json
+        path = self._webodm_checkpoint_path()
+        if not path.exists():
+            return {}
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception as e:
+            self.loggers["webodm"].warning(
+                f"Could not load webodm checkpoint: {e}")
+            return {}
+
+    def _clear_webodm_checkpoint(self) -> None:
+        path = self._webodm_checkpoint_path()
+        try:
+            if path.exists():
+                path.unlink()
+        except Exception:
             pass
 
     @staticmethod
@@ -233,10 +276,7 @@ class RGBPipeline:
         except Exception:
             logger.exception(f"Failed to clean upload cache: {cache_dir}")
 
-    # ============================================================
     # Pause helpers
-    # ============================================================
-
     def _pause_flag_path(self) -> Path:
         return self.base_dir / "data" / "pause.flag"
 
@@ -262,10 +302,7 @@ class RGBPipeline:
 
         raise RuntimeError("__PIPELINE_PAUSED__")
 
-    # ============================================================
     # STAGES
-    # ============================================================
-
     def stage_data_segregation(self) -> Dict[str, Any]:
         logger = self.loggers["segregation"]
         logger.info("Stage: Data Segregation")
@@ -506,33 +543,167 @@ class RGBPipeline:
                 "webodm_project_suffix") or "").strip()
             project_name = f"{survey_id}{project_suffix}"
 
-            project_id = processor.create_project(
-                name=project_name,
-                description="RGB automated processing",
+            # ── Resume: reattach to existing project if available ─────────
+            prev_web = self.state.get("webodm") or {}
+            prev_project_id = prev_web.get("project_id")
+            prev_task1 = prev_web.get("task1") or {}
+            prev_task2 = prev_web.get("task2") or {}
+
+            if prev_project_id:
+                project_id = prev_project_id
+                logger.info(
+                    f"Resuming: reattaching to existing project (ID={project_id})")
+            else:
+                project_id = processor.create_project(
+                    name=project_name,
+                    description="RGB automated processing",
+                )
+
+                self._save_webodm_checkpoint({
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "task1": {},
+                    "task2": None,
+                    "downloads": {"task1": {}, "task2": {}},
+                })
+
+            # ── Resume: skip Task 1 if it already succeeded ───────────────
+            t1_already_done = (
+                prev_task1.get("id")
+                and prev_task1.get("success") is True
             )
 
-            # ---------------- TASK 1 (always) ----------------
-            task1_options = dict(webodm_cfg.get("task1_options", {}))
-            current_task_id = processor.create_task_with_images(
-                project_id=project_id,
-                name=task1_name,
-                image_folder=str(upload_folder),
-                options=task1_options,
-                processing_node=webodm_cfg.get("node_id"),
+            t1_already_done = (
+                prev_task1.get("id")
+                and prev_task1.get("success") is True
             )
-            t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                project_id, current_task_id, live=False)
+
+            if t1_already_done:
+                current_task_id = str(prev_task1["id"])
+                t1_success = True
+                t1_runtime = float(prev_task1.get("runtime_seconds") or 0)
+                logger.info(
+                    f"Resuming: Task 1 already completed "
+                    f"(id={current_task_id}) — skipping upload and processing"
+                )
+            else:
+                # ── Try to find task1 in WebODM by name first ─────────────.
+                existing_task_id = None
+                if prev_project_id:
+                    existing_task_id = processor.find_task_by_name(
+                        project_id, task1_name)
+                    if existing_task_id:
+                        logger.info(
+                            f"Resuming: found existing Task 1 in WebODM by name "
+                            f"'{task1_name}' (id={existing_task_id}) — reattaching"
+                        )
+
+                if existing_task_id:
+                    task_status = processor.get_task_status(
+                        project_id, existing_task_id)
+                    logger.info(
+                        f"Resuming: Task 1 current status in WebODM: {task_status!r}")
+
+                    if task_status == "completed":
+                        current_task_id = existing_task_id
+                        t1_success = True
+                        t1_runtime = 0.0
+                        logger.info(
+                            f"Resuming: Task 1 already completed in WebODM "
+                            f"(id={current_task_id}) — reusing"
+                        )
+
+                    elif task_status in ("queued", "running"):
+
+                        current_task_id = existing_task_id
+                        logger.info(
+                            f"Resuming: Task 1 still {task_status} in WebODM "
+                            f"(id={current_task_id}) — waiting for completion"
+                        )
+                        t1_success, t1_runtime, t1_info = processor.wait_for_completion(
+                            project_id, current_task_id, live=False)
+
+                    else:
+                        logger.warning(
+                            f"Resuming: Task 1 is '{task_status}' in WebODM "
+                            f"(id={existing_task_id}) — deleting and re-uploading"
+                        )
+                        try:
+                            processor.delete_task(project_id, existing_task_id)
+                        except Exception as del_err:
+                            logger.warning(
+                                f"Could not delete failed task "
+                                f"{existing_task_id}: {del_err} — continuing anyway"
+                            )
+
+                        task1_options = dict(
+                            webodm_cfg.get("task1_options", {}))
+                        current_task_id = processor.create_task_with_images(
+                            project_id=project_id,
+                            name=task1_name,
+                            image_folder=str(upload_folder),
+                            options=task1_options,
+                            processing_node=webodm_cfg.get("node_id"),
+                        )
+                        t1_success, t1_runtime, t1_info = processor.wait_for_completion(
+                            project_id, current_task_id, live=False)
+
+                elif prev_task1.get("id") and prev_project_id:
+                    current_task_id = str(prev_task1["id"])
+                    logger.info(
+                        f"Resuming: Task 1 exists but incomplete "
+                        f"(id={current_task_id}) — checking WebODM status"
+                    )
+                    t1_success, t1_runtime, t1_info = processor.wait_for_completion(
+                        project_id, current_task_id, live=False)
+
+                else:
+                    task1_options = dict(webodm_cfg.get("task1_options", {}))
+                    current_task_id = processor.create_task_with_images(
+                        project_id=project_id,
+                        name=task1_name,
+                        image_folder=str(upload_folder),
+                        options=task1_options,
+                        processing_node=webodm_cfg.get("node_id"),
+                    )
+                    t1_success, t1_runtime, t1_info = processor.wait_for_completion(
+                        project_id, current_task_id, live=False)
+
+                self._save_webodm_checkpoint({
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "task1": {
+                        "id": current_task_id,
+                        "name": task1_name,
+                        "success": t1_success,
+                        "runtime_seconds": t1_runtime,
+                    },
+                    "task2": None,
+                    "downloads": {"task1": {}, "task2": {}},
+                })
 
             result: Dict[str, Any] = {
                 "project_id": project_id,
                 "project_name": project_name,
-                "task1": {"id": current_task_id, "name": task1_name, "success": t1_success, "runtime_seconds": t1_runtime},
+                "task1": {
+                    "id": current_task_id,
+                    "name": task1_name,
+                    "success": t1_success,
+                    "runtime_seconds": t1_runtime,
+                },
                 "task2": None,
                 "boundary_used": False,
                 "boundary_reason": None,
                 "boundary_geojson_path": boundary_geojson_path,
-                "downloads": {"task1": {}, "task2": {}},
+                "downloads": {
+                    "task1": prev_web.get("downloads", {}).get("task1") or {},
+                    "task2": {},
+                },
             }
+
+            if t1_already_done and prev_web.get("downloads", {}).get("task1"):
+                logger.info(
+                    "Resuming: reusing Task 1 downloads from previous run")
 
             # ---------------- Downloads after TASK 1 ----------------
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
@@ -581,20 +752,113 @@ class RGBPipeline:
             task2_options = dict(webodm_cfg.get("task2_options", {}))
             task2_options["boundary"] = boundary_geojson
 
-            current_task_id = processor.create_task_with_images(
-                project_id=project_id,
-                name=task2_name,
-                image_folder=str(upload_folder),
-                options=task2_options,
-                processing_node=webodm_cfg.get("node_id"),
+            t2_already_done = (
+                prev_task2.get("id")
+                and prev_task2.get("success") is True
             )
 
-            t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                project_id, current_task_id, live=False)
+            if t2_already_done:
+                current_task_id = str(prev_task2["id"])
+                t2_success = True
+                t2_runtime = float(prev_task2.get("runtime_seconds") or 0)
+                logger.info(
+                    f"Resuming: Task 2 already completed "
+                    f"(id={current_task_id}) — skipping upload and processing"
+                )
 
-            result["task2"] = {"id": current_task_id, "name": task2_name,
-                               "success": t2_success, "runtime_seconds": t2_runtime}
+            else:
+                existing_task2_id = None
+                if prev_project_id:
+                    existing_task2_id = processor.find_task_by_name(
+                        project_id, task2_name)
+                    if existing_task2_id:
+                        logger.info(
+                            f"Resuming: found existing Task 2 in WebODM by name "
+                            f"'{task2_name}' (id={existing_task2_id}) — checking status"
+                        )
+
+                if existing_task2_id:
+                    task2_status = processor.get_task_status(
+                        project_id, existing_task2_id)
+                    logger.info(
+                        f"Resuming: Task 2 current status in WebODM: {task2_status!r}")
+
+                    if task2_status == "completed":
+                        current_task_id = existing_task2_id
+                        t2_success = True
+                        t2_runtime = 0.0
+                        logger.info(
+                            f"Resuming: Task 2 already completed in WebODM "
+                            f"(id={current_task_id}) — reusing"
+                        )
+
+                    elif task2_status in ("queued", "running"):
+                        current_task_id = existing_task2_id
+                        logger.info(
+                            f"Resuming: Task 2 still {task2_status} in WebODM "
+                            f"(id={current_task_id}) — waiting for completion"
+                        )
+                        t2_success, t2_runtime, t2_info = processor.wait_for_completion(
+                            project_id, current_task_id, live=False)
+
+                    else:
+                        logger.warning(
+                            f"Resuming: Task 2 is '{task2_status}' in WebODM "
+                            f"(id={existing_task2_id}) — deleting and re-uploading"
+                        )
+                        try:
+                            processor.delete_task(
+                                project_id, existing_task2_id)
+                        except Exception as del_err:
+                            logger.warning(
+                                f"Could not delete failed Task 2 "
+                                f"{existing_task2_id}: {del_err} — continuing anyway"
+                            )
+
+                        current_task_id = processor.create_task_with_images(
+                            project_id=project_id,
+                            name=task2_name,
+                            image_folder=str(upload_folder),
+                            options=task2_options,
+                            processing_node=webodm_cfg.get("node_id"),
+                        )
+                        t2_success, t2_runtime, t2_info = processor.wait_for_completion(
+                            project_id, current_task_id, live=False)
+
+                elif prev_task2.get("id") and prev_project_id:
+                    current_task_id = str(prev_task2["id"])
+                    logger.info(
+                        f"Resuming: Task 2 exists in checkpoint but incomplete "
+                        f"(id={current_task_id}) — checking WebODM status"
+                    )
+                    t2_success, t2_runtime, t2_info = processor.wait_for_completion(
+                        project_id, current_task_id, live=False)
+
+                else:
+                    current_task_id = processor.create_task_with_images(
+                        project_id=project_id,
+                        name=task2_name,
+                        image_folder=str(upload_folder),
+                        options=task2_options,
+                        processing_node=webodm_cfg.get("node_id"),
+                    )
+                    t2_success, t2_runtime, t2_info = processor.wait_for_completion(
+                        project_id, current_task_id, live=False)
+
+            result["task2"] = {
+                "id": current_task_id,
+                "name": task2_name,
+                "success": t2_success,
+                "runtime_seconds": t2_runtime,
+            }
             result["boundary_used"] = True
+            self._save_webodm_checkpoint({
+                "project_id": project_id,
+                "project_name": project_name,
+                "task1": result["task1"],
+                "task2": result["task2"],
+                "downloads": result["downloads"],
+            })
 
             # ---------------- Task 2 bounded orthomosaic ----------------
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
@@ -629,12 +893,10 @@ class RGBPipeline:
             if exports_cfg.get("enabled", False):
                 # -------- DEM (config-driven, non-interactive) --------
                 dem_cfg = (exports_cfg.get("dem") or {})
-                # dem_do_download = bool(dem_cfg.get("enabled", False)) and bool(dem_cfg.get("download", True))
-                # MVP: disable DSM/DTM downloads until web/app supports DEM outputs
+
                 dem_do_download = False
 
                 if dem_do_download:
-                    # per your doc: EPSG:3857
                     epsg = int(dem_cfg.get("reproject_epsg", 3857))
                     dtm_dir = dir_from_key(dem_cfg["dtm_dir_key"])
                     dsm_dir = dir_from_key(dem_cfg["dsm_dir_key"])
@@ -738,6 +1000,7 @@ class RGBPipeline:
                         logger.warning(
                             "All-assets zip was not downloaded (endpoint missing or failed).")
 
+            self._clear_webodm_checkpoint()
             return result
 
         finally:
@@ -1052,17 +1315,14 @@ class RGBPipeline:
                 webodm_url=self.config.get("webodm", {}).get("url", ""),
             )
 
-            # ── yes ────────────────────────────────────────────────
             if raw in ("yes", "y"):
                 logger.info("Quality gate PASSED by user.")
                 return {"passed": True, "restarts": restarts, "project_id": project_id}
 
-            # ── fail ───────────────────────────────────────────────
             if raw in ("fail", "f"):
                 logger.warning("Quality gate FAILED by user.")
                 return {"passed": False, "restarts": restarts, "project_id": project_id}
 
-            # ── restart (default task) ─────────────────────────────
             if raw == "restart":
                 res = restart_and_wait(
                     default_task_id, default_task_name, "load_dataset")
@@ -1070,7 +1330,6 @@ class RGBPipeline:
                     return res
                 continue
 
-            # ── restart t1|t2 [stage] ──────────────────────────────
             if raw.startswith("restart "):
                 parts = raw.split()
 
@@ -1107,7 +1366,6 @@ class RGBPipeline:
                     return res
                 continue
 
-            # ── unrecognised ───────────────────────────────────────
             logger.warning(
                 "Unrecognised input. Use: yes | fail | restart | restart t1|t2 [stage]"
             )
@@ -1180,6 +1438,7 @@ class RGBPipeline:
                 output_key="webodm",
                 state=self.state,
                 force=_force("webodm"),
+                stale_running_policy="rerun",   # preserve partial state on resume
             )
             self._hydrate_from_state()
 
@@ -1251,7 +1510,6 @@ class RGBPipeline:
                     )
                 return self.state
 
-            # any other RuntimeError → treat as failure, fall through
             raise
 
         # ── Failure ───────────────────────────────────────────────

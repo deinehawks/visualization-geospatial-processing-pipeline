@@ -24,15 +24,11 @@ class WebODMProcessor:
         self.headers: Dict[str, str] = {}
         self.processing_log: list[dict] = []
 
-        # use one session for all requests
         self.session = requests.Session()
 
         self.authenticate()
 
-    # -------------------------
     # Auth / HTTP
-    # -------------------------
-
     def authenticate(self) -> None:
         self.logger.info("Authenticating with WebODM")
 
@@ -50,10 +46,7 @@ class WebODMProcessor:
         self.headers = {"Authorization": f"JWT {self.token}"}
         self.logger.info("Authentication successful")
 
-    # -------------------------
     # Projects / Tasks
-    # -------------------------
-
     def create_project(self, name: str, description: str = "") -> int:
         self.logger.info(f"Creating project: {name}")
 
@@ -107,7 +100,6 @@ class WebODMProcessor:
                 continue
 
             except Exception as e:
-                # Non-transient error: bubble up immediately
                 raise
 
         raise RuntimeError(
@@ -121,10 +113,7 @@ class WebODMProcessor:
         )
         return resp.text if resp.status_code == 200 else ""
 
-    # -------------------------
     # Wait / Progress
-    # -------------------------
-
     @staticmethod
     def fmt_elapsed(seconds: float) -> str:
         s = int(seconds)
@@ -189,8 +178,6 @@ class WebODMProcessor:
         """
         Poll WebODM task until terminal status: completed / failed / canceled.
 
-        Resilient to transient network errors by retrying get_task() and allowing
-        some consecutive poll failures before aborting.
         """
         start = time.time()
         last_status: Optional[str] = None
@@ -224,7 +211,7 @@ class WebODMProcessor:
                     f"WebODM task timed out after {timeout_seconds}s (task_id={task_id})")
 
             try:
-                task_info = self.get_task(project_id, task_id)  # retry-safe
+                task_info = self.get_task(project_id, task_id)
                 consecutive_errors = 0
             except Exception as e:
                 consecutive_errors += 1
@@ -242,7 +229,7 @@ class WebODMProcessor:
 
                 if consecutive_errors >= max_consecutive_poll_errors:
                     _finalize_live()
-                    raise  # fail the stage only after repeated failures
+                    raise
 
                 time.sleep(poll_seconds)
                 continue
@@ -267,19 +254,41 @@ class WebODMProcessor:
                 if status_label == "completed":
                     return True, elapsed, task_info
 
-                if status_label == "canceled":
-                    raise RuntimeError("WEBODM_TASK_CANCELED")
-
-                # failed / unknown terminal
+                # For failed or canceled: surface the error output first
                 try:
                     out = self.get_task_output(project_id, task_id)
                     if out:
-                        self.logger.error(
-                            f"WebODM output tail:\n{out[-1000:]}")
+                        # Find and log the most relevant error lines
+                        lines = out.splitlines()
+                        error_lines = [
+                            l for l in lines
+                            if any(kw in l.lower() for kw in (
+                                "[error]", "uh oh", "empty point cloud",
+                                "cannot process", "reconstruction did not",
+                                "failed", "exception", "Whoops!",
+                            ))
+                        ]
+                        if error_lines:
+                            self.logger.error(
+                                f"WebODM task {status_label} — error summary:\n"
+                                + "\n".join(error_lines[-20:])
+                            )
+                        else:
+                            self.logger.error(
+                                f"WebODM task {status_label} — output tail:\n"
+                                + "\n".join(lines[-30:])
+                            )
                 except Exception:
                     pass
 
-                return False, elapsed, task_info
+                if status_label == "canceled":
+                    raise RuntimeError("WEBODM_TASK_CANCELED")
+
+                # failed / unknown terminal — raise so pipeline stops cleanly
+                raise RuntimeError(
+                    f"WEBODM_TASK_FAILED: task {task_id} ended with status "
+                    f"'{status_label}'. Check logs above for WebODM error details."
+                )
 
             time.sleep(poll_seconds)
 
@@ -306,9 +315,7 @@ class WebODMProcessor:
         if not folder.exists():
             raise FileNotFoundError(f"Image folder not found: {image_folder}")
 
-        # ------------------------------------------------------------
         # Collect images (JPG/JPEG only), dedupe by case-insensitive filename
-        # ------------------------------------------------------------
         if recursive:
             candidates = [p for p in folder.rglob(
                 "*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
@@ -342,9 +349,7 @@ class WebODMProcessor:
         self.logger.info(
             f"Found {len(image_files)} unique images | approximate size = {gb:.2f} GB")
 
-        # ------------------------------------------------------------
         # Build multipart fields + progress monitor
-        # ------------------------------------------------------------
         opened = []
         fields: list[tuple[str, object]] = []
 
@@ -358,7 +363,7 @@ class WebODMProcessor:
         # ---- live one-line terminal output helpers ----
         last_line_len = 0
 
-        # add processing node (WebODM expects "processing_node")
+        # add processing node
         if processing_node is not None:
             fields.append(("processing_node", str(int(processing_node))))
 
@@ -381,9 +386,7 @@ class WebODMProcessor:
             except Exception:
                 pass
 
-        # ------------------------------------------------------------
         # Cancel detection (best-effort)
-        # ------------------------------------------------------------
         cancel_event = threading.Event()
         stop_poller = threading.Event()
         found_task_id: list[Optional[str]] = [None]  # mutable holder
@@ -442,9 +445,7 @@ class WebODMProcessor:
 
         poller_thread = threading.Thread(target=_poll_cancel, daemon=True)
 
-        # ------------------------------------------------------------
         # Upload with progress + cancel abort
-        # ------------------------------------------------------------
         try:
             for img in image_files:
                 f = open(img, "rb")
@@ -542,10 +543,7 @@ class WebODMProcessor:
                 except Exception:
                     pass
 
-    # -------------------------
     # Documentation helpers (kept)
-    # -------------------------
-
     def _reset_session(self, *, reauth: bool = False) -> None:
         try:
             self.session.close()
@@ -899,3 +897,80 @@ class WebODMProcessor:
             self.logger.exception(
                 f"Failed downloading all-assets zip -> {out_path}")
             return False
+
+    def find_task_by_name(self, project_id: int, task_name: str) -> Optional[str]:
+        """
+        Search for a task in the given project by name.
+        Returns the task UUID string if found, or None.
+        """
+        try:
+            page = 1
+            while True:
+                resp = self.session.get(
+                    f"{self.base_url}/api/projects/{project_id}/tasks/",
+                    headers=self.headers,
+                    params={"page": page, "page_size": 100},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+
+                if isinstance(payload, list):
+                    task_list = payload
+                    has_more = False
+                elif isinstance(payload, dict):
+                    task_list = payload.get("results") or []
+                    has_more = bool(payload.get("next"))
+                else:
+                    break
+
+                for task in task_list:
+                    if task.get("name") == task_name:
+                        task_id = str(task["id"])
+                        self.logger.debug(
+                            f"find_task_by_name: found '{task_name}' "
+                            f"id={task_id} status={task.get('status')}"
+                        )
+                        return task_id
+
+                if not has_more:
+                    break
+                page += 1
+
+            self.logger.debug(
+                f"find_task_by_name: no task named '{task_name}' "
+                f"in project {project_id}"
+            )
+            return None
+
+        except Exception as e:
+            self.logger.warning(
+                f"find_task_by_name: failed to query tasks for "
+                f"project {project_id}: {e}"
+            )
+            return None
+
+    def get_task_status(self, project_id: int, task_id: str) -> Optional[str]:
+        """
+        Returns the current status string of a task, or None on failure.
+        Reuses get_task() which has retry + re-auth logic built in.
+        """
+        try:
+            task_info = self.get_task(project_id, task_id)
+            status_label, _ = self._normalize_status(task_info.get("status"))
+            return status_label
+        except Exception as e:
+            self.logger.warning(
+                f"get_task_status failed for task {task_id}: {e}")
+            return None
+
+    def delete_task(self, project_id: int, task_id: str) -> None:
+        """
+        Delete a task from WebODM. Raises on failure.
+        """
+        resp = self.session.delete(
+            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/",
+            timeout=30,
+        )
+        resp.raise_for_status()
+        self.logger.info(f"Deleted task {task_id} from project {project_id}")
