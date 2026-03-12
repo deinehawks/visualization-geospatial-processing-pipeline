@@ -359,10 +359,7 @@ def log_output_loaded(logger: logging.Logger, output_key: str) -> None:
         f"{GREY} ↳ Loaded saved output → state['{output_key}']{RESET}")
 
 
-# ================================
 # Quality Gate CLI helper
-# ================================
-
 _QG_WIDTH = 54
 
 
@@ -398,14 +395,14 @@ def quality_gate_prompt(
         f"  Dashboard  : {GREY}{dashboard}{RESET}",
         f"{MAGENTA}{_qg_line()}{RESET}",
         f"  {BOLD}Commands{RESET}",
-        f"  {GREEN}yes{RESET}                    → Approve and continue",
-        f"  {RED}fail{RESET}                   → Mark pipeline as failed",
-        f"  {YELLOW}restart{RESET}                → Restart QA task (load_dataset)",
+        f"  {YELLOW}restart{RESET}                → Restart QA task (dataset)",
         f"  {YELLOW}restart t1|t2{RESET}          → Restart specific task",
         f"  {YELLOW}restart t1|t2 <stage>{RESET}  → Restart from a stage",
         f"{MAGENTA}{_qg_line()}{RESET}",
-        f"  {GREY}Stages: load_dataset · structure_from_motion{RESET}",
-        f"  {GREY}        multi_view_stereo · texturing{RESET}",
+        f"  {GREY}Stages: dataset · opensfm (sfm) · openmvs (mvs){RESET}",
+        f"  {GREY}        odm_filterpoints · odm_meshing{RESET}",
+        f"  {GREY}        mvs_texturing (texturing) · odm_georeferencing{RESET}",
+        f"  {GREY}        odm_dem · odm_orthophoto{RESET}",
         f"{MAGENTA}{_qg_line('═')}{RESET}",
     ]
 

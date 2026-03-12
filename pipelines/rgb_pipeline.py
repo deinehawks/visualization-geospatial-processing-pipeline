@@ -1228,10 +1228,26 @@ class RGBPipeline:
             )
 
         allowed_stages = {
-            "load_dataset",
-            "structure_from_motion",
-            "multi_view_stereo",
-            "texturing",
+            # alias          : webodm internal name
+            "dataset": "dataset",
+            "load_dataset": "dataset",
+            "sfm": "opensfm",
+            "opensfm": "opensfm",
+            "structure_from_motion": "opensfm",
+            "openmvs": "openmvs",
+            "multi_view_stereo": "openmvs",
+            "filterpoints": "odm_filterpoints",
+            "odm_filterpoints": "odm_filterpoints",
+            "meshing": "odm_meshing",
+            "odm_meshing": "odm_meshing",
+            "texturing": "mvs_texturing",
+            "mvs_texturing": "mvs_texturing",
+            "georeferencing": "odm_georeferencing",
+            "odm_georeferencing": "odm_georeferencing",
+            "dem": "odm_dem",
+            "odm_dem": "odm_dem",
+            "orthophoto": "odm_orthophoto",
+            "odm_orthophoto": "odm_orthophoto",
         }
 
         def _pick_default_task() -> tuple[str, str]:
@@ -1325,7 +1341,7 @@ class RGBPipeline:
 
             if raw == "restart":
                 res = restart_and_wait(
-                    default_task_id, default_task_name, "load_dataset")
+                    default_task_id, default_task_name, "dataset")
                 if res.get("passed") is False:
                     return res
                 continue
@@ -1348,7 +1364,7 @@ class RGBPipeline:
                 if stage not in allowed_stages:
                     logger.warning(
                         f"Invalid stage '{stage}'. "
-                        f"Use one of: {', '.join(sorted(allowed_stages))}"
+                        f"Valid stages: {', '.join(sorted(set(allowed_stages.values())))}"
                     )
                     continue
 
@@ -1357,11 +1373,14 @@ class RGBPipeline:
                     logger.warning(f"{target} does not exist for this run.")
                     continue
 
+                webodm_stage = allowed_stages[stage]
+
                 res = restart_and_wait(
                     str(chosen["id"]),
                     str(chosen.get("name") or target),
-                    stage,
+                    webodm_stage,
                 )
+
                 if res.get("passed") is False:
                     return res
                 continue
@@ -1370,10 +1389,7 @@ class RGBPipeline:
                 "Unrecognised input. Use: yes | fail | restart | restart t1|t2 [stage]"
             )
 
-    # ============================================================
     # RUN
-    # ============================================================
-
     def run(
         self,
         *,
