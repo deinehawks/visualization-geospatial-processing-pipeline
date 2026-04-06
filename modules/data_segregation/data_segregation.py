@@ -34,11 +34,7 @@ from shared.logging import (
     log_warn,
 )
 
-
-# ============================================================
 # SURVEY ID GENERATOR
-# ============================================================
-
 def generate_next_survey_id(surveys_root: Path, year: int, logger: logging.Logger) -> str:
     year_dir = surveys_root / str(year)
     year_dir.mkdir(parents=True, exist_ok=True)
@@ -59,10 +55,7 @@ def generate_next_survey_id(surveys_root: Path, year: int, logger: logging.Logge
     return survey_id
 
 
-# ============================================================
 # MAIN RUN FUNCTION
-# ============================================================
-
 def run(
     source_dir: Path,
     surveys_root: Path,
