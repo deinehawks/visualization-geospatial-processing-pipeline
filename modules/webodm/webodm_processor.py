@@ -173,7 +173,7 @@ class WebODMProcessor:
         poll_seconds: int = 10,
         timeout_seconds: Optional[int] = None,
         live: bool = False,
-        max_consecutive_poll_errors: int = 30,  # NEW
+        max_consecutive_poll_errors: int = 30,  
     ) -> Tuple[bool, float, Dict[str, Any]]:
         """
         Poll WebODM task until terminal status: completed / failed / canceled.

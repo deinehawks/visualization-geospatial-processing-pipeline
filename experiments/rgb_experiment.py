@@ -168,11 +168,9 @@ def main():
 
     config = load_pipeline_config()
 
-    # Use .env paths
     field_data_root = Path(config["paths"]["field_data_root"])
     surveys_root = Path(config["paths"]["surveys_root"])
 
-    # Use .env node id
     node_id = int(config["webodm"].get("node_id") or 0)
 
     source_dir = field_data_root / args.survey
