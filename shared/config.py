@@ -178,12 +178,16 @@ def load_pipeline_config() -> dict:
                 "copyright": read_str_env("QGIS_TILES_COPYRIGHT", "ASIMOV-HAWKS"),
             },
         },
+        "experiment": {
+            "enabled": read_bool_env("EXPERIMENT_ENABLED", False),
+            "profile": read_str_env("EXPERIMENT_PROFILE", ""),
+            "use_year_subdir": read_bool_env("EXPERIMENT_USE_YEAR_SUBDIR", True),
+            "crossrun_enabled": read_bool_env("EXPERIMENT_CROSSRUN_ENABLED", True),
+        },
     }
 
-    # ============================================================
-    # VALIDATION
-    # ============================================================
 
+    # VALIDATION
     def validate_existing_path(path_value: Path | None, label: str) -> None:
         if path_value is None:
             raise ValueError(f"{label} is required")
