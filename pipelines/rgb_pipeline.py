@@ -36,6 +36,12 @@ class RGBPipeline:
         surveys_root: Path,
         year: int,
         run_id: Optional[str] = None,
+        
+        survey_id_override: Optional[str] = None,
+        task_name_overrides: Optional[Dict[str, str]] = None,
+        export_name_overrides: Optional[Dict[str, str]] = None,
+        crossrun_enabled_override: Optional[bool] = None,
+        use_year_subdir_override: Optional[bool] = None,
     ):
         self.base_dir = Path(base_dir)
         self.config = config
@@ -46,6 +52,12 @@ class RGBPipeline:
         self.survey_id: Optional[str] = None
         self.logs_dir = self.base_dir / "data" / "logs"
         self.logs_dir.mkdir(parents=True, exist_ok=True)
+
+        self.survey_id_override = survey_id_override
+        self.task_name_overrides = task_name_overrides or {}
+        self.export_name_overrides = export_name_overrides or {}
+        self.crossrun_enabled_override = crossrun_enabled_override
+        self.use_year_subdir_override = use_year_subdir_override
 
         self.loggers: Dict[str, logging.Logger] = {
             "pipeline": get_logger(
@@ -312,6 +324,12 @@ class RGBPipeline:
             surveys_root=self.surveys_root,
             year=self.year,
             logger=logger,
+            survey_id_override=self.survey_id_override,
+            use_year_subdir=(
+                self.use_year_subdir_override
+                if self.use_year_subdir_override is not None
+                else bool(self.config.get("experiment", {}).get("use_year_subdir", True))
+            ),
         )
 
         self.survey_id = summary["survey_id"]
@@ -353,13 +371,42 @@ class RGBPipeline:
         filter_cfg = self.config.get("cross_run_filter", {})
         max_gap = int(filter_cfg.get("max_gap", 10))
         window = int(filter_cfg.get("window", 3))
+        delete_raw_after = bool(filter_cfg.get("delete_raw_after_success", False))
 
-        delete_raw_after = bool(filter_cfg.get(
-            "delete_raw_after_success", False))
+        enabled = self.crossrun_enabled_override
+        if enabled is None:
+            enabled = bool(filter_cfg.get("enabled", True))
 
         logger.info(f"Input (raw): {input_dir}")
         logger.info(f"Output (kept/path): {output_dir}")
         logger.info(f"Output (excluded/cross-runs): {excluded_dir}")
+
+        if not enabled:
+            logger.info("Cross-run filter disabled. Copying RAW -> PATH without exclusions.")
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            excluded_dir.mkdir(parents=True, exist_ok=True)
+
+            images = self._iter_jpeg_files(input_dir)
+            for img in images:
+                shutil.copy2(img, output_dir / img.name)
+
+            result = {
+                "filter_enabled": False,
+                "total_images": len(images),
+                "total_kept": len(images),
+                "total_excluded": 0,
+                "cross_runs_detected": 0,
+                "too_close_exclusions": 0,
+                "cluster_exclusions": 0,
+                "crossrun_flag": "c",                 # keep default semantics
+                "experiment_crossrun_label": "NF",   # experiment naming only
+                "raw_deleted": False,
+            }
+
+            self.state["crossrun_flag"] = "c"
+            self.state["experiment_crossrun_label"] = "NF"
+            return result
 
         result = run_filter(
             input_dir=input_dir,
@@ -370,9 +417,15 @@ class RGBPipeline:
         )
 
         excluded = int(result.get("total_excluded") or 0)
+
+        # Default pipeline semantics
         crossrun_flag = "xc" if excluded > 0 else "c"
         self.state["crossrun_flag"] = crossrun_flag
         result["crossrun_flag"] = crossrun_flag
+
+        # Experiment naming label
+        self.state["experiment_crossrun_label"] = "F"
+        result["experiment_crossrun_label"] = "F"
 
         if delete_raw_after:
             try:
@@ -382,18 +435,25 @@ class RGBPipeline:
 
                 if total_images <= 0:
                     raise RuntimeError(
-                        "Refusing to delete raw: total_images is 0 (unexpected).")
+                        "Refusing to delete raw: total_images is 0 (unexpected)."
+                    )
                 if kept + excl != total_images:
                     raise RuntimeError(
-                        f"Refusing to delete raw: kept+excluded != total ({kept}+{excl}!={total_images})")
+                        f"Refusing to delete raw: kept+excluded != total ({kept}+{excl}!={total_images})"
+                    )
                 if not output_dir.exists() or not excluded_dir.exists():
                     raise RuntimeError(
-                        "Refusing to delete raw: output directories missing.")
+                        "Refusing to delete raw: output directories missing."
+                    )
 
-                kept_fs = len([p for p in output_dir.iterdir(
-                ) if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
-                excl_fs = len([p for p in excluded_dir.iterdir(
-                ) if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")])
+                kept_fs = len([
+                    p for p in output_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")
+                ])
+                excl_fs = len([
+                    p for p in excluded_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")
+                ])
 
                 if kept_fs + excl_fs != total_images:
                     raise RuntimeError(
@@ -408,11 +468,9 @@ class RGBPipeline:
 
                 if input_dir.name == "raw" and input_dir.exists():
                     shutil.rmtree(input_dir)
-                    logger.info(
-                        f"Raw folder deleted after filtering: {input_dir}")
+                    logger.info(f"Raw folder deleted after filtering: {input_dir}")
                 else:
-                    logger.warning(
-                        f"Refusing to delete unexpected folder: {input_dir}")
+                    logger.warning(f"Refusing to delete unexpected folder: {input_dir}")
 
                 result["raw_deleted"] = True
 
@@ -487,20 +545,31 @@ class RGBPipeline:
                 return Path(fallback)
             raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
 
-        crossrun_flag = self.state.get(
-            "crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
-
+        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
+        
         boundary_available = bool(self.state.get("boundary_available"))
         boundary_geojson_path = self.state.get("boundary_geojson_path")
 
         boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
         boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
 
-        task1_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task1}"
-        task2_name = f"{survey_id}-RGB--{crossrun_flag}{boundary_flag_task2}"
-
+        # Keep default internal flags for standard pipeline logic
         task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
         task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
+
+        # Allow experiment/task naming overrides, otherwise fall back to default naming
+        task1_name = self.task_name_overrides.get("task1")
+        task2_name = self.task_name_overrides.get("task2")
+
+        if not task1_name:
+            task1_name = f"{survey_id}-RGB--{task1_flag}"
+
+        if not task2_name:
+            task2_name = f"{survey_id}-RGB--{task2_flag}"
+
+        # Optional export-name overrides for experiment outputs
+        task1_export_id = self.export_name_overrides.get("task1", task1_name)
+        task2_export_id = self.export_name_overrides.get("task2", task2_name)
 
         image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 

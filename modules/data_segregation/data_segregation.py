@@ -63,13 +63,22 @@ def run(
     logger: logging.Logger,
     *,
     force: bool = False,
+    survey_id_override: Optional[str] = None,
+    use_year_subdir: bool = True,
 ) -> Dict[str, Any]:
 
     log_section(logger, "DATA SEGREGATION")
 
-    log_step(logger, 1, "Generate survey ID")
-    survey_id = generate_next_survey_id(surveys_root, year, logger)
-    survey_path = surveys_root / str(year) / survey_id / "rgb"
+    log_step(logger, 1, "Resolve survey ID")
+
+    if survey_id_override:
+        survey_id = survey_id_override
+        log_ok(logger, f"Using provided survey ID: {survey_id}")
+    else:
+        survey_id = generate_next_survey_id(surveys_root, year, logger)
+
+    survey_base = surveys_root / str(year) if use_year_subdir else surveys_root
+    survey_path = survey_base / survey_id / "rgb"
 
     if survey_path.exists() and not force:
         raise FileExistsError(f"Survey path already exists: {survey_path}")
