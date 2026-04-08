@@ -780,10 +780,14 @@ class RGBPipeline:
                 out_dir = dir_from_key(ortho_cfg["out_dir_key"])
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
 
-                filename = ortho_cfg.get(
-                    "filename_template", "orthomosaic--{flag}.tif").format(flag=task1_flag)
-                candidates = ortho_cfg.get("asset_candidates") or [
-                    "orthophoto.tif"]
+                task1_export_override = self.export_name_overrides.get("task1")
+                if task1_export_override:
+                    filename = f"{task1_export_override}.tif"
+                else:
+                    filename = ortho_cfg.get(
+                        "filename_template",
+                        "orthomosaic--{flag}.tif"
+                    ).format(flag=task1_flag)
 
                 out_path = processor.export_orthomosaic(
                     project_id,
@@ -935,10 +939,14 @@ class RGBPipeline:
                 out_dir = dir_from_key(ortho_cfg["out_dir_key"])
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
 
-                filename = ortho_cfg.get(
-                    "filename_template", "orthomosaic--{flag}.tif").format(flag=task2_flag)
-                candidates = ortho_cfg.get("asset_candidates") or [
-                    "orthophoto.tif"]
+                task2_export_override = self.export_name_overrides.get("task2")
+                if task2_export_override:
+                    filename = f"{task2_export_override}.tif"
+                else:
+                    filename = ortho_cfg.get(
+                        "filename_template",
+                        "orthomosaic--{flag}.tif"
+                    ).format(flag=task2_flag)
 
                 out_path = processor.export_orthomosaic(
                     project_id,
@@ -1027,9 +1035,9 @@ class RGBPipeline:
                         project_id,
                         current_task_id,
                         out_dir=pc_dir,
-                        laz_archive_name=f"{survey_id}-RGB-{task2_flag}.laz",
-                        ply_name="model.ply",
-                        pcd_name="odm.pcd",
+                        laz_archive_name=f"{task2_export_id}.laz",
+                        ply_name=f"{task2_export_id}.ply",
+                        pcd_name=f"{task2_export_id}.pcd",
                         candidates=laz_candidates,
                         pdal_path=pdal_path,
                     )

@@ -2,6 +2,7 @@ from __future__ import annotations
 from pathlib import Path
 from shared.config import load_pipeline_config
 from pipelines.rgb_pipeline import RGBPipeline
+from shared.experiment_naming import resolve_rgb_exp01_names
 import argparse
 
 
@@ -168,6 +169,37 @@ def main():
 
     config = load_pipeline_config()
 
+    exp_cfg = config.get("experiment", {})
+    exp_enabled = bool(exp_cfg.get("enabled", False))
+
+    survey_id_override = None
+    task_name_overrides = {}
+    export_name_overrides = {}
+    crossrun_enabled_override = None
+    use_year_subdir_override = None
+
+    if exp_enabled and exp_cfg.get("profile") == "rgb_exp_01":
+        crossrun_enabled_override = bool(exp_cfg.get("crossrun_enabled", True))
+        use_year_subdir_override = bool(exp_cfg.get("use_year_subdir", True))
+
+        names = resolve_rgb_exp01_names(args.survey, crossrun_enabled_override)
+
+        survey_id_override = names.survey_id
+        task_name_overrides = {
+            "task1": names.task1_name,
+            "task2": names.task2_name,
+        }
+        export_name_overrides = {
+            "task1": names.task1_export_id,
+            "task2": names.task2_export_id,
+        }
+
+        print("Experiment profile: rgb_exp_01")
+        print(f"Resolved survey ID : {survey_id_override}")
+        print(f"Resolved Task 1    : {names.task1_name}")
+        print(f"Resolved Task 2    : {names.task2_name}")
+        print(f"Cross-run enabled  : {crossrun_enabled_override}")
+
     field_data_root = Path(config["paths"]["field_data_root"])
     surveys_root = Path(config["paths"]["surveys_root"])
 
@@ -184,12 +216,17 @@ def main():
     print("===============================\n")
 
     pipeline = RGBPipeline(
-        base_dir=Path("."),
-        config=config,
-        source_dir=source_dir,
-        surveys_root=surveys_root,
-        year=args.year,
-        run_id=args.run_id,
+    base_dir=Path("."),
+    config=config,
+    source_dir=source_dir,
+    surveys_root=surveys_root,
+    year=args.year,
+    run_id=args.run_id,
+    survey_id_override=survey_id_override,
+    task_name_overrides=task_name_overrides,
+    export_name_overrides=export_name_overrides,
+    crossrun_enabled_override=crossrun_enabled_override,
+    use_year_subdir_override=use_year_subdir_override,
     )
 
     result = pipeline.run(resume=args.resume)
