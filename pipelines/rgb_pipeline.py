@@ -535,7 +535,8 @@ class RGBPipeline:
         dirs = ds.get("dirs") or {}
         if not dirs:
             raise RuntimeError(
-                "Missing data_segregation.dirs in state. Ensure segregation returns dirs mapping.")
+                "Missing data_segregation.dirs in state. Ensure segregation returns dirs mapping."
+            )
 
         def dir_from_key(key: str, *, fallback: Optional[Path] = None) -> Path:
             p = dirs.get(key)
@@ -546,14 +547,13 @@ class RGBPipeline:
             raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
 
         crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
-        
+
         boundary_available = bool(self.state.get("boundary_available"))
         boundary_geojson_path = self.state.get("boundary_geojson_path")
 
         boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
         boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
 
-        # Keep default internal flags for standard pipeline logic
         task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
         task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
 
@@ -573,13 +573,13 @@ class RGBPipeline:
 
         image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 
-        # ---------------- Local Upload Cache ----------------
-        upload_cache_root_cfg = (self.config.get(
-            "paths") or {}).get("upload_cache_root")
+        # Local Upload Cache 
+        upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
         if not upload_cache_root_cfg:
             upload_cache_root_cfg = os.getenv("UPLOAD_CACHE_ROOT")
         local_root = Path(upload_cache_root_cfg) if upload_cache_root_cfg else Path(
-            os.getenv("TEMP", r"C:\temp"))
+            os.getenv("TEMP", r"C:\temp")
+        )
         cache_root = local_root / "automation-pipeline" / "upload_cache" / self.run_id
 
         cached_dir: Optional[Path] = None
@@ -597,7 +597,8 @@ class RGBPipeline:
                 upload_folder = cached_dir
             except Exception as e:
                 logger.warning(
-                    f"Upload cache unavailable, uploading directly from source. reason={e}")
+                    f"Upload cache unavailable, uploading directly from source. reason={e}"
+                )
                 cached_dir = None
                 upload_folder = image_folder
 
@@ -608,11 +609,10 @@ class RGBPipeline:
                 logger=logger,
             )
 
-            project_suffix = str(self.state.get(
-                "webodm_project_suffix") or "").strip()
+            project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
             project_name = f"{survey_id}{project_suffix}"
 
-            # ── Resume: reattach to existing project if available ─────────
+            # ── Resume: reattach to existing project if available 
             prev_web = self.state.get("webodm") or {}
             prev_project_id = prev_web.get("project_id")
             prev_task1 = prev_web.get("task1") or {}
@@ -620,8 +620,7 @@ class RGBPipeline:
 
             if prev_project_id:
                 project_id = prev_project_id
-                logger.info(
-                    f"Resuming: reattaching to existing project (ID={project_id})")
+                logger.info(f"Resuming: reattaching to existing project (ID={project_id})")
             else:
                 project_id = processor.create_project(
                     name=project_name,
@@ -636,12 +635,7 @@ class RGBPipeline:
                     "downloads": {"task1": {}, "task2": {}},
                 })
 
-            # ── Resume: skip Task 1 if it already succeeded ───────────────
-            t1_already_done = (
-                prev_task1.get("id")
-                and prev_task1.get("success") is True
-            )
-
+            # ── Resume: skip Task 1 if it already succeeded
             t1_already_done = (
                 prev_task1.get("id")
                 and prev_task1.get("success") is True
@@ -656,11 +650,10 @@ class RGBPipeline:
                     f"(id={current_task_id}) — skipping upload and processing"
                 )
             else:
-                # ── Try to find task1 in WebODM by name first ─────────────.
+                # ── Try to find task1 in WebODM by name first 
                 existing_task_id = None
                 if prev_project_id:
-                    existing_task_id = processor.find_task_by_name(
-                        project_id, task1_name)
+                    existing_task_id = processor.find_task_by_name(project_id, task1_name)
                     if existing_task_id:
                         logger.info(
                             f"Resuming: found existing Task 1 in WebODM by name "
@@ -668,10 +661,10 @@ class RGBPipeline:
                         )
 
                 if existing_task_id:
-                    task_status = processor.get_task_status(
-                        project_id, existing_task_id)
+                    task_status = processor.get_task_status(project_id, existing_task_id)
                     logger.info(
-                        f"Resuming: Task 1 current status in WebODM: {task_status!r}")
+                        f"Resuming: Task 1 current status in WebODM: {task_status!r}"
+                    )
 
                     if task_status == "completed":
                         current_task_id = existing_task_id
@@ -683,14 +676,14 @@ class RGBPipeline:
                         )
 
                     elif task_status in ("queued", "running"):
-
                         current_task_id = existing_task_id
                         logger.info(
                             f"Resuming: Task 1 still {task_status} in WebODM "
                             f"(id={current_task_id}) — waiting for completion"
                         )
                         t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False)
+                            project_id, current_task_id, live=False
+                        )
 
                     else:
                         logger.warning(
@@ -705,8 +698,7 @@ class RGBPipeline:
                                 f"{existing_task_id}: {del_err} — continuing anyway"
                             )
 
-                        task1_options = dict(
-                            webodm_cfg.get("task1_options", {}))
+                        task1_options = dict(webodm_cfg.get("task1_options", {}))
                         current_task_id = processor.create_task_with_images(
                             project_id=project_id,
                             name=task1_name,
@@ -715,7 +707,8 @@ class RGBPipeline:
                             processing_node=webodm_cfg.get("node_id"),
                         )
                         t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False)
+                            project_id, current_task_id, live=False
+                        )
 
                 elif prev_task1.get("id") and prev_project_id:
                     current_task_id = str(prev_task1["id"])
@@ -724,7 +717,8 @@ class RGBPipeline:
                         f"(id={current_task_id}) — checking WebODM status"
                     )
                     t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False)
+                        project_id, current_task_id, live=False
+                    )
 
                 else:
                     task1_options = dict(webodm_cfg.get("task1_options", {}))
@@ -736,7 +730,8 @@ class RGBPipeline:
                         processing_node=webodm_cfg.get("node_id"),
                     )
                     t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False)
+                        project_id, current_task_id, live=False
+                    )
 
                 self._save_webodm_checkpoint({
                     "project_id": project_id,
@@ -771,14 +766,14 @@ class RGBPipeline:
             }
 
             if t1_already_done and prev_web.get("downloads", {}).get("task1"):
-                logger.info(
-                    "Resuming: reusing Task 1 downloads from previous run")
+                logger.info("Resuming: reusing Task 1 downloads from previous run")
 
-            # ---------------- Downloads after TASK 1 ----------------
+            # Downloads after TASK 1 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
                 out_dir = dir_from_key(ortho_cfg["out_dir_key"])
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
                 task1_export_override = self.export_name_overrides.get("task1")
                 if task1_export_override:
@@ -796,18 +791,16 @@ class RGBPipeline:
                     filename=filename,
                     epsg=epsg,
                     candidates=candidates,
-                    gdalwarp_path=(qgis_tools_cfg.get(
-                        "gdalwarp_path") or "gdalwarp"),
+                    gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                 )
 
                 if out_path:
                     result["downloads"]["task1"]["orthomosaic"] = str(out_path)
                     result["downloads"]["task1"]["epsg"] = epsg
                 else:
-                    logger.warning(
-                        "Could not download orthomosaic for Task 1.")
+                    logger.warning("Could not download orthomosaic for Task 1.")
 
-            # ---------------- TASK 2 (only if boundary exists) ----------------
+            # TASK 2 (only if boundary exists) 
             if not boundary_available:
                 msg = "Boundary not available. Skipping Task 2 (bounded models)."
                 logger.warning(msg)
@@ -820,8 +813,7 @@ class RGBPipeline:
                 result["boundary_reason"] = msg
                 return result
 
-            boundary_geojson = Path(
-                boundary_geojson_path).read_text(encoding="utf-8")
+            boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
             task2_options = dict(webodm_cfg.get("task2_options", {}))
             task2_options["boundary"] = boundary_geojson
 
@@ -842,8 +834,7 @@ class RGBPipeline:
             else:
                 existing_task2_id = None
                 if prev_project_id:
-                    existing_task2_id = processor.find_task_by_name(
-                        project_id, task2_name)
+                    existing_task2_id = processor.find_task_by_name(project_id, task2_name)
                     if existing_task2_id:
                         logger.info(
                             f"Resuming: found existing Task 2 in WebODM by name "
@@ -851,10 +842,10 @@ class RGBPipeline:
                         )
 
                 if existing_task2_id:
-                    task2_status = processor.get_task_status(
-                        project_id, existing_task2_id)
+                    task2_status = processor.get_task_status(project_id, existing_task2_id)
                     logger.info(
-                        f"Resuming: Task 2 current status in WebODM: {task2_status!r}")
+                        f"Resuming: Task 2 current status in WebODM: {task2_status!r}"
+                    )
 
                     if task2_status == "completed":
                         current_task_id = existing_task2_id
@@ -872,7 +863,8 @@ class RGBPipeline:
                             f"(id={current_task_id}) — waiting for completion"
                         )
                         t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False)
+                            project_id, current_task_id, live=False
+                        )
 
                     else:
                         logger.warning(
@@ -880,8 +872,7 @@ class RGBPipeline:
                             f"(id={existing_task2_id}) — deleting and re-uploading"
                         )
                         try:
-                            processor.delete_task(
-                                project_id, existing_task2_id)
+                            processor.delete_task(project_id, existing_task2_id)
                         except Exception as del_err:
                             logger.warning(
                                 f"Could not delete failed Task 2 "
@@ -896,7 +887,8 @@ class RGBPipeline:
                             processing_node=webodm_cfg.get("node_id"),
                         )
                         t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False)
+                            project_id, current_task_id, live=False
+                        )
 
                 elif prev_task2.get("id") and prev_project_id:
                     current_task_id = str(prev_task2["id"])
@@ -905,7 +897,8 @@ class RGBPipeline:
                         f"(id={current_task_id}) — checking WebODM status"
                     )
                     t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False)
+                        project_id, current_task_id, live=False
+                    )
 
                 else:
                     current_task_id = processor.create_task_with_images(
@@ -916,7 +909,8 @@ class RGBPipeline:
                         processing_node=webodm_cfg.get("node_id"),
                     )
                     t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False)
+                        project_id, current_task_id, live=False
+                    )
 
             result["task2"] = {
                 "id": current_task_id,
@@ -933,11 +927,12 @@ class RGBPipeline:
                 "downloads": result["downloads"],
             })
 
-            # ---------------- Task 2 bounded orthomosaic ----------------
+            # Task 2 bounded orthomosaic 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
                 out_dir = dir_from_key(ortho_cfg["out_dir_key"])
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
                 task2_export_override = self.export_name_overrides.get("task2")
                 if task2_export_override:
@@ -955,20 +950,18 @@ class RGBPipeline:
                     filename=filename,
                     epsg=epsg,
                     candidates=candidates,
-                    gdalwarp_path=(qgis_tools_cfg.get(
-                        "gdalwarp_path") or "gdalwarp"),
+                    gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                 )
 
                 if out_path:
                     result["downloads"]["task2"]["orthomosaic"] = str(out_path)
                     result["downloads"]["task2"]["epsg"] = epsg
                 else:
-                    logger.warning(
-                        "Could not download bounded orthomosaic for Task 2.")
+                    logger.warning("Could not download bounded orthomosaic for Task 2.")
 
-            # ---------------- Downloads after TASK 2 ----------------
+            # Downloads after TASK 2 
             if exports_cfg.get("enabled", False):
-                # -------- DEM (config-driven, non-interactive) --------
+                # DEM (config-driven, non-interactive)
                 dem_cfg = (exports_cfg.get("dem") or {})
 
                 dem_do_download = False
@@ -981,34 +974,34 @@ class RGBPipeline:
                     models = list(dem_cfg.get("models") or ["dtm", "dsm"])
                     colors = list(dem_cfg.get("colors") or [])
                     shadings = list(dem_cfg.get("shadings") or [])
-                    tmpl = dem_cfg.get("filename_template",
-                                       "{color}-{shading}.tif")
+                    tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
 
                     if not colors or not shadings:
                         logger.warning(
-                            "DEM download enabled but colors/shadings not configured. Skipping DEM downloads.")
+                            "DEM download enabled but colors/shadings not configured. Skipping DEM downloads."
+                        )
                     else:
                         for model in models:
                             if model not in ("dtm", "dsm"):
                                 logger.warning(
-                                    f"Unknown DEM model '{model}' (expected dtm/dsm). Skipping.")
+                                    f"Unknown DEM model '{model}' (expected dtm/dsm). Skipping."
+                                )
                                 continue
 
                             out_base = dtm_dir if model == "dtm" else dsm_dir
 
                             for color in colors:
                                 for shading in shadings:
-                                    fname = tmpl.format(
-                                        color=color, shading=shading)
+                                    fname = tmpl.format(color=color, shading=shading)
                                     tmp_raw = out_base / f"__tmp_raw_{fname}"
                                     final_out = out_base / fname
 
                                     asset_type = f"{model}/{color}/{shading}"
                                     ok = processor.download_asset_safe(
-                                        project_id, current_task_id, asset_type, tmp_raw)
+                                        project_id, current_task_id, asset_type, tmp_raw
+                                    )
                                     if ok:
-                                        processor.run_gdalwarp(
-                                            tmp_raw, final_out, epsg)
+                                        processor.run_gdalwarp(tmp_raw, final_out, epsg)
                                         try:
                                             tmp_raw.unlink(missing_ok=True)
                                         except Exception:
@@ -1018,17 +1011,17 @@ class RGBPipeline:
                         result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
                         result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
 
-                # ------------- Point Cloud (LAZ -> PLY/PCD) --------------
+                # Point Cloud (LAZ -> PLY/PCD) 
                 pc_cfg = (exports_cfg.get("pointcloud") or {})
                 pc_enabled = bool(pc_cfg.get("enabled", True))
 
                 if pc_enabled:
                     pc_dir_key = str(pc_cfg.get("out_dir_key") or "3d")
-                    pc_dir = dir_from_key(
-                        pc_dir_key, fallback=(rgb_path / "3d"))
+                    pc_dir = dir_from_key(pc_dir_key, fallback=(rgb_path / "3d"))
 
-                    laz_candidates = list(pc_cfg.get("asset_candidates") or [
-                                          "georeferenced_model.laz"])
+                    laz_candidates = list(
+                        pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
+                    )
                     pdal_path = qgis_tools_cfg.get("pdal_path") or "pdal"
 
                     pc_out = processor.export_pointcloud(
@@ -1042,40 +1035,45 @@ class RGBPipeline:
                         pdal_path=pdal_path,
                     )
 
-                    result["downloads"]["task2"]["pointcloud_laz"] = pc_out.get(
-                        "laz")
-                    result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get(
-                        "ply")
-                    result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get(
-                        "pcd")
-                    result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get(
-                        "asset_type")
+                    result["downloads"]["task2"]["pointcloud_laz"] = pc_out.get("laz")
+                    result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get("ply")
+                    result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get("pcd")
+                    result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get("asset_type")
 
                     if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
                         raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
 
                 else:
-                    logger.info(
-                        "Point cloud download skipped (pointcloud.enabled=false).")
+                    logger.info("Point cloud download skipped (pointcloud.enabled=false).")
                     result["downloads"]["task2"]["pointcloud_skipped"] = True
 
                 if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                     zcfg = exports_cfg["all_assets_zip"]
                     out_dir = dir_from_key(zcfg["out_dir_key"])
-                    fname = zcfg.get("filename_template", "{survey_id}-RGB-{flag}-all.zip").format(
-                        survey_id=survey_id,
-                        flag=task2_flag,
-                    )
+
+                    task2_zip_override = self.export_name_overrides.get("task2")
+                    if task2_zip_override:
+                        fname = f"{task2_zip_override}-all.zip"
+                    else:
+                        fname = zcfg.get(
+                            "filename_template",
+                            "{survey_id}-RGB-{flag}-all.zip"
+                        ).format(
+                            survey_id=survey_id,
+                            flag=task2_flag,
+                        )
+
                     zip_path = out_dir / fname
 
                     ok = processor.download_all_assets_safe(
-                        project_id, current_task_id, zip_path)
+                        project_id, current_task_id, zip_path
+                    )
                     if ok:
-                        result["downloads"]["task2"]["all_assets_zip"] = str(
-                            zip_path)
+                        result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
                     else:
                         logger.warning(
-                            "All-assets zip was not downloaded (endpoint missing or failed).")
+                            "All-assets zip was not downloaded (endpoint missing or failed)."
+                        )
 
             self._clear_webodm_checkpoint()
             return result
