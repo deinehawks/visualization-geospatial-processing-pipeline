@@ -162,6 +162,12 @@ def main():
         default=None,
         help="Run ID to resume (required when --resume is set)",
     )
+    parser.add_argument(
+        "--node-id",
+        type=int,
+        default=None,
+        help="Override WEBODM_NODE_ID for this run",
+    )
     args = parser.parse_args()
 
     if args.resume and not args.run_id:
@@ -169,6 +175,9 @@ def main():
 
     config = load_pipeline_config()
 
+    if args.node_id is not None:
+        config["webodm"]["node_id"] = args.node_id
+        
     exp_cfg = config.get("experiment", {})
     exp_enabled = bool(exp_cfg.get("enabled", False))
 
