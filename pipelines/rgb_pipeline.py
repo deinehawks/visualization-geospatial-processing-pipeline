@@ -1081,10 +1081,7 @@ class RGBPipeline:
 
                 if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                     zcfg = exports_cfg["all_assets_zip"]
-                    out_dir = dir_from_key(
-                        "task2_odm",
-                        fallback=dir_from_key(zcfg["out_dir_key"])
-                    )
+                    out_dir = task2_odm_dir
 
                     task2_zip_override = self.export_name_overrides.get("task2")
                     if task2_zip_override:
