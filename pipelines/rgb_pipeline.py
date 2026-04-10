@@ -797,10 +797,8 @@ class RGBPipeline:
             # Downloads after TASK 1 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
-                out_dir = dir_from_key(
-                    "task1_ortho",
-                    fallback=dir_from_key(ortho_cfg["out_dir_key"])
-                )
+
+                out_dir = task1_ortho_dir
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
                 candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
@@ -959,10 +957,8 @@ class RGBPipeline:
             # Task 2 bounded orthomosaic 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
-                out_dir = dir_from_key(
-                    "task2_ortho",
-                    fallback=dir_from_key(ortho_cfg["out_dir_key"])
-                )
+                
+                out_dir = task2_ortho_dir
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
                 candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
