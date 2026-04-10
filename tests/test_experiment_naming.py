@@ -10,6 +10,7 @@ for s in samples:
         names = resolve_rgb_exp01_names(s, enabled)
         print("INPUT :", s)
         print("FILTER:", enabled)
+        print("BASE  :", names.base_id)
         print("T1    :", names.task1_name)
         print("T2    :", names.task2_name)
         print("-" * 50)
