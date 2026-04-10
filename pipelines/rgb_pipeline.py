@@ -571,6 +571,32 @@ class RGBPipeline:
         task1_export_id = self.export_name_overrides.get("task1", task1_name)
         task2_export_id = self.export_name_overrides.get("task2", task2_name)
 
+        # Dynamic task-specific export folders
+        task1_root_dir = rgb_path / task1_export_id
+        task2_root_dir = rgb_path / task2_export_id
+
+        task1_ortho_dir = task1_root_dir / "ortho"
+        task1_odm_dir = task1_root_dir / "odm"
+
+        task2_ortho_dir = task2_root_dir / "ortho"
+        task2_3d_dir = task2_root_dir / "3d"
+        task2_odm_dir = task2_root_dir / "odm"
+        task2_dem_dtm_dir = task2_root_dir / "dem" / "odm" / "dtm"
+        task2_dem_dsm_dir = task2_root_dir / "dem" / "odm" / "dsm"
+
+        for p in [
+            task1_root_dir,
+            task1_ortho_dir,
+            task1_odm_dir,
+            task2_root_dir,
+            task2_ortho_dir,
+            task2_3d_dir,
+            task2_odm_dir,
+            task2_dem_dtm_dir,
+            task2_dem_dsm_dir,
+        ]:
+            p.mkdir(parents=True, exist_ok=True)
+
         image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 
         # Local Upload Cache 
@@ -771,7 +797,10 @@ class RGBPipeline:
             # Downloads after TASK 1 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
-                out_dir = dir_from_key(ortho_cfg["out_dir_key"])
+                out_dir = dir_from_key(
+                    "task1_ortho",
+                    fallback=dir_from_key(ortho_cfg["out_dir_key"])
+                )
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
                 candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
@@ -930,7 +959,10 @@ class RGBPipeline:
             # Task 2 bounded orthomosaic 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
-                out_dir = dir_from_key(ortho_cfg["out_dir_key"])
+                out_dir = dir_from_key(
+                    "task2_ortho",
+                    fallback=dir_from_key(ortho_cfg["out_dir_key"])
+                )
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
                 candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
@@ -968,8 +1000,14 @@ class RGBPipeline:
 
                 if dem_do_download:
                     epsg = int(dem_cfg.get("reproject_epsg", 3857))
-                    dtm_dir = dir_from_key(dem_cfg["dtm_dir_key"])
-                    dsm_dir = dir_from_key(dem_cfg["dsm_dir_key"])
+                    dtm_dir = dir_from_key(
+                        "task2_dem_dtm",
+                        fallback=dir_from_key(dem_cfg["dtm_dir_key"])
+                    )
+                    dsm_dir = dir_from_key(
+                        "task2_dem_dsm",
+                        fallback=dir_from_key(dem_cfg["dsm_dir_key"])
+                    )
 
                     models = list(dem_cfg.get("models") or ["dtm", "dsm"])
                     colors = list(dem_cfg.get("colors") or [])
@@ -1016,9 +1054,10 @@ class RGBPipeline:
                 pc_enabled = bool(pc_cfg.get("enabled", True))
 
                 if pc_enabled:
-                    pc_dir_key = str(pc_cfg.get("out_dir_key") or "3d")
-                    pc_dir = dir_from_key(pc_dir_key, fallback=(rgb_path / "3d"))
-
+                    pc_dir = dir_from_key(
+                        "task2_3d",
+                        fallback=(rgb_path / "task2" / "3d")
+                    )
                     laz_candidates = list(
                         pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
                     )
@@ -1049,7 +1088,10 @@ class RGBPipeline:
 
                 if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                     zcfg = exports_cfg["all_assets_zip"]
-                    out_dir = dir_from_key(zcfg["out_dir_key"])
+                    out_dir = dir_from_key(
+                        "task2_odm",
+                        fallback=dir_from_key(zcfg["out_dir_key"])
+                    )
 
                     task2_zip_override = self.export_name_overrides.get("task2")
                     if task2_zip_override:
