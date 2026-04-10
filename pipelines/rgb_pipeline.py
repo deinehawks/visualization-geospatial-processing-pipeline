@@ -11,6 +11,7 @@ import uuid
 import logging
 import os
 import shutil
+from typing import Any
 from modules import QGISTools
 
 
@@ -206,12 +207,32 @@ class RGBPipeline:
 
     @staticmethod
     def _fmt_bytes(num: int) -> str:
-        step = 1024.0
+        size: float = float(num)
+        step: float = 1024.0
+
         for unit in ["B", "KB", "MB", "GB", "TB"]:
-            if num < step:
-                return f"{num:.1f} {unit}" if unit != "B" else f"{num} {unit}"
-            num /= step
-        return f"{num:.1f} PB"
+            if size < step:
+                return f"{size:.1f} {unit}" if unit != "B" else f"{int(size)} {unit}"
+            size /= step
+
+        return f"{size:.1f} PB"
+    
+    @staticmethod
+    def _safe_int(value: Any, default: int = 0) -> int:
+        if value is None:
+            return default
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            return int(value)
+        if isinstance(value, str):
+            value = value.strip()
+            if not value:
+                return default
+            return int(float(value))
+        return default
 
     def _stage_upload_cache(
         self,
@@ -353,6 +374,9 @@ class RGBPipeline:
 
         logger.info(f"KML renamed to: {new_kml_path.name}")
 
+        if self.survey_id is None:
+            raise RuntimeError("survey_id is not set")
+
         self.repo.attach_survey_id(self.run_id, self.survey_id)
         self.repo.upsert_survey_running(self.survey_id)
 
@@ -416,7 +440,7 @@ class RGBPipeline:
             cross_run_window=window,
         )
 
-        excluded = int(result.get("total_excluded") or 0)
+        excluded = self._safe_int(result.get("total_excluded"))
 
         # Default pipeline semantics
         crossrun_flag = "xc" if excluded > 0 else "c"
@@ -429,9 +453,9 @@ class RGBPipeline:
 
         if delete_raw_after:
             try:
-                total_images = int(result.get("total_images") or 0)
-                kept = int(result.get("total_kept") or 0)
-                excl = int(result.get("total_excluded") or 0)
+                total_images = self._safe_int(result.get("total_images"))
+                kept = self._safe_int(result.get("total_kept"))
+                excl = self._safe_int(result.get("total_excluded"))
 
                 if total_images <= 0:
                     raise RuntimeError(
