@@ -16,6 +16,3 @@ AH-026003 = BLC_A2S_2Ha_60m -- 16x9
 AH-026004 = STM_1Ha_A2S_60m_85f75s_4mps -- 16x9
 
 
-Find gdalwarp in disk C
-Get-ChildItem -Path C:\ -Filter pdal.exe -File -Recurse -ErrorAction 
-

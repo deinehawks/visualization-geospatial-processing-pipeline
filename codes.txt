@@ -3,6 +3,7 @@ Remove-Item .\data\pipeline.db -Force
 
 python -m tests.test_rgb_pipeline
 
-Experiment run code - python -m experiments.RGB-EXP-01 --survey "STM_1Ha_A2S_50m_85f75s_3mps" --year 2026
+Experiment run code = python -m experiments.RGB-EXP-01 --survey "STM_1Ha_A2S_50m_85f75s_3mps" --year 2026 -- node-id 3
+                      python -m experiments.RGB-EXP-01 --survey "STM_1Ha_A2S_90m_85f75s_6mps" --year 2026 --node-id 1
 
 

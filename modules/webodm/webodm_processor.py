@@ -445,7 +445,8 @@ class WebODMProcessor:
                     pass
 
         poller_thread = threading.Thread(target=_poll_cancel, daemon=True)
-
+        
+        resp = None
         # Upload with progress + cancel abort
         try:
             for img in image_files:
@@ -518,14 +519,17 @@ class WebODMProcessor:
 
             if "canceled in webodm ui" in str(e).lower() or "task was canceled" in str(e).lower():
                 self.logger.warning(
-                    "Detected WebODM UI cancellation. Stopping upload/pipeline stage.")
+                    "Detected WebODM UI cancellation. Stopping upload/pipeline stage."
+                )
                 raise RuntimeError("WEBODM_TASK_CANCELED") from e
 
-            try:
-                body = (resp.text or "")[:500]
-                self.logger.error(f"WebODM response snippet: {body}")
-            except Exception:
-                pass
+            if resp is not None:
+                try:
+                    body = (resp.text or "")[:500]
+                    if body:
+                        self.logger.error(f"WebODM response snippet: {body}")
+                except Exception:
+                    pass
 
             self.logger.exception("Failed to create task")
             raise

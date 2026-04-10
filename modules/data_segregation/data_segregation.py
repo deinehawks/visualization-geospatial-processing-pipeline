@@ -86,24 +86,38 @@ def run(
     log_step(logger, 2, "Create folder structure")
 
     dirs: Dict[str, Path] = {
-        "rgb_root":          survey_path,
-        "boundary":          survey_path / "boundary",
-        "raw":               survey_path / "images" / "raw",
-        "path":              survey_path / "images" / "path",
-        "cross_runs":        survey_path / "images" / "cross-runs",
-        "ortho":             survey_path / "ortho",
-        "odm":               survey_path / "odm",
-        "dem_odm":           survey_path / "dem" / "odm",
-        "dem_dtm":           survey_path / "dem" / "odm" / "dtm",
-        "dem_dsm":           survey_path / "dem" / "odm" / "dsm",
-        "3d":                survey_path / "3d",
-        "qgis_root":         survey_path / "qgis",
-        "qgis_clipped":      survey_path / "qgis" / "clipped",
+        "rgb_root":           survey_path,
+        "boundary":           survey_path / "boundary",
+        "raw":                survey_path / "images" / "raw",
+        "path":               survey_path / "images" / "path",
+        "cross_runs":         survey_path / "images" / "cross-runs",
+
+        # "ortho":              survey_path / "ortho",
+        # "odm":                survey_path / "odm",
+        # "dem_odm":            survey_path / "dem" / "odm",
+        # "dem_dtm":            survey_path / "dem" / "odm" / "dtm",
+        # "dem_dsm":            survey_path / "dem" / "odm" / "dsm",
+        # "3d":                 survey_path / "3d",
+
+        # "task1_root":         survey_path / "task1",
+        # "task1_ortho":        survey_path / "task1" / "ortho",
+        # "task1_odm":          survey_path / "task1" / "odm",
+
+        # "task2_root":         survey_path / "task2",
+        # "task2_ortho":        survey_path / "task2" / "ortho",
+        # "task2_odm":          survey_path / "task2" / "odm",
+        # "task2_3d":           survey_path / "task2" / "3d",
+        # "task2_dem_odm":      survey_path / "task2" / "dem" / "odm",
+        # "task2_dem_dtm":      survey_path / "task2" / "dem" / "odm" / "dtm",
+        # "task2_dem_dsm":      survey_path / "task2" / "dem" / "odm" / "dsm",
+
+        "qgis_root":          survey_path / "qgis",
+        "qgis_clipped":       survey_path / "qgis" / "clipped",
         "qgis_clipped_ortho": survey_path / "qgis" / "clipped" / "ortho",
-        "tiles_root":        survey_path / "tiles",
-        "tiles_ortho":       survey_path / "tiles" / "ortho",
-        "tiles_ortho_sharp": survey_path / "tiles" / "ortho" / "sharp-corners",
-        "tiles_ortho_round": survey_path / "tiles" / "ortho" / "round-corners",
+        "tiles_root":         survey_path / "tiles",
+        "tiles_ortho":        survey_path / "tiles" / "ortho",
+        "tiles_ortho_sharp":  survey_path / "tiles" / "ortho" / "sharp-corners",
+        "tiles_ortho_round":  survey_path / "tiles" / "ortho" / "round-corners",
     }
 
     extra_folders = [
