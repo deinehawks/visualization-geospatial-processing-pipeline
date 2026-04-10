@@ -996,14 +996,8 @@ class RGBPipeline:
 
                 if dem_do_download:
                     epsg = int(dem_cfg.get("reproject_epsg", 3857))
-                    dtm_dir = dir_from_key(
-                        "task2_dem_dtm",
-                        fallback=dir_from_key(dem_cfg["dtm_dir_key"])
-                    )
-                    dsm_dir = dir_from_key(
-                        "task2_dem_dsm",
-                        fallback=dir_from_key(dem_cfg["dsm_dir_key"])
-                    )
+                    dtm_dir = task2_dem_dtm_dir
+                    dsm_dir = task2_dem_dsm_dir
 
                     models = list(dem_cfg.get("models") or ["dtm", "dsm"])
                     colors = list(dem_cfg.get("colors") or [])
