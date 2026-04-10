@@ -957,7 +957,7 @@ class RGBPipeline:
             # Task 2 bounded orthomosaic 
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
-                
+
                 out_dir = task2_ortho_dir
                 epsg = int(ortho_cfg.get("reproject_epsg", 4326))
                 candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
@@ -1050,10 +1050,7 @@ class RGBPipeline:
                 pc_enabled = bool(pc_cfg.get("enabled", True))
 
                 if pc_enabled:
-                    pc_dir = dir_from_key(
-                        "task2_3d",
-                        fallback=(rgb_path / "task2" / "3d")
-                    )
+                    pc_dir = task2_3d_dir
                     laz_candidates = list(
                         pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
                     )
