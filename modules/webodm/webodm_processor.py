@@ -11,6 +11,7 @@ import logging
 import requests
 import subprocess
 import shutil
+import tempfile
 
 
 class WebODMProcessor:
@@ -777,18 +778,54 @@ class WebODMProcessor:
 
     def run_pdal_translate(self, src: Path, dst: Path, *, pdal_path: str = "pdal") -> bool:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [str(pdal_path), "translate", str(src), str(dst)]
-        self.logger.info(f"PDAL translate -> {dst.name}")
+
+        pipeline = [
+            {
+                "type": "readers.las",
+                "filename": str(src),
+            },
+            {
+                "type": "writers.pcd",
+                "filename": str(dst),
+                "compression": "binary",
+                "order": "X,Y,Z,Red,Green,Blue",
+                "keep_unspecified": False,
+            },
+        ]
+
+        self.logger.info(f"PDAL -> {dst.name} | binary PCD | XYZRGB")
+
+        pipeline_path = None
         try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                suffix=".json",
+                delete=False,
+                encoding="utf-8",
+            ) as f:
+                json.dump(pipeline, f, indent=2)
+                pipeline_path = f.name
+
+            cmd = [str(pdal_path), "pipeline", pipeline_path]
             subprocess.run(cmd, check=True, capture_output=True, text=True)
             return True
+
         except FileNotFoundError:
             self.logger.warning("pdal not found. Skipping conversion.")
             return False
+
         except subprocess.CalledProcessError as e:
             self.logger.warning(
-                f"pdal translate failed for {dst.name}. stderr={e.stderr[:200] if e.stderr else ''}")
+                f"pdal pipeline failed for {dst.name}. stderr={e.stderr[:500] if e.stderr else ''}"
+            )
             return False
+
+        finally:
+            if pipeline_path:
+                try:
+                    Path(pipeline_path).unlink(missing_ok=True)
+                except Exception:
+                    pass
 
     def export_orthomosaic(
         self,
