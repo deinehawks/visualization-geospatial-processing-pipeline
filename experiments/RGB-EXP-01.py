@@ -184,7 +184,7 @@ def main():
 
         names = resolve_rgb_exp01_names(args.survey, crossrun_enabled_override)
 
-        survey_id_override = names.survey_id
+        survey_id_override = names.base_id
         task_name_overrides = {
             "task1": names.task1_name,
             "task2": names.task2_name,
@@ -195,7 +195,7 @@ def main():
         }
 
         print("Experiment profile: rgb_exp_01")
-        print(f"Resolved survey ID : {survey_id_override}")
+        print(f"Resolved survey ID : {names.base_id}")
         print(f"Resolved Task 1    : {names.task1_name}")
         print(f"Resolved Task 2    : {names.task2_name}")
         print(f"Cross-run enabled  : {crossrun_enabled_override}")
