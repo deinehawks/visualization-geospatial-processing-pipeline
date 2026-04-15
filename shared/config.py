@@ -183,6 +183,7 @@ def load_pipeline_config() -> dict:
             "profile": read_str_env("EXPERIMENT_PROFILE", ""),
             "use_year_subdir": read_bool_env("EXPERIMENT_USE_YEAR_SUBDIR", True),
             "crossrun_enabled": read_bool_env("EXPERIMENT_CROSSRUN_ENABLED", True),
+            "naming_mode": read_str_env("EXPERIMENT_NAMING_MODE", "altitude"),
         },
     }
 
