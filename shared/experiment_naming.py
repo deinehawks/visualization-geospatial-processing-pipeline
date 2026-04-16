@@ -30,7 +30,7 @@ def resolve_rgb_exp01_names(
         raise ValueError(
             f"Invalid flight test code: {flight_test_code!r}. "
             "Expected underscore-separated format like "
-            "'STM_1Ha_A2S_50m_85f75s_3mps' or 'BCO-005_5.4Ha_M3C_60m_85f75s_5mps'."
+            "'STM_1Ha_A2S_50m_85f75s_3mps' or 'BCO-005_5.4Ha_M3C_60m_85f75s_5mps_p45'."
         )
 
     filter_tag = "F" if crossrun_enabled else "NF"
@@ -38,6 +38,7 @@ def resolve_rgb_exp01_names(
 
     site_code = parts[0]
     aircraft = parts[2]
+    angle = parts[6]
 
     altitude = next(
         (p for p in parts if re.fullmatch(r"\d+m", p, flags=re.IGNORECASE)),
@@ -53,6 +54,9 @@ def resolve_rgb_exp01_names(
 
     elif naming_mode == "site":
         stem = f"RGB-{site_code}-{aircraft}-{filter_tag}"
+
+    elif naming_mode == "angle":
+        stem = f"RGB-{site_code}-{aircraft}-{filter_tag}-{angle}"
 
     else:
         raise ValueError(
