@@ -61,7 +61,7 @@ def resolve_rgb_exp01_names(
     else:
         raise ValueError(
             f"Unknown naming_mode={naming_mode!r}. "
-            "Expected 'altitude' or 'site'."
+            "Expected 'altitude','site' or 'angle'."
         )
 
     base_id = f"{stem}{suffix}"
