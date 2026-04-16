@@ -56,7 +56,7 @@ def resolve_rgb_exp01_names(
         stem = f"RGB-{site_code}-{aircraft}-{filter_tag}"
 
     elif naming_mode == "angle":
-        stem = f"RGB-{site_code}-{aircraft}-{filter_tag}-{angle}"
+        stem = f"RGB-{site_code}-{aircraft}-{angle}-{filter_tag}"
 
     else:
         raise ValueError(
