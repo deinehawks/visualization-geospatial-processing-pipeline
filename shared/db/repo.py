@@ -27,7 +27,7 @@ class PipelineRepo:
     def __init__(self, db_file: Path):
         self.db_file = Path(db_file)
         self._init_db()
-    
+
     @staticmethod
     def _ensure_column(conn, table: str, column: str, coltype: str) -> None:
         rows = conn.execute(f"PRAGMA table_info({table});").fetchall()
@@ -46,10 +46,7 @@ class PipelineRepo:
             self._run_migrations(conn)
             conn.commit()
 
-    # ============================================================
     # RUNS
-    # ============================================================
-
     def create_run(
         self,
         run_id: str,
@@ -116,7 +113,7 @@ class PipelineRepo:
                 (run_id,),
             ).fetchone()
             return dict(row) if row else None
-        
+
     def mark_run_paused(
         self,
         run_id: str,
@@ -139,7 +136,6 @@ class PipelineRepo:
             )
             conn.commit()
 
-
     def mark_run_running(self, run_id: str) -> None:
         with connect(self.db_file) as conn:
             conn.execute(
@@ -155,10 +151,7 @@ class PipelineRepo:
             )
             conn.commit()
 
-    # ============================================================
     # SURVEYS (optional, for survey-level analytics)
-    # ============================================================
-
     def upsert_survey_running(self, survey_id: str) -> None:
         now = utc_now_iso()
         with connect(self.db_file) as conn:
@@ -188,10 +181,7 @@ class PipelineRepo:
             )
             conn.commit()
 
-    # ============================================================
     # Migration Runner
-    # ============================================================
-
     def _has_migration(self, conn, migration_id: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM schema_migrations WHERE id=? LIMIT 1",
@@ -199,16 +189,13 @@ class PipelineRepo:
         ).fetchone()
         return row is not None
 
-
     def _mark_migration(self, conn, migration_id: str) -> None:
         conn.execute(
             "INSERT INTO schema_migrations (id, applied_at) VALUES (?, ?)",
             (migration_id, utc_now_iso()),
         )
 
-
     def _run_migrations(self, conn) -> None:
-        # import here to avoid circular import issues
         from .migrations.m001_add_run_pause_columns import MIGRATION_ID, apply
 
         migrations = [
@@ -221,10 +208,7 @@ class PipelineRepo:
             fn(conn)
             self._mark_migration(conn, mid)
 
-    # ============================================================
     # STAGES (run_id-based)
-    # ============================================================
-
     def start_stage(self, run_id: str, stage_name: str) -> int:
         now = utc_now_iso()
         with connect(self.db_file) as conn:
@@ -263,8 +247,41 @@ class PipelineRepo:
     # -------- Helper Methods (resume) -------- #
 
     def get_latest_stage(self, run_id: str, stage_name: str) -> Optional[dict]:
+        """
+        Return the most recent stage record for this run+stage combination,
+        preferring a completed record over any failed/running ones.
+
+        Resume logic in StageRunner checks for status == "completed" to decide
+        whether to skip a stage. Without this preference, a later failed retry
+        (e.g. IDs 316-319 in the stages table) would shadow the original
+        completed record (e.g. ID 312), causing the stage to re-run on every
+        resume attempt even though it already succeeded.
+
+        Strategy:
+          1. If any completed record exists for this run+stage → return it.
+          2. Otherwise return the most recent record by id (for stale-running
+             detection and error reporting).
+        """
         with connect(self.db_file) as conn:
-            row = conn.execute(
+            # First: look for the most recent completed record
+            completed_row = conn.execute(
+                """
+                SELECT id, run_id, stage_name, status, started_at, finished_at,
+                       runtime_seconds, error_message, output_json
+                FROM stages
+                WHERE run_id = ? AND stage_name = ? AND status = 'completed'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_id, stage_name),
+            ).fetchone()
+
+            if completed_row:
+                return dict(completed_row)
+
+            # Fallback: return the latest record regardless of status
+            # (used for stale-running detection)
+            latest_row = conn.execute(
                 """
                 SELECT id, run_id, stage_name, status, started_at, finished_at,
                        runtime_seconds, error_message, output_json
@@ -276,18 +293,33 @@ class PipelineRepo:
                 (run_id, stage_name),
             ).fetchone()
 
-            return dict(row) if row else None
+            return dict(latest_row) if latest_row else None
 
     def get_latest_stage_output(self, run_id: str, stage_name: str) -> Optional[Dict[str, Any]]:
-        latest = self.get_latest_stage(run_id, stage_name)
-        if not latest:
-            return None
+        """
+        Return the output_json of the latest completed stage record.
+        Always reads from a completed record so resume state is consistent.
+        """
+        with connect(self.db_file) as conn:
+            row = conn.execute(
+                """
+                SELECT output_json
+                FROM stages
+                WHERE run_id = ? AND stage_name = ? AND status = 'completed'
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (run_id, stage_name),
+            ).fetchone()
 
-        output_json = latest.get("output_json")
-        if not output_json:
-            return None
+            if not row:
+                return None
 
-        try:
-            return json.loads(output_json)
-        except Exception:
-            return None
+            output_json = row["output_json"]
+            if not output_json:
+                return None
+
+            try:
+                return json.loads(output_json)
+            except Exception:
+                return None
