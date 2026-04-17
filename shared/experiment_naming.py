@@ -37,7 +37,7 @@ def resolve_rgb_exp01_names(
 
     site_code = parts[0]
     aircraft = parts[2]
-    angle = parts[3]
+    angle = parts[7]
 
     altitude = next(
         (p for p in parts if re.fullmatch(r"\d+m", p, flags=re.IGNORECASE)),

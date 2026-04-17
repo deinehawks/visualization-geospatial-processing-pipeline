@@ -601,6 +601,14 @@ class RGBPipeline:
         task2_export_id = self.export_name_overrides.get("task2", task2_name)
 
         skip_task1 = bool(getattr(self, "skip_task1_webodm", False))
+        skip_task2 = bool(getattr(self, "skip_task2_webodm", False))
+        task1_bounded = bool(getattr(self, "task1_bounded", False))
+
+        if skip_task1 and skip_task2:
+            raise RuntimeError("Both WebODM Task 1 and Task 2 are skipped. Nothing to run.")
+
+        if skip_task1 and task1_bounded:
+            logger.warning("task1_bounded is set but Task 1 is skipped; ignoring task1_bounded.")
 
         # Dynamic task-specific export folders
         task1_root_dir = rgb_path / task1_export_id
@@ -711,23 +719,23 @@ class RGBPipeline:
                         f"(id={current_task1_id}) — skipping upload and processing"
                     )
                 else:
-                    existing_task_id = None
+                    existing_task1_id = None
                     if prev_project_id:
-                        existing_task_id = processor.find_task_by_name(project_id, task1_name)
-                        if existing_task_id:
+                        existing_task1_id = processor.find_task_by_name(project_id, task1_name)
+                        if existing_task1_id:
                             logger.info(
                                 f"Resuming: found existing Task 1 in WebODM by name "
-                                f"'{task1_name}' (id={existing_task_id}) — reattaching"
+                                f"'{task1_name}' (id={existing_task1_id}) — reattaching"
                             )
 
-                    if existing_task_id:
-                        task_status = processor.get_task_status(project_id, existing_task_id)
+                    if existing_task1_id:
+                        task1_status = processor.get_task_status(project_id, existing_task1_id)
                         logger.info(
-                            f"Resuming: Task 1 current status in WebODM: {task_status!r}"
+                            f"Resuming: Task 1 current status in WebODM: {task1_status!r}"
                         )
 
-                        if task_status == "completed":
-                            current_task1_id = existing_task_id
+                        if task1_status == "completed":
+                            current_task1_id = existing_task1_id
                             t1_success = True
                             t1_runtime = 0.0
                             logger.info(
@@ -735,10 +743,10 @@ class RGBPipeline:
                                 f"(id={current_task1_id}) — reusing"
                             )
 
-                        elif task_status in ("queued", "running"):
-                            current_task1_id = existing_task_id
+                        elif task1_status in ("queued", "running"):
+                            current_task1_id = existing_task1_id
                             logger.info(
-                                f"Resuming: Task 1 still {task_status} in WebODM "
+                                f"Resuming: Task 1 still {task1_status} in WebODM "
                                 f"(id={current_task1_id}) — waiting for completion"
                             )
                             t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
@@ -747,18 +755,29 @@ class RGBPipeline:
 
                         else:
                             logger.warning(
-                                f"Resuming: Task 1 is '{task_status}' in WebODM "
-                                f"(id={existing_task_id}) — deleting and re-uploading"
+                                f"Resuming: Task 1 is '{task1_status}' in WebODM "
+                                f"(id={existing_task1_id}) — deleting and re-uploading"
                             )
                             try:
-                                processor.delete_task(project_id, existing_task_id)
+                                processor.delete_task(project_id, existing_task1_id)
                             except Exception as del_err:
                                 logger.warning(
                                     f"Could not delete failed task "
-                                    f"{existing_task_id}: {del_err} — continuing anyway"
+                                    f"{existing_task1_id}: {del_err} — continuing anyway"
                                 )
 
                             task1_options = dict(webodm_cfg.get("task1_options", {}))
+
+                            if task1_bounded:
+                                if not boundary_available:
+                                    raise RuntimeError("Task 1 bounded was requested, but boundary is not available.")
+                                if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+                                    raise RuntimeError("Task 1 bounded was requested, but boundary GeoJSON is missing.")
+
+                                boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
+                                task1_options["boundary"] = boundary_geojson
+                                logger.info("Task 1 will run as bounded (boundary injected into Task 1 options).")
+
                             current_task1_id = processor.create_task_with_images(
                                 project_id=project_id,
                                 name=task1_name,
@@ -782,6 +801,17 @@ class RGBPipeline:
 
                     else:
                         task1_options = dict(webodm_cfg.get("task1_options", {}))
+
+                        if task1_bounded:
+                            if not boundary_available:
+                                raise RuntimeError("Task 1 bounded was requested, but boundary is not available.")
+                            if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+                                raise RuntimeError("Task 1 bounded was requested, but boundary GeoJSON is missing.")
+
+                            boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
+                            task1_options["boundary"] = boundary_geojson
+                            logger.info("Task 1 will run as bounded (boundary injected into Task 1 options).")
+
                         current_task1_id = processor.create_task_with_images(
                             project_id=project_id,
                             name=task1_name,
@@ -816,7 +846,7 @@ class RGBPipeline:
                     "runtime_seconds": t1_runtime,
                 },
                 "task2": None,
-                "boundary_used": False,
+                "boundary_used": bool(task1_bounded and not skip_task1),
                 "boundary_reason": None,
                 "boundary_geojson_path": boundary_geojson_path,
                 "downloads": {
@@ -866,6 +896,12 @@ class RGBPipeline:
                     logger.warning("Could not download orthomosaic for Task 1.")
 
             # ---------------- TASK 2 ----------------
+            if skip_task2:
+                logger.info("Skipping WebODM Task 2 by request.")
+                result["boundary_reason"] = "Task 2 skipped by request."
+                self._clear_webodm_checkpoint()
+                return result
+
             if not boundary_available:
                 msg = "Boundary not available. Skipping Task 2 (bounded models)."
                 logger.warning(msg)
@@ -1028,7 +1064,6 @@ class RGBPipeline:
             # ---------------- Downloads after TASK 2 ----------------
             if exports_cfg.get("enabled", False):
                 dem_cfg = (exports_cfg.get("dem") or {})
-
                 dem_do_download = False
 
                 if dem_do_download:
