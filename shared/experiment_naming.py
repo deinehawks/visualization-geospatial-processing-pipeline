@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import re
 
-
 @dataclass
 class ExperimentNames:
     base_id: str
@@ -26,7 +25,7 @@ def resolve_rgb_exp01_names(
     core_name = flight_test_code[:-6] if has_djifp else flight_test_code
 
     parts = core_name.split("_")
-    if len(parts) < 4:
+    if len(parts) < 4: 
         raise ValueError(
             f"Invalid flight test code: {flight_test_code!r}. "
             "Expected underscore-separated format like "
@@ -38,7 +37,7 @@ def resolve_rgb_exp01_names(
 
     site_code = parts[0]
     aircraft = parts[2]
-    angle = parts[6]
+    angle = parts[5]
 
     altitude = next(
         (p for p in parts if re.fullmatch(r"\d+m", p, flags=re.IGNORECASE)),

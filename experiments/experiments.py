@@ -1,3 +1,5 @@
+# experiments.py
+
 from __future__ import annotations
 from pathlib import Path
 from shared.config import load_pipeline_config
@@ -168,6 +170,12 @@ def main():
         default=None,
         help="Override WEBODM_NODE_ID for this run",
     )
+    parser.add_argument(
+    "--skip-task1-webodm",
+    action="store_true",
+    help="Skip WebODM Task 1 and run only Task 2",  # TEMPORARY
+    )
+
     args = parser.parse_args()
 
     if args.resume and not args.run_id:
@@ -229,7 +237,9 @@ def main():
     print(f"Source dir: {source_dir}")
     print(f"Outputs (SURVEYS_ROOT): {surveys_root}")
     print(f"WebODM Node ID: {node_id}")
+    print(f"Skip Task 1 WebODM: {args.skip_task1_webodm}")
     print("===============================\n")
+    
 
     pipeline = RGBPipeline(
     base_dir=Path("."),
@@ -243,6 +253,7 @@ def main():
     export_name_overrides=export_name_overrides,
     crossrun_enabled_override=crossrun_enabled_override,
     use_year_subdir_override=use_year_subdir_override,
+    skip_task1_webodm=args.skip_task1_webodm, # TEMPORARY
     )
 
     result = pipeline.run(resume=args.resume)

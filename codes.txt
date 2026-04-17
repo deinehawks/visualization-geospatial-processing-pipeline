@@ -4,6 +4,8 @@ Remove-Item .\data\pipeline.db -Force
 python -m tests.test_rgb_pipeline
 
 Experiment run code = python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps_p45" --year 2026 
-                      python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps" --year 2026 --resume --run-id d5052e7c-b5b9-4455-bc89-e6d58ae0196e 
+                      
+python -m experiments.experiments --survey "STM_1Ha_A2S_60m_85f75s_4mps" --year 2026 --skip-task1-webodm
+
 
 

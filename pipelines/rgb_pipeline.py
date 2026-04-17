@@ -43,6 +43,7 @@ class RGBPipeline:
         export_name_overrides: Optional[Dict[str, str]] = None,
         crossrun_enabled_override: Optional[bool] = None,
         use_year_subdir_override: Optional[bool] = None,
+        skip_task1_webodm: bool = False, # TEMPORARY
     ):
         self.base_dir = Path(base_dir)
         self.config = config
@@ -59,6 +60,8 @@ class RGBPipeline:
         self.export_name_overrides = export_name_overrides or {}
         self.crossrun_enabled_override = crossrun_enabled_override
         self.use_year_subdir_override = use_year_subdir_override
+
+        self.skip_task1_webodm = skip_task1_webodm # TEMPORARY
 
         self.loggers: Dict[str, logging.Logger] = {
             "pipeline": get_logger(
@@ -581,7 +584,6 @@ class RGBPipeline:
         task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
         task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
 
-        # Allow experiment/task naming overrides, otherwise fall back to default naming
         task1_name = self.task_name_overrides.get("task1")
         task2_name = self.task_name_overrides.get("task2")
 
@@ -591,9 +593,10 @@ class RGBPipeline:
         if not task2_name:
             task2_name = f"{survey_id}-RGB--{task2_flag}"
 
-        # Optional export-name overrides for experiment outputs
         task1_export_id = self.export_name_overrides.get("task1", task1_name)
         task2_export_id = self.export_name_overrides.get("task2", task2_name)
+
+        skip_task1 = bool(getattr(self, "skip_task1_webodm", False))
 
         # Dynamic task-specific export folders
         task1_root_dir = rgb_path / task1_export_id
@@ -623,7 +626,6 @@ class RGBPipeline:
 
         image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
 
-        # Local Upload Cache 
         upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
         if not upload_cache_root_cfg:
             upload_cache_root_cfg = os.getenv("UPLOAD_CACHE_ROOT")
@@ -662,7 +664,6 @@ class RGBPipeline:
             project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
             project_name = f"{survey_id}{project_suffix}"
 
-            # ── Resume: reattach to existing project if available 
             prev_web = self.state.get("webodm") or {}
             prev_project_id = prev_web.get("project_id")
             prev_task1 = prev_web.get("task1") or {}
@@ -680,127 +681,132 @@ class RGBPipeline:
                 self._save_webodm_checkpoint({
                     "project_id": project_id,
                     "project_name": project_name,
-                    "task1": {},
+                    "task1": None if skip_task1 else {},
                     "task2": None,
                     "downloads": {"task1": {}, "task2": {}},
                 })
 
-            # ── Resume: skip Task 1 if it already succeeded
-            t1_already_done = (
-                prev_task1.get("id")
-                and prev_task1.get("success") is True
-            )
-
-            if t1_already_done:
-                current_task_id = str(prev_task1["id"])
-                t1_success = True
-                t1_runtime = float(prev_task1.get("runtime_seconds") or 0)
-                logger.info(
-                    f"Resuming: Task 1 already completed "
-                    f"(id={current_task_id}) — skipping upload and processing"
-                )
+            # ---------------- TASK 1 ----------------
+            if skip_task1:
+                logger.info("Skipping WebODM Task 1 by request.")
+                current_task1_id = ""
+                t1_success = False
+                t1_runtime = 0.0
             else:
-                # ── Try to find task1 in WebODM by name first 
-                existing_task_id = None
-                if prev_project_id:
-                    existing_task_id = processor.find_task_by_name(project_id, task1_name)
-                    if existing_task_id:
-                        logger.info(
-                            f"Resuming: found existing Task 1 in WebODM by name "
-                            f"'{task1_name}' (id={existing_task_id}) — reattaching"
-                        )
+                t1_already_done = (
+                    prev_task1.get("id")
+                    and prev_task1.get("success") is True
+                )
 
-                if existing_task_id:
-                    task_status = processor.get_task_status(project_id, existing_task_id)
+                if t1_already_done:
+                    current_task1_id = str(prev_task1["id"])
+                    t1_success = True
+                    t1_runtime = float(prev_task1.get("runtime_seconds") or 0)
                     logger.info(
-                        f"Resuming: Task 1 current status in WebODM: {task_status!r}"
+                        f"Resuming: Task 1 already completed "
+                        f"(id={current_task1_id}) — skipping upload and processing"
                     )
+                else:
+                    existing_task_id = None
+                    if prev_project_id:
+                        existing_task_id = processor.find_task_by_name(project_id, task1_name)
+                        if existing_task_id:
+                            logger.info(
+                                f"Resuming: found existing Task 1 in WebODM by name "
+                                f"'{task1_name}' (id={existing_task_id}) — reattaching"
+                            )
 
-                    if task_status == "completed":
-                        current_task_id = existing_task_id
-                        t1_success = True
-                        t1_runtime = 0.0
+                    if existing_task_id:
+                        task_status = processor.get_task_status(project_id, existing_task_id)
                         logger.info(
-                            f"Resuming: Task 1 already completed in WebODM "
-                            f"(id={current_task_id}) — reusing"
+                            f"Resuming: Task 1 current status in WebODM: {task_status!r}"
                         )
 
-                    elif task_status in ("queued", "running"):
-                        current_task_id = existing_task_id
+                        if task_status == "completed":
+                            current_task1_id = existing_task_id
+                            t1_success = True
+                            t1_runtime = 0.0
+                            logger.info(
+                                f"Resuming: Task 1 already completed in WebODM "
+                                f"(id={current_task1_id}) — reusing"
+                            )
+
+                        elif task_status in ("queued", "running"):
+                            current_task1_id = existing_task_id
+                            logger.info(
+                                f"Resuming: Task 1 still {task_status} in WebODM "
+                                f"(id={current_task1_id}) — waiting for completion"
+                            )
+                            t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
+                                project_id, current_task1_id, live=False
+                            )
+
+                        else:
+                            logger.warning(
+                                f"Resuming: Task 1 is '{task_status}' in WebODM "
+                                f"(id={existing_task_id}) — deleting and re-uploading"
+                            )
+                            try:
+                                processor.delete_task(project_id, existing_task_id)
+                            except Exception as del_err:
+                                logger.warning(
+                                    f"Could not delete failed task "
+                                    f"{existing_task_id}: {del_err} — continuing anyway"
+                                )
+
+                            task1_options = dict(webodm_cfg.get("task1_options", {}))
+                            current_task1_id = processor.create_task_with_images(
+                                project_id=project_id,
+                                name=task1_name,
+                                image_folder=str(upload_folder),
+                                options=task1_options,
+                                processing_node=webodm_cfg.get("node_id"),
+                            )
+                            t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
+                                project_id, current_task1_id, live=False
+                            )
+
+                    elif prev_task1.get("id") and prev_project_id:
+                        current_task1_id = str(prev_task1["id"])
                         logger.info(
-                            f"Resuming: Task 1 still {task_status} in WebODM "
-                            f"(id={current_task_id}) — waiting for completion"
+                            f"Resuming: Task 1 exists but incomplete "
+                            f"(id={current_task1_id}) — checking WebODM status"
                         )
-                        t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False
+                        t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
+                            project_id, current_task1_id, live=False
                         )
 
                     else:
-                        logger.warning(
-                            f"Resuming: Task 1 is '{task_status}' in WebODM "
-                            f"(id={existing_task_id}) — deleting and re-uploading"
-                        )
-                        try:
-                            processor.delete_task(project_id, existing_task_id)
-                        except Exception as del_err:
-                            logger.warning(
-                                f"Could not delete failed task "
-                                f"{existing_task_id}: {del_err} — continuing anyway"
-                            )
-
                         task1_options = dict(webodm_cfg.get("task1_options", {}))
-                        current_task_id = processor.create_task_with_images(
+                        current_task1_id = processor.create_task_with_images(
                             project_id=project_id,
                             name=task1_name,
                             image_folder=str(upload_folder),
                             options=task1_options,
                             processing_node=webodm_cfg.get("node_id"),
                         )
-                        t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False
+                        t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
+                            project_id, current_task1_id, live=False
                         )
 
-                elif prev_task1.get("id") and prev_project_id:
-                    current_task_id = str(prev_task1["id"])
-                    logger.info(
-                        f"Resuming: Task 1 exists but incomplete "
-                        f"(id={current_task_id}) — checking WebODM status"
-                    )
-                    t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False
-                    )
-
-                else:
-                    task1_options = dict(webodm_cfg.get("task1_options", {}))
-                    current_task_id = processor.create_task_with_images(
-                        project_id=project_id,
-                        name=task1_name,
-                        image_folder=str(upload_folder),
-                        options=task1_options,
-                        processing_node=webodm_cfg.get("node_id"),
-                    )
-                    t1_success, t1_runtime, t1_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False
-                    )
-
-                self._save_webodm_checkpoint({
-                    "project_id": project_id,
-                    "project_name": project_name,
-                    "task1": {
-                        "id": current_task_id,
-                        "name": task1_name,
-                        "success": t1_success,
-                        "runtime_seconds": t1_runtime,
-                    },
-                    "task2": None,
-                    "downloads": {"task1": {}, "task2": {}},
-                })
+                    self._save_webodm_checkpoint({
+                        "project_id": project_id,
+                        "project_name": project_name,
+                        "task1": {
+                            "id": current_task1_id,
+                            "name": task1_name,
+                            "success": t1_success,
+                            "runtime_seconds": t1_runtime,
+                        },
+                        "task2": None,
+                        "downloads": {"task1": {}, "task2": {}},
+                    })
 
             result: Dict[str, Any] = {
                 "project_id": project_id,
                 "project_name": project_name,
-                "task1": {
-                    "id": current_task_id,
+                "task1": None if skip_task1 else {
+                    "id": current_task1_id,
                     "name": task1_name,
                     "success": t1_success,
                     "runtime_seconds": t1_runtime,
@@ -815,11 +821,15 @@ class RGBPipeline:
                 },
             }
 
-            if t1_already_done and prev_web.get("downloads", {}).get("task1"):
+            if (not skip_task1) and prev_web.get("downloads", {}).get("task1"):
                 logger.info("Resuming: reusing Task 1 downloads from previous run")
 
-            # Downloads after TASK 1 
-            if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
+            # ---------------- Downloads after TASK 1 ----------------
+            if (
+                not skip_task1
+                and exports_cfg.get("enabled", False)
+                and exports_cfg.get("ortho", {}).get("enabled", False)
+            ):
                 ortho_cfg = exports_cfg["ortho"]
 
                 out_dir = task1_ortho_dir
@@ -837,7 +847,7 @@ class RGBPipeline:
 
                 out_path = processor.export_orthomosaic(
                     project_id,
-                    current_task_id,
+                    current_task1_id,
                     out_dir=out_dir,
                     filename=filename,
                     epsg=epsg,
@@ -851,7 +861,7 @@ class RGBPipeline:
                 else:
                     logger.warning("Could not download orthomosaic for Task 1.")
 
-            # TASK 2 (only if boundary exists) 
+            # ---------------- TASK 2 ----------------
             if not boundary_available:
                 msg = "Boundary not available. Skipping Task 2 (bounded models)."
                 logger.warning(msg)
@@ -874,12 +884,12 @@ class RGBPipeline:
             )
 
             if t2_already_done:
-                current_task_id = str(prev_task2["id"])
+                current_task2_id = str(prev_task2["id"])
                 t2_success = True
                 t2_runtime = float(prev_task2.get("runtime_seconds") or 0)
                 logger.info(
                     f"Resuming: Task 2 already completed "
-                    f"(id={current_task_id}) — skipping upload and processing"
+                    f"(id={current_task2_id}) — skipping upload and processing"
                 )
 
             else:
@@ -899,22 +909,22 @@ class RGBPipeline:
                     )
 
                     if task2_status == "completed":
-                        current_task_id = existing_task2_id
+                        current_task2_id = existing_task2_id
                         t2_success = True
                         t2_runtime = 0.0
                         logger.info(
                             f"Resuming: Task 2 already completed in WebODM "
-                            f"(id={current_task_id}) — reusing"
+                            f"(id={current_task2_id}) — reusing"
                         )
 
                     elif task2_status in ("queued", "running"):
-                        current_task_id = existing_task2_id
+                        current_task2_id = existing_task2_id
                         logger.info(
                             f"Resuming: Task 2 still {task2_status} in WebODM "
-                            f"(id={current_task_id}) — waiting for completion"
+                            f"(id={current_task2_id}) — waiting for completion"
                         )
-                        t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False
+                        t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
+                            project_id, current_task2_id, live=False
                         )
 
                     else:
@@ -930,41 +940,41 @@ class RGBPipeline:
                                 f"{existing_task2_id}: {del_err} — continuing anyway"
                             )
 
-                        current_task_id = processor.create_task_with_images(
+                        current_task2_id = processor.create_task_with_images(
                             project_id=project_id,
                             name=task2_name,
                             image_folder=str(upload_folder),
                             options=task2_options,
                             processing_node=webodm_cfg.get("node_id"),
                         )
-                        t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                            project_id, current_task_id, live=False
+                        t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
+                            project_id, current_task2_id, live=False
                         )
 
                 elif prev_task2.get("id") and prev_project_id:
-                    current_task_id = str(prev_task2["id"])
+                    current_task2_id = str(prev_task2["id"])
                     logger.info(
                         f"Resuming: Task 2 exists in checkpoint but incomplete "
-                        f"(id={current_task_id}) — checking WebODM status"
+                        f"(id={current_task2_id}) — checking WebODM status"
                     )
-                    t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False
+                    t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
+                        project_id, current_task2_id, live=False
                     )
 
                 else:
-                    current_task_id = processor.create_task_with_images(
+                    current_task2_id = processor.create_task_with_images(
                         project_id=project_id,
                         name=task2_name,
                         image_folder=str(upload_folder),
                         options=task2_options,
                         processing_node=webodm_cfg.get("node_id"),
                     )
-                    t2_success, t2_runtime, t2_info = processor.wait_for_completion(
-                        project_id, current_task_id, live=False
+                    t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
+                        project_id, current_task2_id, live=False
                     )
 
             result["task2"] = {
-                "id": current_task_id,
+                "id": current_task2_id,
                 "name": task2_name,
                 "success": t2_success,
                 "runtime_seconds": t2_runtime,
@@ -978,7 +988,7 @@ class RGBPipeline:
                 "downloads": result["downloads"],
             })
 
-            # Task 2 bounded orthomosaic 
+            # ---------------- Task 2 bounded orthomosaic ----------------
             if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
                 ortho_cfg = exports_cfg["ortho"]
 
@@ -997,7 +1007,7 @@ class RGBPipeline:
 
                 out_path = processor.export_orthomosaic(
                     project_id,
-                    current_task_id,
+                    current_task2_id,
                     out_dir=out_dir,
                     filename=filename,
                     epsg=epsg,
@@ -1011,9 +1021,8 @@ class RGBPipeline:
                 else:
                     logger.warning("Could not download bounded orthomosaic for Task 2.")
 
-            # Downloads after TASK 2 
+            # ---------------- Downloads after TASK 2 ----------------
             if exports_cfg.get("enabled", False):
-                # DEM (config-driven, non-interactive)
                 dem_cfg = (exports_cfg.get("dem") or {})
 
                 dem_do_download = False
@@ -1050,7 +1059,7 @@ class RGBPipeline:
 
                                     asset_type = f"{model}/{color}/{shading}"
                                     ok = processor.download_asset_safe(
-                                        project_id, current_task_id, asset_type, tmp_raw
+                                        project_id, current_task2_id, asset_type, tmp_raw
                                     )
                                     if ok:
                                         processor.run_gdalwarp(tmp_raw, final_out, epsg)
@@ -1063,7 +1072,6 @@ class RGBPipeline:
                         result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
                         result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
 
-                # Point Cloud (LAZ -> PLY/PCD) 
                 pc_cfg = (exports_cfg.get("pointcloud") or {})
                 pc_enabled = bool(pc_cfg.get("enabled", True))
 
@@ -1076,7 +1084,7 @@ class RGBPipeline:
 
                     pc_out = processor.export_pointcloud(
                         project_id,
-                        current_task_id,
+                        current_task2_id,
                         out_dir=pc_dir,
                         laz_archive_name=f"{task2_export_id}.laz",
                         ply_name=f"{task2_export_id}.ply",
@@ -1116,7 +1124,7 @@ class RGBPipeline:
                     zip_path = out_dir / fname
 
                     ok = processor.download_all_assets_safe(
-                        project_id, current_task_id, zip_path
+                        project_id, current_task2_id, zip_path
                     )
                     if ok:
                         result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
@@ -1159,8 +1167,7 @@ class RGBPipeline:
 
         boundary_geojson_path = self.state.get("boundary_geojson_path")
         if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-            raise RuntimeError(
-                "QGIS stage requires boundary_geojson_path (missing).")
+            raise RuntimeError("QGIS stage requires boundary_geojson_path (missing).")
 
         web = self.state.get("webodm") or {}
         dls = web.get("downloads") or {}
@@ -1170,39 +1177,53 @@ class RGBPipeline:
         unbounded_ortho = t1.get("orthomosaic")
         bounded_ortho = t2.get("orthomosaic")
 
-        if not unbounded_ortho or not Path(unbounded_ortho).exists():
+        main_ortho = None
+        main_ortho_source = None
+
+        if unbounded_ortho and Path(unbounded_ortho).exists():
+            main_ortho = str(unbounded_ortho)
+            main_ortho_source = "task1"
+        elif bounded_ortho and Path(bounded_ortho).exists():
+            main_ortho = str(bounded_ortho)
+            main_ortho_source = "task2"
+        else:
             raise RuntimeError(
-                "QGIS stage requires Task 1 orthomosaic (unbounded) downloaded first.")
+                "QGIS stage requires an orthomosaic from Task 1 or Task 2, but none was found."
+            )
+
+        logger.info(f"QGIS main orthomosaic source: {main_ortho_source} -> {Path(main_ortho).name}")
 
         naming_cfg = self.config.get("naming", {})
-        crossrun_flag = self.state.get(
-            "crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
+        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
         boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
         boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
-        task1_flag = f"{crossrun_flag}{boundary_flag_task1}"  # ex: xcxb
-        task2_flag = f"{crossrun_flag}{boundary_flag_task2}"  # ex: xcb
+        task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
+        task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
 
-        clipped_ortho_dir = dir_from_key("qgis_clipped_ortho", fallback=(
-            rgb_path / "qgis" / "clipped" / "ortho"))
-        tiles_sharp_dir = dir_from_key("tiles_ortho_sharp", fallback=(
-            rgb_path / "tiles" / "ortho" / "sharp-corners"))
-        tiles_round_dir = dir_from_key("tiles_ortho_round", fallback=(
-            rgb_path / "tiles" / "ortho" / "round-corners"))
+        clipped_ortho_dir = dir_from_key(
+            "qgis_clipped_ortho",
+            fallback=(rgb_path / "qgis" / "clipped" / "ortho")
+        )
+        tiles_sharp_dir = dir_from_key(
+            "tiles_ortho_sharp",
+            fallback=(rgb_path / "tiles" / "ortho" / "sharp-corners")
+        )
+        tiles_round_dir = dir_from_key(
+            "tiles_ortho_round",
+            fallback=(rgb_path / "tiles" / "ortho" / "round-corners")
+        )
 
         clip_cfg = (qgis_cfg.get("clip") or {})
         clip_enabled = bool(clip_cfg.get("enabled", True))
-        clip_tmpl = str(clip_cfg.get("filename_template")
-                        or "orthomosaic-clipped--{flag}.tif")
+        clip_tmpl = str(clip_cfg.get("filename_template") or "orthomosaic-clipped--{flag}.tif")
 
-        unbounded_clipped = clipped_ortho_dir / \
-            clip_tmpl.format(flag=task1_flag)
+        unbounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task1_flag)
         bounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task2_flag)
 
         qgis_tools_cfg = (qgis_cfg.get("tools") or {})
         qgis_root = str(qgis_tools_cfg.get("qgis_root") or "")
         gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
-        gdal2tiles_path = str(qgis_tools_cfg.get(
-            "gdal2tiles_path") or "gdal2tiles.py")
+        gdal2tiles_path = str(qgis_tools_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
 
         tiles_cfg = (qgis_cfg.get("tiles") or {})
         tiles_enabled = bool(tiles_cfg.get("enabled", True))
@@ -1220,9 +1241,9 @@ class RGBPipeline:
                 dst_nodata = float(dst_nodata_raw.strip())
             except ValueError:
                 raise ValueError(
-                    f"Invalid QGIS_CLIP_DST_NODATA value: '{dst_nodata_raw}' (must be a number or empty)")
+                    f"Invalid QGIS_CLIP_DST_NODATA value: '{dst_nodata_raw}' (must be a number or empty)"
+                )
 
-        # --- QGIS tools wrapper ---
         tools = QGISTools(
             logger=logger,
             qgis_root=qgis_root,
@@ -1230,27 +1251,30 @@ class RGBPipeline:
             gdal2tiles_path=gdal2tiles_path,
         )
 
-        # 1) Clip unbounded -> always
+        # 1) Clip main ortho
         if clip_enabled:
-            logger.info(
-                f"Clipping UNBOUNDED ortho -> {unbounded_clipped.name}")
+            logger.info(f"Clipping MAIN ortho ({main_ortho_source}) -> {unbounded_clipped.name}")
             tools.clip_raster_by_mask(
-                input_tif=Path(unbounded_ortho),
+                input_tif=Path(main_ortho),
                 mask_geojson=Path(boundary_geojson_path),
                 output_tif=unbounded_clipped,
                 dst_nodata=dst_nodata,
             )
         else:
             logger.warning(
-                "QGIS clip disabled (qgis.clip.enabled=false). Using unbounded orthomosaic directly.")
-            unbounded_clipped = Path(unbounded_ortho)
+                "QGIS clip disabled (qgis.clip.enabled=false). Using main orthomosaic directly."
+            )
+            unbounded_clipped = Path(main_ortho)
 
-        # 2) Clip bounded -> only if exists
+        # 2) Clip bounded separately only if Task 2 is not already the main source
         bounded_ok = False
-        if bounded_ortho and Path(bounded_ortho).exists():
+        if main_ortho_source == "task2":
+            logger.info(
+                "Task 2 orthomosaic is already the main QGIS source; skipping duplicate bounded clip."
+            )
+        elif bounded_ortho and Path(bounded_ortho).exists():
             if clip_enabled:
-                logger.info(
-                    f"Clipping BOUNDED ortho -> {bounded_clipped.name}")
+                logger.info(f"Clipping BOUNDED ortho -> {bounded_clipped.name}")
                 tools.clip_raster_by_mask(
                     input_tif=Path(bounded_ortho),
                     mask_geojson=Path(boundary_geojson_path),
@@ -1263,12 +1287,14 @@ class RGBPipeline:
                 bounded_ok = True
         else:
             logger.warning(
-                "Bounded orthomosaic missing. Skipping bounded clip + round-corners tiles.")
+                "Bounded orthomosaic missing. Skipping bounded clip + round-corners tiles."
+            )
 
         # 3) Tiles
         if tiles_enabled:
             logger.info(
-                f"Generating tiles (sharp-corners) from {Path(unbounded_clipped).name}")
+                f"Generating tiles (sharp-corners) from {Path(unbounded_clipped).name}"
+            )
             tools.generate_tiles(
                 input_tif=Path(unbounded_clipped),
                 output_dir=tiles_sharp_dir,
@@ -1282,7 +1308,8 @@ class RGBPipeline:
 
             if bounded_ok:
                 logger.info(
-                    f"Generating tiles (round-corners) from {Path(bounded_clipped).name}")
+                    f"Generating tiles (round-corners) from {Path(bounded_clipped).name}"
+                )
                 tools.generate_tiles(
                     input_tif=Path(bounded_clipped),
                     output_dir=tiles_round_dir,
@@ -1295,10 +1322,12 @@ class RGBPipeline:
                 )
         else:
             logger.warning(
-                "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation.")
+                "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation."
+            )
 
         return {
             "boundary_geojson": str(boundary_geojson_path),
+            "main_ortho_source": main_ortho_source,
             "tools": {
                 "gdalwarp_path": gdalwarp_path,
                 "gdal2tiles_path": gdal2tiles_path,
@@ -1316,7 +1345,7 @@ class RGBPipeline:
                 "copyright": copyright_text,
             },
             "unbounded": {
-                "input": str(unbounded_ortho),
+                "input": str(main_ortho),
                 "clipped": str(unbounded_clipped),
                 "tiles_dir": str(tiles_sharp_dir) if tiles_enabled else None,
             },
