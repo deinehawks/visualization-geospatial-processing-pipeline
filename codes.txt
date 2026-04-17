@@ -5,7 +5,7 @@ python -m tests.test_rgb_pipeline
 
 Experiment run code = python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps_p45" --year 2026 
                       
-python -m experiments.experiments --survey "STM_1Ha_A2S_60m_85f75s_4mps" --year 2026 --skip-task1-webodm
+python -m experiments.experiments --survey "BLC_A2S_2Ha_60m" --year 2026 --skip-task1-webodm
 
 
 
