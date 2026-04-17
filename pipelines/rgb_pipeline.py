@@ -44,6 +44,8 @@ class RGBPipeline:
         crossrun_enabled_override: Optional[bool] = None,
         use_year_subdir_override: Optional[bool] = None,
         skip_task1_webodm: bool = False, # TEMPORARY
+        skip_task2_webodm: bool = False, # TEMPORARY
+        task1_bounded: bool = False, # TEMPORARY
     ):
         self.base_dir = Path(base_dir)
         self.config = config
@@ -62,6 +64,8 @@ class RGBPipeline:
         self.use_year_subdir_override = use_year_subdir_override
 
         self.skip_task1_webodm = skip_task1_webodm # TEMPORARY
+        self.skip_task2_webodm = skip_task2_webodm # TEMPORARY
+        self.task1_bounded = task1_bounded # TEMPORARY
 
         self.loggers: Dict[str, logging.Logger] = {
             "pipeline": get_logger(
