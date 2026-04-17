@@ -175,6 +175,16 @@ def main():
     action="store_true",
     help="Skip WebODM Task 1 and run only Task 2",  # TEMPORARY
     )
+    parser.add_argument(
+    "--skip-task2-webodm",
+    action="store_true",
+    help="Skip WebODM Task 2 and run only Task 1",
+    )
+    parser.add_argument(
+        "--task1-bounded",
+        action="store_true",
+        help="Run WebODM Task 1 with boundary applied",
+    )
 
     args = parser.parse_args()
 
@@ -238,6 +248,8 @@ def main():
     print(f"Outputs (SURVEYS_ROOT): {surveys_root}")
     print(f"WebODM Node ID: {node_id}")
     print(f"Skip Task 1 WebODM: {args.skip_task1_webodm}")
+    print(f"Skip Task 2 WebODM: {args.skip_task2_webodm}")
+    print(f"Task 1 bounded     : {args.task1_bounded}")
     print("===============================\n")
     
 
@@ -254,6 +266,8 @@ def main():
     crossrun_enabled_override=crossrun_enabled_override,
     use_year_subdir_override=use_year_subdir_override,
     skip_task1_webodm=args.skip_task1_webodm, # TEMPORARY
+    skip_task2_webodm=args.skip_task2_webodm, # TEMPORARY
+    task1_bounded=args.task1_bounded, # TEMPORARY
     )
 
     result = pipeline.run(resume=args.resume)
