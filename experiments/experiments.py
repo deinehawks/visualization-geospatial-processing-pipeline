@@ -52,13 +52,11 @@ def _print_pipeline_summary(state: dict) -> None:
     print(f"  {status_line}")
     print(f"{MAGENTA}{'═' * W}{RESET}")
 
-    # ── Run ───────────────────────────────────────────────────────────────
     section("RUN")
     row("Run ID", state.get("run_id", "—"))
     if state.get("error"):
         row("Error", state["error"], RED)
 
-    # ── Data segregation ──────────────────────────────────────────────────
     seg = state.get("data_segregation") or {}
     if seg:
         section("DATA SEGREGATION")
@@ -68,7 +66,6 @@ def _print_pipeline_summary(state: dict) -> None:
         if seg.get("survey_path"):
             row("Survey path", f".../{short_path(seg['survey_path'])}")
 
-    # ── Cross-run filter ──────────────────────────────────────────────────
     flt = state.get("cross_run_filter") or {}
     if flt:
         section("CROSS-RUN FILTER")
@@ -80,7 +77,6 @@ def _print_pipeline_summary(state: dict) -> None:
         row("Clusters",      str(flt.get("cluster_exclusions", "—")))
         row("Raw deleted",   str(flt.get("raw_deleted", False)))
 
-    # ── KML boundary ──────────────────────────────────────────────────────
     kml = state.get("kml_boundary") or {}
     if kml:
         section("KML BOUNDARY")
@@ -91,7 +87,6 @@ def _print_pipeline_summary(state: dict) -> None:
         if pf.get("geojson"):
             row("GeoJSON", Path(pf["geojson"]).name)
 
-    # ── WebODM ────────────────────────────────────────────────────────────
     web = state.get("webodm") or {}
     if web:
         section("WEBODM")
@@ -123,7 +118,6 @@ def _print_pipeline_summary(state: dict) -> None:
         if t2d.get("all_assets_zip"):
             row("Assets ZIP",        Path(t2d["all_assets_zip"]).name)
 
-    # ── Quality gate ──────────────────────────────────────────────────────
     qg = state.get("quality_gate") or {}
     if qg:
         section("QUALITY GATE")
@@ -134,7 +128,6 @@ def _print_pipeline_summary(state: dict) -> None:
         if qg.get("restarts"):
             row("Restarts", str(qg["restarts"]))
 
-    # ── QGIS ──────────────────────────────────────────────────────────────
     qgis = state.get("qgis") or {}
     if qgis and not qgis.get("skipped"):
         section("QGIS")
@@ -171,19 +164,26 @@ def main():
         help="Override WEBODM_NODE_ID for this run",
     )
     parser.add_argument(
-    "--skip-task1-webodm",
-    action="store_true",
-    help="Skip WebODM Task 1 and run only Task 2",  # TEMPORARY
+        "--skip-task1-webodm",
+        action="store_true",
+        help=(
+            "Skip WebODM Task 1 (unbounded) and run only Task 2 (bounded). "
+            "Task is named T3 to distinguish outputs from a standard T1+T2 run."
+        ),
     )
     parser.add_argument(
-    "--skip-task2-webodm",
-    action="store_true",
-    help="Skip WebODM Task 2 and run only Task 1",
+        "--skip-task2-webodm",
+        action="store_true",
+        help="Skip WebODM Task 2 (bounded) and run only Task 1.",
     )
     parser.add_argument(
         "--task1-bounded",
         action="store_true",
-        help="Run WebODM Task 1 with boundary applied",
+        help=(
+            "Run WebODM Task 1 WITH boundary applied. "
+            "Use together with --skip-task2-webodm. "
+            "Task is named T4 to distinguish outputs from a standard T1 run."
+        ),
     )
 
     args = parser.parse_args()
@@ -191,11 +191,14 @@ def main():
     if args.resume and not args.run_id:
         parser.error("--run-id is required when using --resume")
 
+    if args.skip_task1_webodm and args.skip_task2_webodm:
+        parser.error("--skip-task1-webodm and --skip-task2-webodm cannot both be set.")
+
     config = load_pipeline_config()
 
     if args.node_id is not None:
         config["webodm"]["node_id"] = args.node_id
-        
+
     exp_cfg = config.get("experiment", {})
     exp_enabled = bool(exp_cfg.get("enabled", False))
 
@@ -208,7 +211,6 @@ def main():
     if exp_enabled and exp_cfg.get("profile") == "rgb_exp_01":
         crossrun_enabled_override = bool(exp_cfg.get("crossrun_enabled", True))
         use_year_subdir_override = bool(exp_cfg.get("use_year_subdir", True))
-
         naming_mode = str(exp_cfg.get("naming_mode", "altitude"))
 
         names = resolve_rgb_exp01_names(
@@ -218,56 +220,100 @@ def main():
         )
 
         survey_id_override = names.base_id
-        task_name_overrides = {
-            "task1": names.task1_name,
-            "task2": names.task2_name,
-        }
-        export_name_overrides = {
-            "task1": names.task1_export_id,
-            "task2": names.task2_export_id,
-        }
 
-        print("Experiment profile: rgb_exp_01")
+        # ── Decide which task names to use based on CLI flags ─────────
+        #
+        # Default (no flags):
+        #   task1 → T1 (unbounded)    task2 → T2 (bounded)
+        #
+        # --skip-task1-webodm:
+        #   task1 → T3 (bounded, no T1 uploaded)
+        #   task2 is not used — pipeline treats "task1" slot as the only task
+        #   Note: the pipeline's task2 slot is still used for bounded processing;
+        #   we remap names so outputs land under T3.
+        #
+        # --skip-task2-webodm + --task1-bounded:
+        #   task1 → T4 (bounded T1)
+        #   task2 skipped entirely
+        #
+        # --skip-task2-webodm (without --task1-bounded):
+        #   task1 → T1 (standard unbounded, just no task2 run)
+
+        if args.skip_task1_webodm:
+            task_name_overrides = {
+                "task1": names.task3_name,
+                "task2": names.task3_name,
+            }
+            export_name_overrides = {
+                "task1": names.task3_export_id,
+                "task2": names.task3_export_id,
+            }
+
+        elif args.skip_task2_webodm and args.task1_bounded:
+            # T4: Task 1 is run but WITH boundary — no Task 2.
+            task_name_overrides = {
+                "task1": names.task4_name,
+                "task2": names.task4_name,
+            }
+            export_name_overrides = {
+                "task1": names.task4_export_id,
+                "task2": names.task4_export_id,
+            }
+
+        else:
+            # Standard T1 + T2 (or T1 only if --skip-task2-webodm without --task1-bounded)
+            task_name_overrides = {
+                "task1": names.task1_name,
+                "task2": names.task2_name,
+            }
+            export_name_overrides = {
+                "task1": names.task1_export_id,
+                "task2": names.task2_export_id,
+            }
+
+        print("Experiment profile : rgb_exp_01")
         print(f"Resolved survey ID : {names.base_id}")
-        print(f"Resolved Task 1    : {names.task1_name}")
-        print(f"Resolved Task 2    : {names.task2_name}")
+        print(f"Resolved Task 1    : {task_name_overrides.get('task1', '—')}")
+        print(f"Resolved Task 2    : {task_name_overrides.get('task2', '—')}")
         print(f"Cross-run enabled  : {crossrun_enabled_override}")
         print(f"Naming mode        : {naming_mode}")
+        print(f"Skip Task 1        : {args.skip_task1_webodm}")
+        print(f"Skip Task 2        : {args.skip_task2_webodm}")
+        print(f"Task 1 bounded     : {args.task1_bounded}")
 
     field_data_root = Path(config["paths"]["field_data_root"])
-    surveys_root = Path(config["paths"]["surveys_root"])
-
-    node_id = int(config["webodm"].get("node_id") or 0)
+    surveys_root    = Path(config["paths"]["surveys_root"])
+    node_id         = int(config["webodm"].get("node_id") or 0)
 
     source_dir = field_data_root / args.survey
     if not source_dir.exists():
         raise FileNotFoundError(f"Survey folder not found: {source_dir}")
 
     print("\n===== EXPERIMENT SETTINGS =====")
-    print(f"Source dir: {source_dir}")
+    print(f"Source dir            : {source_dir}")
     print(f"Outputs (SURVEYS_ROOT): {surveys_root}")
-    print(f"WebODM Node ID: {node_id}")
-    print(f"Skip Task 1 WebODM: {args.skip_task1_webodm}")
-    print(f"Skip Task 2 WebODM: {args.skip_task2_webodm}")
-    print(f"Task 1 bounded     : {args.task1_bounded}")
+    print(f"WebODM Node ID        : {node_id}")
+    print(f"Skip Task 1 WebODM    : {args.skip_task1_webodm}")
+    print(f"Skip Task 2 WebODM    : {args.skip_task2_webodm}")
+    print(f"Task 1 bounded        : {args.task1_bounded}")
     print("===============================\n")
-    
 
     pipeline = RGBPipeline(
-    base_dir=Path("."),
-    config=config,
-    source_dir=source_dir,
-    surveys_root=surveys_root,
-    year=args.year,
-    run_id=args.run_id,
-    survey_id_override=survey_id_override,
-    task_name_overrides=task_name_overrides,
-    export_name_overrides=export_name_overrides,
-    crossrun_enabled_override=crossrun_enabled_override,
-    use_year_subdir_override=use_year_subdir_override,
-    skip_task1_webodm=args.skip_task1_webodm, # TEMPORARY
-    skip_task2_webodm=args.skip_task2_webodm, # TEMPORARY
-    task1_bounded=args.task1_bounded, # TEMPORARY
+        base_dir=Path("."),
+        config=config,
+        source_dir=source_dir,
+        surveys_root=surveys_root,
+        year=args.year,
+        run_id=args.run_id,
+        survey_id_override=survey_id_override,
+        task_name_overrides=task_name_overrides,
+        export_name_overrides=export_name_overrides,
+        crossrun_enabled_override=crossrun_enabled_override,
+        use_year_subdir_override=use_year_subdir_override,
+        skip_task1_webodm=args.skip_task1_webodm,
+        skip_task2_webodm=args.skip_task2_webodm,
+        task1_bounded=args.task1_bounded,
+        force_segregation=(args.skip_task1_webodm or args.task1_bounded),
     )
 
     result = pipeline.run(resume=args.resume)

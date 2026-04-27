@@ -46,6 +46,7 @@ class RGBPipeline:
         skip_task1_webodm: bool = False, # TEMPORARY
         skip_task2_webodm: bool = False, # TEMPORARY
         task1_bounded: bool = False, # TEMPORARY
+        force_segregation: bool = False, # TEMPORARY
     ):
         self.base_dir = Path(base_dir)
         self.config = config
@@ -66,6 +67,7 @@ class RGBPipeline:
         self.skip_task1_webodm = skip_task1_webodm # TEMPORARY
         self.skip_task2_webodm = skip_task2_webodm # TEMPORARY
         self.task1_bounded = task1_bounded # TEMPORARY
+        self.force_segregation = force_segregation # TEMPORARY
 
         self.loggers: Dict[str, logging.Logger] = {
             "pipeline": get_logger(
@@ -358,6 +360,7 @@ class RGBPipeline:
                 if self.use_year_subdir_override is not None
                 else bool(self.config.get("experiment", {}).get("use_year_subdir", True))
             ),
+            force=self.force_segregation,
         )
 
         self.survey_id = summary["survey_id"]

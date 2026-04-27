@@ -3,9 +3,13 @@ Remove-Item .\data\pipeline.db -Force
 
 python -m tests.test_rgb_pipeline
 
-Experiment run code = python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps_p45" --year 2026 
+Default run = python -m experiments.experiments --survey "BCO-103_24.6Ha_A2S_80m_85f75s_5mps" --year 2026 
+
+Resume = python -m experiments.experiments --survey "TLW-001_6.3Ha_A2S_40m_85f75s_3mps" --year 2026 --resume --run-id 
                       
-python -m experiments.experiments --survey "TANGLAW_A2S_6.3Hai_12.7Hac_60m_85f75s_14.5kph_2sFrame" --year 2026 --skip-task1-webodm
+TASK 3 - python -m experiments.experiments --survey "BSBG-1I_3.9Hai_9.7Hac_60m_85f75s_14.5kph_2sFrame" --year 2026 --skip-task1-webodm
+
+TASK 4 - python -m experiments.experiments --survey "BSBG-1I_3.9Hai_9.7Hac_60m_85f75s_14.5kph_2sFrame" --year 2026 --skip-task2-webodm --task1-bounded
 
 
-
+python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps" --year 2026 --skip-task2-webodm --task1-bounded
