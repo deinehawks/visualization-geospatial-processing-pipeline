@@ -185,6 +185,13 @@ def main():
             "Task is named T4 to distinguish outputs from a standard T1 run."
         ),
     )
+    parser.add_argument( # EXP-RGB-05
+    "--run-number",
+    type=int,
+    default=None,
+    help="Run number suffix appended to task names (e.g. 1 → T1-R1). "
+         "Multiple runs share the same survey folder.",
+)
 
     args = parser.parse_args()
 
@@ -217,6 +224,7 @@ def main():
             args.survey,
             crossrun_enabled_override,
             naming_mode=naming_mode,
+            run_number=args.run_number,
         )
 
         survey_id_override = names.base_id
@@ -277,9 +285,6 @@ def main():
         print(f"Resolved Task 2    : {task_name_overrides.get('task2', '—')}")
         print(f"Cross-run enabled  : {crossrun_enabled_override}")
         print(f"Naming mode        : {naming_mode}")
-        print(f"Skip Task 1        : {args.skip_task1_webodm}")
-        print(f"Skip Task 2        : {args.skip_task2_webodm}")
-        print(f"Task 1 bounded     : {args.task1_bounded}")
 
     field_data_root = Path(config["paths"]["field_data_root"])
     surveys_root    = Path(config["paths"]["surveys_root"])
@@ -296,6 +301,7 @@ def main():
     print(f"Skip Task 1 WebODM    : {args.skip_task1_webodm}")
     print(f"Skip Task 2 WebODM    : {args.skip_task2_webodm}")
     print(f"Task 1 bounded        : {args.task1_bounded}")
+    print(f"Run number         : {args.run_number or '—'}")
     print("===============================\n")
 
     pipeline = RGBPipeline(

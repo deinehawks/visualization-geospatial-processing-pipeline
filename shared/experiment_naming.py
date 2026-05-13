@@ -24,6 +24,7 @@ def resolve_rgb_exp01_names(
     flight_test_code: str,
     crossrun_enabled: bool,
     naming_mode: str = "altitude",
+    run_number: int | None = None,  # EXP-RGB-05
 ) -> ExperimentNames:
     """
     Resolve all task names and export IDs for an RGB experiment run.
@@ -53,10 +54,11 @@ def resolve_rgb_exp01_names(
     filter_tag = "F" if crossrun_enabled else "NF"
     suffix = "-DJIFP" if has_djifp else ""
 
-    site_code = parts[0]
-    aircraft   = parts[2]
-    speed      = parts[5] if len(parts) > 5 else ""
-    angle      = parts[4] if len(parts) > 4 else ""
+    site_code = parts[0]   
+    aircraft  = parts[2]   
+    altitude  = parts[3]   
+    speed     = parts[5] if len(parts) > 5 else ""   
+    angle     = parts[6] if len(parts) > 6 else ""   
 
     # Altitude: find first token matching \d+m anywhere in the parts list
     altitude = next(
@@ -75,7 +77,10 @@ def resolve_rgb_exp01_names(
         stem = f"RGB-{site_code}-{aircraft}-{filter_tag}"
 
     elif naming_mode == "angle":
-        stem = f"RGB-{site_code}-{aircraft}-{angle}-{filter_tag}"
+        if angle:
+            stem = f"RGB-{site_code}-{aircraft}-{angle}-{filter_tag}"
+        else:
+            stem = f"RGB-{site_code}-{aircraft}-{filter_tag}"
 
     elif naming_mode == "speed":
         if not altitude:
@@ -89,13 +94,15 @@ def resolve_rgb_exp01_names(
             f"Unknown naming_mode={naming_mode!r}. "
             "Expected 'altitude', 'site', 'speed', or 'angle'."
         )
-
+    
     base_id = f"{stem}{suffix}"
+ 
+    run_suffix = f"-R{run_number}" if run_number is not None else "" # EXP-RGB-05
 
     task1 = f"{stem}-T1{suffix}"   # unbounded
     task2 = f"{stem}-T2{suffix}"   # bounded
     task3 = f"{stem}-T3{suffix}"
-    task4 = f"{stem}-T4{suffix}"
+    task4 = f"{stem}-T4{run_suffix}{suffix}"
 
     return ExperimentNames(
         base_id=base_id,

@@ -3,13 +3,30 @@ Remove-Item .\data\pipeline.db -Force
 
 python -m tests.test_rgb_pipeline
 
-Default run = python -m experiments.experiments --survey "BCO-103_24.6Ha_A2S_80m_85f75s_5mps" --year 2026 
+Default run = python -m experiments.experiments --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps" --year 2026 
 
 Resume = python -m experiments.experiments --survey "TLW-001_6.3Ha_A2S_40m_85f75s_3mps" --year 2026 --resume --run-id 
                       
 TASK 3 - python -m experiments.experiments --survey "BSBG-1I_3.9Hai_9.7Hac_60m_85f75s_14.5kph_2sFrame" --year 2026 --skip-task1-webodm
 
-TASK 4 - python -m experiments.experiments --survey "BSBG-1I_3.9Hai_9.7Hac_60m_85f75s_14.5kph_2sFrame" --year 2026 --skip-task2-webodm --task1-bounded
+TASK 4 - python -m experiments.experiments --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps" --year 2026 --skip-task2-webodm --task1-bounded
 
 
-python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps" --year 2026 --skip-task2-webodm --task1-bounded
+# EXP-RGB-05
+python -m experiments.experiments --survey "BCO-005_5.4Ha_M3C_60m_85f75s_5mps_p45" --year 2026 --skip-task2-webodm --task1-bounded --run-number 3
+
+
+RESUME THIS RUNS!
+should be NF and EXPERIMENT_ENABLED=true
+python -m experiments.experiments --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps" --year 2026 --resume --run-id 405445ba-2f06-48df-abc6-8905af940813 - QGIS left
+python -m experiments.experiments --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps" --year 2026 --skip-task2-webodm --task1-bounded - qgis left
+
+python -m experiments.experiments --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id 0c101e2b-85b4-4e0a-8563-4967bab69914 - qgis left (change survey path)
+
+
+RUN THIS ON FRIDAY MAY 07, 2026
+
+BCO-102_32Ha_A2S_100m_85f75s_7mps and BCO-101_33.8Ha_A2S_100m_85f75s_7mps
+Use Default Run and make EXPERIMENT_ENABLED to false
+
+running: 

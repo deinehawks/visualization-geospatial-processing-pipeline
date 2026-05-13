@@ -6,6 +6,8 @@ taskkill /F /IM "Docker Desktop.exe"
 taskkill /F /IM "com.docker.backend.exe"
 net stop com.docker.service
 
+wsl --terminate docker-desktop
+
 2. Restart WSL (VERY important)
 wsl --shutdown
 

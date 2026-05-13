@@ -1426,7 +1426,7 @@ class RGBPipeline:
         allowed_stages = {
             # alias          : webodm internal name
             "dataset": "dataset",
-            "load_dataset": "dataset",
+            "load_dataset": "load_dataset",
             "sfm": "opensfm",
             "opensfm": "opensfm",
             "structure_from_motion": "opensfm",
