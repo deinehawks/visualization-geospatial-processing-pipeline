@@ -4,6 +4,7 @@ from .config import load_pipeline_config
 from .db.repo import PipelineRepo
 from .stage_runner import StageRunner
 from .experiment_naming import ExperimentNames, resolve_rgb_exp01_names
+from .pipeline_control import PipelineControl
 
 __all__ = [
     "get_logger",
@@ -19,4 +20,5 @@ __all__ = [
     "StageRunner",
     "ExperimentNames",
     "resolve_rgb_exp01_names",
+    "PipelineControl",
 ]

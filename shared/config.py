@@ -1,3 +1,4 @@
+#config.py
 from __future__ import annotations
 
 from pathlib import Path
@@ -154,6 +155,7 @@ def load_pipeline_config() -> dict:
             "node_id": read_int_env("WEBODM_NODE_ID", 0, minimum=1),
             "task1_options": read_json_env("WEBODM_TASK1_OPTIONS_JSON", {}),
             "task2_options": read_json_env("WEBODM_TASK2_OPTIONS_JSON", {}),
+            "task4_options": read_json_env("WEBODM_TASK4_OPTIONS_JSON", {}),
         },
         "qgis": {
             "enabled": read_bool_env("QGIS_ENABLED", True),

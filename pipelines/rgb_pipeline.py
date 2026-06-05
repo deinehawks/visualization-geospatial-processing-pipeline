@@ -1,8 +1,9 @@
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List, Tuple
-from shared import get_logger, PipelineRepo, db_path, StageRunner
+from shared import get_logger, PipelineRepo, db_path, StageRunner, PipelineControl
 from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
 
@@ -68,7 +69,8 @@ class RGBPipeline:
         self.skip_task2_webodm = skip_task2_webodm # TEMPORARY
         self.task1_bounded = task1_bounded # TEMPORARY
         self.force_segregation = force_segregation # TEMPORARY
-
+        self.control = PipelineControl(self.base_dir)
+        
         self.loggers: Dict[str, logging.Logger] = {
             "pipeline": get_logger(
                 "rgb.pipeline",
@@ -325,24 +327,30 @@ class RGBPipeline:
     def _should_pause(self) -> bool:
         return self._pause_flag_path().exists()
 
-    def _check_pause_or_raise(self, stage_name: str) -> None:
-        if not self._should_pause():
-            return
-
-        reason = f"pause.flag detected before stage '{stage_name}'"
-        self.loggers["pipeline"].warning(f"⏸ PAUSE  | {reason}")
-
+    def _check_control_or_raise(self, stage_name: str) -> None:
         try:
-            self.repo.mark_run_paused(
-                self.run_id,
-                paused_after_stage=stage_name,
-                reason="pause_flag",
-            )
-        except Exception:
-            self.loggers["pipeline"].exception(
-                "Failed to mark run as paused in DB")
+            self.control.check_or_raise()
+        except RuntimeError as e:
+            if str(e) == "__PIPELINE_PAUSED__":
+                reason = f"pause requested during/before stage '{stage_name}'"
+                self.loggers["pipeline"].warning(f"⏸ PAUSE | {reason}")
 
-        raise RuntimeError("__PIPELINE_PAUSED__")
+                try:
+                    self.repo.mark_run_paused(
+                        self.run_id,
+                        paused_after_stage=stage_name,
+                        reason="pause_hotkey",
+                    )
+                except Exception:
+                    self.loggers["pipeline"].exception("Failed to mark run as paused in DB")
+
+                raise
+
+            if str(e) == "__PIPELINE_ABORTED__":
+                self.loggers["pipeline"].error(f"🛑 ABORT | abort requested during/before stage '{stage_name}'")
+                raise
+
+            raise
 
     # STAGES
     def stage_data_segregation(self) -> Dict[str, Any]:
@@ -613,9 +621,14 @@ class RGBPipeline:
         if skip_task1 and task1_bounded:
             logger.warning("task1_bounded is set but Task 1 is skipped; ignoring task1_bounded.")
 
-        # Dynamic task-specific export folders
-        task1_root_dir = rgb_path / task1_export_id
-        task2_root_dir = rgb_path / task2_export_id
+        production_mode = not bool(self.config.get("experiment", {}).get("enabled", False))
+
+        if production_mode:
+            task1_root_dir = rgb_path
+            task2_root_dir = rgb_path
+        else:
+            task1_root_dir = rgb_path / task1_export_id
+            task2_root_dir = rgb_path / task2_export_id
 
         task1_ortho_dir = task1_root_dir / "ortho"
         task1_odm_dir = task1_root_dir / "odm"
@@ -753,7 +766,7 @@ class RGBPipeline:
                                 f"(id={current_task1_id}) — waiting for completion"
                             )
                             t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                                project_id, current_task1_id, live=False
+                                project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                             )
 
                         else:
@@ -789,7 +802,7 @@ class RGBPipeline:
                                 processing_node=webodm_cfg.get("node_id"),
                             )
                             t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                                project_id, current_task1_id, live=False
+                                project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                             )
 
                     elif prev_task1.get("id") and prev_project_id:
@@ -799,7 +812,7 @@ class RGBPipeline:
                             f"(id={current_task1_id}) — checking WebODM status"
                         )
                         t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                            project_id, current_task1_id, live=False
+                            project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
 
                     else:
@@ -823,7 +836,7 @@ class RGBPipeline:
                             processing_node=webodm_cfg.get("node_id"),
                         )
                         t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                            project_id, current_task1_id, live=False
+                            project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
 
                     self._save_webodm_checkpoint({
@@ -967,7 +980,7 @@ class RGBPipeline:
                             f"(id={current_task2_id}) — waiting for completion"
                         )
                         t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                            project_id, current_task2_id, live=False
+                            project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
 
                     else:
@@ -991,7 +1004,7 @@ class RGBPipeline:
                             processing_node=webodm_cfg.get("node_id"),
                         )
                         t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                            project_id, current_task2_id, live=False
+                            project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
 
                 elif prev_task2.get("id") and prev_project_id:
@@ -1001,7 +1014,7 @@ class RGBPipeline:
                         f"(id={current_task2_id}) — checking WebODM status"
                     )
                     t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                        project_id, current_task2_id, live=False
+                        project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                     )
 
                 else:
@@ -1013,7 +1026,7 @@ class RGBPipeline:
                         processing_node=webodm_cfg.get("node_id"),
                     )
                     t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                        project_id, current_task2_id, live=False
+                        project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                     )
 
             result["task2"] = {
@@ -1397,6 +1410,127 @@ class RGBPipeline:
                 "tiles_dir": str(tiles_round_dir) if (tiles_enabled and bounded_ok) else None,
             },
         }
+    
+    def run_task4_fallback(self) -> Dict[str, Any]:
+        logger = self.loggers["webodm"]
+        logger.info("Running WebODM Task 4 fallback inside same project")
+
+        survey_id = self._require_survey_id()
+        rgb_path = self._require_rgb_path()
+
+        web = self.state.get("webodm") or {}
+        project_id = web.get("project_id")
+        project_name = web.get("project_name") or survey_id
+
+        if not project_id:
+            raise RuntimeError("Task 4 fallback requires existing WebODM project_id.")
+
+        boundary_geojson_path = self.state.get("boundary_geojson_path")
+        if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+            raise RuntimeError("Task 4 fallback requires boundary GeoJSON.")
+
+        ds = self.state.get("data_segregation") or {}
+        dirs = ds.get("dirs") or {}
+        image_folder = Path(dirs.get("path") or (rgb_path / "images" / "path"))
+
+        boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
+
+        webodm_cfg = self.config["webodm"]
+        exports_cfg = self.config.get("exports", {})
+        qgis_tools_cfg = (exports_cfg.get("tools") or {})
+
+        task4_options = dict(
+            webodm_cfg.get("task4_options", {})
+        )
+
+        task4_options["boundary"] = boundary_geojson
+        task4_name = f"{survey_id}-RGB--task4"
+        task4_root_dir = rgb_path / survey_id
+        task4_ortho_dir = task4_root_dir / "ortho"
+        task4_ortho_dir.mkdir(parents=True, exist_ok=True)
+
+        processor = WebODMProcessor(
+            url=webodm_cfg["url"],
+            username=webodm_cfg["username"],
+            password=webodm_cfg["password"],
+            logger=logger,
+        )
+
+        existing_task4_id = processor.find_task_by_name(int(project_id), task4_name)
+
+        if existing_task4_id:
+            logger.info(f"Found existing Task 4: {existing_task4_id}")
+            current_task4_id = existing_task4_id
+            status = processor.get_task_status(int(project_id), current_task4_id)
+
+            if status != "completed":
+                success, runtime, _info = processor.wait_for_completion(
+                    int(project_id),
+                    current_task4_id,
+                    live=False,
+                    control_check=lambda: self._check_control_or_raise("webodm"),
+                )
+            else:
+                success = True
+                runtime = 0.0
+        else:
+            current_task4_id = processor.create_task_with_images(
+                project_id=int(project_id),
+                name=task4_name,
+                image_folder=str(image_folder),
+                options=task4_options,
+                processing_node=webodm_cfg.get("node_id"),
+            )
+
+            success, runtime, _info = processor.wait_for_completion(
+                int(project_id),
+                current_task4_id,
+                live=False,
+                control_check=lambda: self._check_control_or_raise("webodm"),
+            )
+
+        task4_state = {
+            "id": str(current_task4_id),
+            "name": task4_name,
+            "success": bool(success),
+            "runtime_seconds": float(runtime),
+        }
+
+        web["task4"] = task4_state
+
+        downloads = web.setdefault("downloads", {})
+        task4_downloads = downloads.setdefault("task4", {})
+
+        if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
+            ortho_cfg = exports_cfg["ortho"]
+            epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+            candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
+
+            out_path = processor.export_orthomosaic(
+                int(project_id),
+                str(current_task4_id),
+                out_dir=task4_ortho_dir,
+                filename=f"{survey_id}.tif",
+                epsg=epsg,
+                candidates=candidates,
+                gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
+            )
+
+            if out_path:
+                task4_downloads["orthomosaic"] = str(out_path)
+                task4_downloads["epsg"] = epsg
+            else:
+                logger.warning("Could not download Task 4 orthomosaic.")
+
+        self.state["webodm"] = web
+
+        return {
+            "task4": task4_state,
+            "downloads": task4_downloads,
+            "project_id": project_id,
+            "project_name": project_name,
+        }
+    
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
@@ -1487,7 +1621,7 @@ class RGBPipeline:
                 restart_from=restart_from,
             )
             success, runtime, task_info = processor.wait_for_completion(
-                int(project_id), str(task_id_to_restart)
+                int(project_id), str(task_id_to_restart), control_check=lambda: self._check_control_or_raise("webodm"),
             )
 
             updated_task_state = {
@@ -1595,6 +1729,9 @@ class RGBPipeline:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
 
+        self.control.clear_abort()
+        self.control.start_hotkeys(pipeline_logger)
+
         # Resume a previously paused run
         try:
             r = self.repo.get_run(self.run_id)
@@ -1613,7 +1750,7 @@ class RGBPipeline:
             return (name in force_stages) or (not resume)
 
         try:
-            self._check_pause_or_raise("data_segregation")
+            self._check_control_or_raise("data_segregation")
             self.runner.run(
                 "data_segregation",
                 self.stage_data_segregation,
@@ -1623,7 +1760,7 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
-            self._check_pause_or_raise("cross_run_filter")
+            self._check_control_or_raise("cross_run_filter")
             self.runner.run(
                 "cross_run_filter",
                 self.stage_cross_run_image_filter,
@@ -1633,7 +1770,7 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
-            self._check_pause_or_raise("kml_boundary")
+            self._check_control_or_raise("kml_boundary")
             self.runner.run(
                 "kml_boundary",
                 self.stage_kml_boundary,
@@ -1643,7 +1780,7 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
-            self._check_pause_or_raise("webodm")
+            self._check_control_or_raise("webodm")
             self.runner.run(
                 "webodm",
                 self.stage_webodm,
@@ -1654,7 +1791,7 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
-            self._check_pause_or_raise("quality_gate")
+            self._check_control_or_raise("quality_gate")
             self.runner.run(
                 "quality_gate",
                 self.stage_quality_gate,
@@ -1668,7 +1805,7 @@ class RGBPipeline:
             if q.get("passed") is False:
                 raise RuntimeError("Pipeline stopped: Quality Gate failed.")
 
-            self._check_pause_or_raise("qgis")
+            self._check_control_or_raise("qgis")
             self.runner.run(
                 "qgis",
                 self.stage_qgis,
@@ -1722,8 +1859,27 @@ class RGBPipeline:
                     )
                 return self.state
 
-            raise
+            if str(e) == "__PIPELINE_ABORTED__":
+                self.state.update(
+                    {"success": False, "aborted": True, "error": "aborted_by_hotkey"}
+                )
 
+                total_runtime = time.perf_counter() - total_start
+
+                try:
+                    self.repo.mark_run_finished(
+                        self.run_id,
+                        success=False,
+                        total_runtime_seconds=total_runtime,
+                    )
+                except Exception:
+                    pipeline_logger.exception("Failed to mark aborted run as finished")
+
+                pipeline_footer(pipeline_logger, total_runtime, success=False)
+                return self.state
+        
+            raise
+        
         # ── Failure ───────────────────────────────────────────────
         except Exception as e:
             self.state.update({"success": False, "error": str(e)})

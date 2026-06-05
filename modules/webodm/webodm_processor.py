@@ -175,6 +175,7 @@ class WebODMProcessor:
         timeout_seconds: Optional[int] = None,
         live: bool = False,
         max_consecutive_poll_errors: int = 30,  
+        control_check=None,
     ) -> Tuple[bool, float, Dict[str, Any]]:
         """
         Poll WebODM task until terminal status: completed / failed / canceled.
@@ -205,6 +206,8 @@ class WebODMProcessor:
                 pass
 
         while True:
+            if control_check:
+                control_check()
             # timeout guard
             if timeout_seconds is not None and (time.time() - start) > float(timeout_seconds):
                 _finalize_live()
