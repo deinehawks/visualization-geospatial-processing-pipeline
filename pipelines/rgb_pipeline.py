@@ -69,8 +69,11 @@ class RGBPipeline:
         self.skip_task2_webodm = skip_task2_webodm # TEMPORARY
         self.task1_bounded = task1_bounded # TEMPORARY
         self.force_segregation = force_segregation # TEMPORARY
-        self.control = PipelineControl(self.base_dir)
-        
+        self.control = PipelineControl(
+            self.base_dir,
+            self.run_id,
+        )
+
         self.loggers: Dict[str, logging.Logger] = {
             "pipeline": get_logger(
                 "rgb.pipeline",
@@ -342,16 +345,19 @@ class RGBPipeline:
                         reason="pause_hotkey",
                     )
                 except Exception:
-                    self.loggers["pipeline"].exception("Failed to mark run as paused in DB")
+                    self.loggers["pipeline"].exception(
+                        "Failed to mark run as paused in DB"
+                    )
 
                 raise
 
             if str(e) == "__PIPELINE_ABORTED__":
-                self.loggers["pipeline"].error(f"🛑 ABORT | abort requested during/before stage '{stage_name}'")
+                self.loggers["pipeline"].error(
+                    f"🛑 ABORT | abort requested during/before stage '{stage_name}'"
+                )
                 raise
 
             raise
-
     # STAGES
     def stage_data_segregation(self) -> Dict[str, Any]:
         logger = self.loggers["segregation"]
@@ -1729,7 +1735,12 @@ class RGBPipeline:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
 
-        self.control.clear_abort()
+        if not resume:
+            self.control.cleanup_flags()
+        else:
+            self.control.clear_abort()
+            self.control.clear_pause()
+
         self.control.start_hotkeys(pipeline_logger)
 
         # Resume a previously paused run
@@ -1825,6 +1836,7 @@ class RGBPipeline:
                     self.survey_id, success=True, total_runtime_seconds=total_runtime
                 )
 
+            self.control.cleanup_flags()
             pipeline_footer(pipeline_logger, total_runtime, success=True)
             return self.state
 
@@ -1861,7 +1873,11 @@ class RGBPipeline:
 
             if str(e) == "__PIPELINE_ABORTED__":
                 self.state.update(
-                    {"success": False, "aborted": True, "error": "aborted_by_hotkey"}
+                    {
+                        "success": False,
+                        "aborted": True,
+                        "error": "aborted_by_hotkey",
+                    }
                 )
 
                 total_runtime = time.perf_counter() - total_start
@@ -1875,6 +1891,17 @@ class RGBPipeline:
                 except Exception:
                     pipeline_logger.exception("Failed to mark aborted run as finished")
 
+                if self.survey_id:
+                    try:
+                        self.repo.mark_survey_finished(
+                            self.survey_id,
+                            success=False,
+                            total_runtime_seconds=total_runtime,
+                        )
+                    except Exception:
+                        pipeline_logger.exception("Failed to mark aborted survey as finished")
+
+                self.control.cleanup_flags()
                 pipeline_footer(pipeline_logger, total_runtime, success=False)
                 return self.state
         

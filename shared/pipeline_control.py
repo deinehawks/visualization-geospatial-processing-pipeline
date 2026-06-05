@@ -1,15 +1,17 @@
 from __future__ import annotations
 
-from pathlib import Path
 import datetime
+from pathlib import Path
 
 
 class PipelineControl:
-    def __init__(self, base_dir: Path):
+    def __init__(self, base_dir: Path, run_id: str):
         self.base_dir = Path(base_dir)
+        self.run_id = str(run_id)
         self.data_dir = self.base_dir / "data"
-        self.pause_flag = self.data_dir / "pause.flag"
-        self.abort_flag = self.data_dir / "abort.flag"
+
+        self.pause_flag = self.data_dir / f"pause_{self.run_id}.flag"
+        self.abort_flag = self.data_dir / f"abort_{self.run_id}.flag"
 
     def start_hotkeys(self, logger) -> None:
         try:
@@ -23,25 +25,36 @@ class PipelineControl:
         keyboard.add_hotkey("ctrl+shift+p", lambda: self.request_pause(logger))
         keyboard.add_hotkey("ctrl+shift+q", lambda: self.request_abort(logger))
 
-        logger.info("Hotkeys enabled: CTRL+SHIFT+P = pause, CTRL+SHIFT+Q = abort")
+        logger.info(
+            f"Hotkeys enabled for run {self.run_id}: "
+            "CTRL+SHIFT+P = pause, CTRL+SHIFT+Q = abort"
+        )
 
     def request_pause(self, logger) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.pause_flag.write_text(
-            f"pause requested at {datetime.datetime.now().isoformat()}",
+            f"pause requested for run {self.run_id} at {datetime.datetime.now().isoformat()}",
             encoding="utf-8",
         )
-        logger.warning("Pause requested. Pipeline will pause safely.")
+        logger.warning(f"Pause requested for run {self.run_id}. Pipeline will pause safely.")
 
     def request_abort(self, logger) -> None:
+        self.data_dir.mkdir(parents=True, exist_ok=True)
         self.abort_flag.write_text(
-            f"abort requested at {datetime.datetime.now().isoformat()}",
+            f"abort requested for run {self.run_id} at {datetime.datetime.now().isoformat()}",
             encoding="utf-8",
         )
-        logger.error("Abort requested. Pipeline will stop.")
+        logger.error(f"Abort requested for run {self.run_id}. Pipeline will stop.")
 
     def clear_abort(self) -> None:
-        if self.abort_flag.exists():
-            self.abort_flag.unlink()
+        self.abort_flag.unlink(missing_ok=True)
+
+    def clear_pause(self) -> None:
+        self.pause_flag.unlink(missing_ok=True)
+
+    def cleanup_flags(self) -> None:
+        self.pause_flag.unlink(missing_ok=True)
+        self.abort_flag.unlink(missing_ok=True)
 
     def check_or_raise(self) -> None:
         if self.abort_flag.exists():

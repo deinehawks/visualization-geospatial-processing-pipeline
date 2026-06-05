@@ -207,7 +207,7 @@ class WebODMProcessor:
 
         while True:
             if control_check:
-                control_check()
+                control_check() 
             # timeout guard
             if timeout_seconds is not None and (time.time() - start) > float(timeout_seconds):
                 _finalize_live()
@@ -308,6 +308,7 @@ class WebODMProcessor:
         progress_every_percent: float = 2.0,   # log every +2%
         live: bool = True,                     # single-line live progress in terminal
         cancel_poll_seconds: int = 3,          # how often to check WebODM for cancel
+        control_check=None,
     ) -> str:
         from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
         import threading
@@ -464,6 +465,9 @@ class WebODMProcessor:
 
             def _callback(monitor: MultipartEncoderMonitor) -> None:
                 nonlocal last_logged_percent
+
+                if control_check:
+                    control_check()    
 
                 if cancel_event.is_set():
                     raise RuntimeError(
