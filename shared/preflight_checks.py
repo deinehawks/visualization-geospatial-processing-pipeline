@@ -106,8 +106,9 @@ class PipelinePreflight:
                 "source survey folder is missing",
                 details=[f"Source directory: {self.source_dir}"],
                 suggestions=[
-                    "Check FIELD_DATA_ROOT and the --survey folder name.",
-                    "Make sure the network drive or storage path is mounted.",
+                    "Check if the field-data drive is mounted.",
+                    "Check if the --survey folder name is correct.",
+                    "Confirm FIELD_DATA_ROOT points to the correct field-data location.",
                 ],
             )
 
@@ -131,10 +132,14 @@ class PipelinePreflight:
             self._fail(
                 stage,
                 "no JPG/JPEG images were found in the source survey folder",
-                details=[f"Source directory: {self.source_dir}"],
+                details=[
+                    f"Source directory: {self.source_dir}",
+                    "Expected files: .jpg or .jpeg",
+                ],
                 suggestions=[
-                    "Verify that the survey folder contains drone images.",
-                    "Check if the images were copied to the correct field-data folder.",
+                    "Copy the drone JPEG images into the survey folder.",
+                    "Check if the images are inside a nested folder.",
+                    "Confirm the image file extensions are .jpg or .jpeg.",
                 ],
             )
 
@@ -148,7 +153,10 @@ class PipelinePreflight:
             self._fail(
                 stage,
                 "no KML/KMZ boundary file was found in the source survey folder",
-                details=[f"Source directory: {self.source_dir}"],
+                details=[
+                    f"Source directory: {self.source_dir}",
+                    "Expected files: .kml or .kmz",
+                ],
                 suggestions=[
                     "Add the mission boundary KML/KMZ file to the survey folder.",
                     "Confirm that the boundary file extension is .kml or .kmz.",
@@ -196,8 +204,9 @@ class PipelinePreflight:
                 "raw image folder is missing",
                 details=[f"Expected raw image folder: {raw_dir}"],
                 suggestions=[
-                    "Run or resume from the data_segregation stage first.",
-                    "Check if the survey output folder was moved or deleted.",
+                    "Run the data_segregation stage first.",
+                    "Check if the survey output folder was deleted or moved.",
+                    "Start a new run if the saved checkpoint points to an old folder.",
                 ],
             )
 
@@ -211,9 +220,13 @@ class PipelinePreflight:
             self._fail(
                 stage,
                 "raw image folder does not contain JPG/JPEG images",
-                details=[f"Raw image folder: {raw_dir}"],
+                details=[
+                    f"Raw image folder: {raw_dir}",
+                    "Expected files: .jpg or .jpeg",
+                ],
                 suggestions=[
-                    "Re-run data segregation or verify the copied raw image files."
+                    "Re-run data_segregation.",
+                    "Check if raw images were deleted after a previous test run.",
                 ],
             )
 
@@ -237,10 +250,14 @@ class PipelinePreflight:
         if not boundary_dir or not boundary_dir.exists():
             self._fail(
                 stage,
-                "boundary folder is missing",
-                details=[f"Expected boundary folder: {boundary_dir}"],
+                "boundary folder does not contain a KML/KMZ file",
+                details=[
+                    f"Boundary folder: {boundary_dir}",
+                    "Expected files: .kml or .kmz",
+                ],
                 suggestions=[
-                    "Run or resume from the data_segregation stage first."
+                    "Re-run data_segregation.",
+                    "Manually copy the boundary KML/KMZ file into the boundary folder.",
                 ],
             )
 
@@ -295,8 +312,9 @@ class PipelinePreflight:
                 "filtered image folder is missing",
                 details=[f"Expected image folder: {image_dir}"],
                 suggestions=[
-                    "Run or resume from the cross_run_filter stage first.",
-                    "Check if the survey output folder was moved or deleted.",
+                    "Run the cross_run_filter stage first.",
+                    "Check if the survey output folder was deleted or moved.",
+                    "Start a new run if this run ID points to an old survey folder.",
                 ],
             )
 
@@ -328,8 +346,9 @@ class PipelinePreflight:
                     "boundary GeoJSON is missing for bounded WebODM Task 2",
                     details=[f"Boundary GeoJSON: {boundary_geojson}"],
                     suggestions=[
-                        "Run or resume from the kml_boundary stage first.",
-                        "Confirm that KML/KMZ conversion to GeoJSON completed successfully.",
+                       "Run the kml_boundary stage first.",
+                        "Check if KML/KMZ conversion completed successfully.",
+                        "Confirm the boundary file is valid.",
                     ],
                 )
 
@@ -489,7 +508,7 @@ class PipelinePreflight:
                 "WebODM server is not reachable",
                 details=[
                     f"WebODM URL: {url}",
-                    f"Error: {e}",
+                    f"Reason: {self._friendly_request_error(e)}",
                 ],
                 suggestions=[
                     "Check if WebODM Docker is running.",
@@ -651,6 +670,28 @@ class PipelinePreflight:
             return not any(word in status for word in offline_words)
 
         return True
+    
+    @staticmethod
+    def _friendly_request_error(e: Exception) -> str:
+        if isinstance(e, requests.exceptions.ConnectionError):
+            return (
+                "Connection refused or server unreachable. "
+                "WebODM is probably stopped, Docker is not running, "
+                "or WEBODM_URL is incorrect."
+            )
+
+        if isinstance(e, requests.exceptions.ReadTimeout):
+            return (
+                "WebODM did not respond before the timeout. "
+                "The server may be overloaded or starting up."
+            )
+
+        if isinstance(e, requests.exceptions.HTTPError):
+            response = getattr(e, "response", None)
+            status_code = getattr(response, "status_code", None)
+            return f"WebODM returned HTTP {status_code}."
+
+        return str(e).splitlines()[0][:300]
 
     # Helpers
 
@@ -667,7 +708,7 @@ class PipelinePreflight:
             title=title,
             details=list(details or []),
             suggestions=list(suggestions or []),
-        )
+        ) from None
 
     def _warn(self, message: str) -> None:
         if self.logger:

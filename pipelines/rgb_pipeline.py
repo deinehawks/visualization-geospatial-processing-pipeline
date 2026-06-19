@@ -1958,28 +1958,83 @@ class RGBPipeline:
             pipeline_footer(pipeline_logger, total_runtime, success=True)
             return self.state
 
-        # ── Paused ────────────────────────────────────────────────
+        # ── Preflight Failed ──────────────────────────────────────
+        except PreflightError as e:
+            self.state.update(
+                {
+                    "success": False,
+                    "preflight_failed": True,
+                    "error": str(e),
+                }
+            )
+
+            total_runtime = time.perf_counter() - total_start
+
+            try:
+                self.repo.mark_run_finished(
+                    self.run_id,
+                    success=False,
+                    total_runtime_seconds=total_runtime,
+                )
+            except Exception:
+                pipeline_logger.exception(
+                    "Failed to mark preflight-failed run as finished"
+                )
+
+            if self.survey_id:
+                try:
+                    self.repo.mark_survey_finished(
+                        self.survey_id,
+                        success=False,
+                        total_runtime_seconds=total_runtime,
+                    )
+                except Exception:
+                    pipeline_logger.exception(
+                        "Failed to mark preflight-failed survey as finished"
+                    )
+
+            self.control.cleanup_flags()
+            pipeline_footer(pipeline_logger, total_runtime, success=False)
+
+            pipeline_logger.error("")
+            pipeline_logger.error(str(e))
+
+            return self.state
+
+        # ── Paused / Canceled / Aborted / Runtime Failure ─────────
         except RuntimeError as e:
             if str(e) == "__PIPELINE_PAUSED__":
                 self.state.update(
-                    {"success": False, "paused": True, "error": "paused_by_flag"})
+                    {
+                        "success": False,
+                        "paused": True,
+                        "error": "paused_by_flag",
+                    }
+                )
+
                 pipeline_paused(
                     pipeline_logger,
                     self.run_id,
                     after_stage=self.state.get("paused_after_stage", "?"),
                 )
-                # Clear only the pause flag (not abort) so a future --resume
-                # doesn't immediately re-trip __PIPELINE_PAUSED__ again.
+
+                # Clear only the pause flag so a future --resume
+                # does not immediately re-trigger __PIPELINE_PAUSED__.
                 self.control.clear_pause()
                 return self.state
 
             # ── Canceled (WebODM UI) ───────────────────────────────
             if str(e) == "__PIPELINE_CANCELED__":
                 self.state.update(
-                    {"success": False, "canceled": True,
-                        "error": "canceled_in_webodm_ui"}
+                    {
+                        "success": False,
+                        "canceled": True,
+                        "error": "canceled_in_webodm_ui",
+                    }
                 )
+
                 pipeline_canceled(pipeline_logger, self.run_id)
+
                 try:
                     self.repo.mark_run_paused(
                         self.run_id,
@@ -1990,8 +2045,10 @@ class RGBPipeline:
                     pipeline_logger.exception(
                         "Failed to mark run paused after WebODM cancel"
                     )
+
                 return self.state
 
+            # ── Aborted (Hotkey) ───────────────────────────────────
             if str(e) == "__PIPELINE_ABORTED__":
                 self.state.update(
                     {
@@ -2010,7 +2067,9 @@ class RGBPipeline:
                         total_runtime_seconds=total_runtime,
                     )
                 except Exception:
-                    pipeline_logger.exception("Failed to mark aborted run as finished")
+                    pipeline_logger.exception(
+                        "Failed to mark aborted run as finished"
+                    )
 
                 if self.survey_id:
                     try:
@@ -2020,14 +2079,48 @@ class RGBPipeline:
                             total_runtime_seconds=total_runtime,
                         )
                     except Exception:
-                        pipeline_logger.exception("Failed to mark aborted survey as finished")
+                        pipeline_logger.exception(
+                            "Failed to mark aborted survey as finished"
+                        )
 
                 self.control.cleanup_flags()
                 pipeline_footer(pipeline_logger, total_runtime, success=False)
                 return self.state
-        
-            raise
-        
+
+            # ── Other Runtime Failure ──────────────────────────────
+            self.state.update(
+                {
+                    "success": False,
+                    "error": str(e),
+                }
+            )
+
+            total_runtime = time.perf_counter() - total_start
+
+            try:
+                self.repo.mark_run_finished(
+                    self.run_id,
+                    success=False,
+                    total_runtime_seconds=total_runtime,
+                )
+            except Exception:
+                pipeline_logger.exception("Failed to mark run as failed")
+
+            if self.survey_id:
+                try:
+                    self.repo.mark_survey_finished(
+                        self.survey_id,
+                        success=False,
+                        total_runtime_seconds=total_runtime,
+                    )
+                except Exception:
+                    pipeline_logger.exception("Failed to mark survey as failed")
+
+            self.control.cleanup_flags()
+            pipeline_footer(pipeline_logger, total_runtime, success=False)
+            pipeline_logger.error(str(e))
+            return self.state
+
         # ── Failure ───────────────────────────────────────────────
         except Exception as e:
             self.state.update(
