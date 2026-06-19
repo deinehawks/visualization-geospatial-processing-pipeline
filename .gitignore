@@ -32,3 +32,10 @@ data/intermediate/
 data/final/
 data/cache/
 data/archive/
+
+# Generated map exports
+exports/
+
+# QGIS standalone runtime/style cache
+symbology-style.db
+symbology-style.db-*

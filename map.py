@@ -5,14 +5,41 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from dotenv import load_dotenv
-
 from modules.map_export.boundary_finder import parse_survey_list
 from modules.map_export import export_map_package
 
+def load_env_file(path: Path = Path(".env")) -> None:
+    """
+    Lightweight .env loader so map.py can run both in normal .venv
+    and inside QGIS/OSGeo4W Python where python-dotenv may not exist.
+    """
+    try:
+        from dotenv import load_dotenv  # type: ignore[reportMissingImports]
+
+        load_dotenv(path)
+        return
+
+    except ModuleNotFoundError:
+        pass
+
+    if not path.exists():
+        return
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+
+        if key and key not in os.environ:
+            os.environ[key] = value
 
 def main() -> None:
-    load_dotenv()
+    load_env_file()
 
     parser = argparse.ArgumentParser(
         description="Export a combined survey boundary map package from KMZ/KML files."
@@ -48,6 +75,25 @@ def main() -> None:
         "--output-root",
         default=None,
         help="Output root folder. Defaults to MAP_EXPORT_ROOT or exports/maps.",
+    )
+
+    parser.add_argument(
+        "--export-print",
+        action="store_true",
+        help="Export print-ready PDF and PNG preview using QGIS.",
+    )
+
+    parser.add_argument(
+        "--logo",
+        default=None,
+        help="Optional logo image path for the print layout.",
+    )
+
+    parser.add_argument(
+        "--dpi",
+        type=int,
+        default=200,
+        help="PNG preview export DPI.",
     )
 
     args = parser.parse_args()
@@ -101,6 +147,24 @@ def main() -> None:
     print(f"Style           : {result.style_json}")
     print("==============================")
     print()
+
+    if args.export_print:
+      from modules.map_export.qgis_print_exporter import export_qgis_print_layout
+
+      print("===== QGIS PRINT EXPORT =====")
+
+      print_result = export_qgis_print_layout(
+          package_dir=result.output_dir,
+          title=title,
+          logo_path=Path(args.logo) if args.logo else None,
+          dpi=args.dpi,
+      )
+
+      print(f"PDF     : {print_result['pdf']}")
+      print(f"Preview : {print_result['preview']}")
+      print(f"CRS     : {print_result['crs']}")
+      print("=============================")
+      print()
 
 
 if __name__ == "__main__":

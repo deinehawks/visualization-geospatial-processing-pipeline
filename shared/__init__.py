@@ -1,25 +1,15 @@
-from .logging import get_logger, survey_log_path
-from .paths import project_root, data_dir, logs_dir, db_path, survey_dir, survey_logs_dir
-from .config import load_pipeline_config
-from .db.repo import PipelineRepo
-from .stage_runner import StageRunner
-from .experiment_naming import ExperimentNames, resolve_rgb_exp01_names
-from .pipeline_control import PipelineControl
-from .preflight_checks import PipelinePreflight, PreflightError
+"""
+Shared utilities package.
 
-__all__ = [
-    "get_logger",
-    "survey_log_path",
-    "project_root",
-    "data_dir",
-    "logs_dir",
-    "db_path",
-    "survey_dir",
-    "survey_logs_dir",
-    "load_pipeline_config",
-    "PipelineRepo",
-    "StageRunner",
-    "ExperimentNames",
-    "resolve_rgb_exp01_names",
-    "PipelineControl",
-]
+Avoid eager imports here so standalone tools can import lightweight shared
+modules without loading optional pipeline dependencies.
+"""
+
+
+def load_pipeline_config(*args, **kwargs):
+    from .config import load_pipeline_config as _load_pipeline_config
+
+    return _load_pipeline_config(*args, **kwargs)
+
+
+__all__ = ["load_pipeline_config"]

@@ -1,14 +1,9 @@
-from .kml_boundary_setter.kml_boundary_setter import run_kml
-from .webodm.webodm_processor import WebODMProcessor
-from .cross_run_image_filter.cross_run_image_filter import run_filter
-from .data_segregation.data_segregation import run as run_data_segregation
-from .qgis import QGISTools
+"""
+Pipeline modules package.
 
-__all__ = [
-    "run_kml",
-    "WebODMProcessor",
-    "run_filter",
-    "run_data_segregation",
-    "QGISTools",
-]
+Keep this file lightweight. Do not import stage modules here because standalone
+tools such as map.py may run inside QGIS Python, where some pipeline
+dependencies may not be installed.
+"""
 
+__all__: list[str] = []
