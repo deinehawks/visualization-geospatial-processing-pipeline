@@ -53,10 +53,7 @@ def main() -> None:
 
         # production mode
         use_year_subdir_override=True,
-        export_name_overrides={
-            "task1": "",
-            "task2": "",
-        },
+        export_name_overrides=None, # using naming templates
 
         # run Task 2 only
         skip_task1_webodm=True,

@@ -323,13 +323,6 @@ class RGBPipeline:
         except Exception:
             logger.exception(f"Failed to clean upload cache: {cache_dir}")
 
-    # Pause helpers
-    def _pause_flag_path(self) -> Path:
-        return self.base_dir / "data" / "pause.flag"
-
-    def _should_pause(self) -> bool:
-        return self._pause_flag_path().exists()
-
     def _check_control_or_raise(self, stage_name: str) -> None:
         try:
             self.control.check_or_raise()
@@ -1675,6 +1668,37 @@ class RGBPipeline:
                 logger.warning("Quality gate FAILED by user.")
                 return {"passed": False, "restarts": restarts, "project_id": project_id}
 
+            if raw in ("fallback", "task4"):
+                logger.warning("User requested Task 4 fallback workflow.")
+                try:
+                    task4_result = self.run_task4_fallback()
+                except Exception:
+                    logger.exception("Task 4 fallback failed.")
+                    return {
+                        "passed": False,
+                        "restarts": restarts,
+                        "project_id": project_id,
+                        "task4_failed": True,
+                    }
+
+                task4_state = task4_result.get("task4") or {}
+                if task4_state.get("success"):
+                    logger.info("Task 4 fallback completed successfully.")
+                    return {
+                        "passed": True,
+                        "restarts": restarts,
+                        "project_id": project_id,
+                        "task4": task4_state,
+                    }
+
+                logger.warning("Task 4 fallback ran but did not succeed.")
+                return {
+                    "passed": False,
+                    "restarts": restarts,
+                    "project_id": project_id,
+                    "task4": task4_state,
+                }
+
             if raw == "restart":
                 res = restart_and_wait(
                     default_task_id, default_task_name, "dataset")
@@ -1722,9 +1746,9 @@ class RGBPipeline:
                 continue
 
             logger.warning(
-                "Unrecognised input. Use: yes | fail | restart | restart t1|t2 [stage]"
+                "Unrecognised input. Use: yes | fail | fallback | restart | restart t1|t2 [stage]"
             )
-
+            
     # RUN
     def run(
         self,
@@ -1850,6 +1874,9 @@ class RGBPipeline:
                     self.run_id,
                     after_stage=self.state.get("paused_after_stage", "?"),
                 )
+                # Clear only the pause flag (not abort) so a future --resume
+                # doesn't immediately re-trip __PIPELINE_PAUSED__ again.
+                self.control.clear_pause()
                 return self.state
 
             # ── Canceled (WebODM UI) ───────────────────────────────
