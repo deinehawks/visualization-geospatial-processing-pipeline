@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Mapping, Optional
+from typing import Any, Dict, Iterable, Mapping, Optional, NoReturn
 
 import requests
 
@@ -661,7 +661,7 @@ class PipelinePreflight:
         *,
         details: Optional[Iterable[str]] = None,
         suggestions: Optional[Iterable[str]] = None,
-    ) -> None:
+    ) -> NoReturn:
         raise PreflightError(
             stage=stage,
             title=title,
