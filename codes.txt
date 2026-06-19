@@ -1,3 +1,3 @@
 running: 
 
-python main.py --survey "STM_1Ha_A2S_50m_85f75s_3mps" --year 2026
+python main.py --survey "TLW_002_9Ha_A2S_100m_85f75s_7mps" --year 2026
