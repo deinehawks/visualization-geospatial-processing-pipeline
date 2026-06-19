@@ -1,3 +1,3 @@
 running: 
 
-python main.py --survey "STM_1Ha_A2S_50m_85f75s_3mps" --year 2026 --resume --run-id 59beed5b-631a-4be5-87f5-d93ec5aa8f5a
+python main.py --survey "STM_1Ha_A2S_50m_85f75s_3mps" --year 2026

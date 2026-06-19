@@ -6,6 +6,7 @@ from typing import Dict, Any, Optional, Set, List, Tuple
 from shared import get_logger, PipelineRepo, db_path, StageRunner, PipelineControl
 from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
+from shared.preflight_checks import PipelinePreflight, PreflightError
 
 import time
 import uuid
@@ -132,6 +133,14 @@ class RGBPipeline:
             ],
         )
 
+        self.preflight = PipelinePreflight(
+            config=self.config,
+            source_dir=self.source_dir,
+            surveys_root=self.surveys_root,
+            year=self.year,
+            logger=self.loggers["pipeline"],
+        )
+
         self.rgb_path: Optional[Path] = None
 
     # Helpers
@@ -175,6 +184,35 @@ class RGBPipeline:
                     f"task2={(ckpt.get('task2') or {}).get('id')}"
                 )
                 self.state["webodm"] = ckpt
+
+    def _stage_will_run(self, stage_name: str, *, force: bool) -> bool:
+        if force:
+            return True
+
+        try:
+            latest = self.repo.get_latest_stage(self.run_id, stage_name)
+            if latest and latest.get("status") == "completed":
+                return False
+        except Exception:
+            self.loggers["pipeline"].exception(
+                f"Failed to check latest stage status for preflight: {stage_name}"
+            )
+
+        return True
+
+    def _preflight_stage(self, stage_name: str) -> None:
+        result = self.preflight.check_stage(
+            stage_name,
+            state=self.state,
+            survey_id=self.survey_id,
+            rgb_path=self.rgb_path,
+            skip_task1_webodm=self.skip_task1_webodm,
+            skip_task2_webodm=self.skip_task2_webodm,
+        )
+
+        self.loggers["pipeline"].info(
+            f"PREFLIGHT OK | {stage_name} | {result}"
+        )
 
     # Checkpoint helpers
     def _webodm_checkpoint_path(self) -> Path:
@@ -1550,11 +1588,18 @@ class RGBPipeline:
 
         task1 = web.get("task1") or {}
         task2 = web.get("task2") or {}
+        task4 = web.get("task4") or {}
 
-        if not task1.get("id") and not task2.get("id"):
-            raise RuntimeError(
-                "Quality gate cannot run: missing webodm task ids (task1/task2)."
+        if not task1.get("id") and not task2.get("id") and not task4.get("id"):
+            logger.error(
+                "Quality gate cannot run: missing WebODM task IDs. "
+                "Please check if WebODM Docker is running and if the node worker is online."
             )
+            return {
+                "passed": False,
+                "reason": "missing_webodm_task_ids",
+                "project_id": project_id,
+            }
 
         allowed_stages = {
             # alias          : webodm internal name
@@ -1785,7 +1830,15 @@ class RGBPipeline:
             return (name in force_stages) or (not resume)
 
         try:
+
             self._check_control_or_raise("data_segregation")
+
+            if self._stage_will_run(
+                "data_segregation",
+                force=_force("data_segregation"),
+            ):
+                self._preflight_stage("data_segregation")
+
             self.runner.run(
                 "data_segregation",
                 self.stage_data_segregation,
@@ -1795,7 +1848,15 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
+
             self._check_control_or_raise("cross_run_filter")
+
+            if self._stage_will_run(
+                "cross_run_filter",
+                force=_force("cross_run_filter"),
+            ):
+                self._preflight_stage("cross_run_filter")
+
             self.runner.run(
                 "cross_run_filter",
                 self.stage_cross_run_image_filter,
@@ -1805,7 +1866,15 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
+
             self._check_control_or_raise("kml_boundary")
+
+            if self._stage_will_run(
+                "kml_boundary",
+                force=_force("kml_boundary"),
+            ):
+                self._preflight_stage("kml_boundary")
+
             self.runner.run(
                 "kml_boundary",
                 self.stage_kml_boundary,
@@ -1815,7 +1884,15 @@ class RGBPipeline:
             )
             self._hydrate_from_state()
 
+
             self._check_control_or_raise("webodm")
+
+            if self._stage_will_run(
+                "webodm",
+                force=_force("webodm"),
+            ):
+                self._preflight_stage("webodm")
+
             self.runner.run(
                 "webodm",
                 self.stage_webodm,
@@ -1827,6 +1904,13 @@ class RGBPipeline:
             self._hydrate_from_state()
 
             self._check_control_or_raise("quality_gate")
+
+            if self._stage_will_run(
+                "quality_gate",
+                force=_force("quality_gate"),
+            ):
+                self._preflight_stage("quality_gate")
+                
             self.runner.run(
                 "quality_gate",
                 self.stage_quality_gate,
@@ -1838,9 +1922,19 @@ class RGBPipeline:
 
             q = self.state.get("quality_gate") or {}
             if q.get("passed") is False:
-                raise RuntimeError("Pipeline stopped: Quality Gate failed.")
+                reason = q.get("reason") or "quality_gate_failed"
+                raise RuntimeError(
+                    f"Pipeline stopped: Quality Gate failed ({reason})."
+                )
 
             self._check_control_or_raise("qgis")
+
+            if self._stage_will_run(
+                "qgis",
+                force=_force("qgis"),
+            ):
+                self._preflight_stage("qgis")
+
             self.runner.run(
                 "qgis",
                 self.stage_qgis,
@@ -1936,18 +2030,35 @@ class RGBPipeline:
         
         # ── Failure ───────────────────────────────────────────────
         except Exception as e:
-            self.state.update({"success": False, "error": str(e)})
+            self.state.update(
+                {
+                    "success": False,
+                    "error": str(e),
+                }
+            )
+
             total_runtime = time.perf_counter() - total_start
 
-            self.repo.mark_run_finished(
-                self.run_id, success=False, total_runtime_seconds=total_runtime
-            )
-            if self.survey_id:
-                self.repo.mark_survey_finished(
-                    self.survey_id, success=False, total_runtime_seconds=total_runtime
+            try:
+                self.repo.mark_run_finished(
+                    self.run_id,
+                    success=False,
+                    total_runtime_seconds=total_runtime,
                 )
+            except Exception:
+                pipeline_logger.exception("Failed to mark run as failed")
 
+            if self.survey_id:
+                try:
+                    self.repo.mark_survey_finished(
+                        self.survey_id,
+                        success=False,
+                        total_runtime_seconds=total_runtime,
+                    )
+                except Exception:
+                    pipeline_logger.exception("Failed to mark survey as failed")
+
+            self.control.cleanup_flags()
             pipeline_footer(pipeline_logger, total_runtime, success=False)
-            pipeline_logger.exception(
-                f"RGB Pipeline failed | run_id={self.run_id}")
+            pipeline_logger.error(str(e))
             return self.state

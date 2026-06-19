@@ -5,6 +5,7 @@ from .db.repo import PipelineRepo
 from .stage_runner import StageRunner
 from .experiment_naming import ExperimentNames, resolve_rgb_exp01_names
 from .pipeline_control import PipelineControl
+from .preflight_checks import PipelinePreflight, PreflightError
 
 __all__ = [
     "get_logger",

@@ -1,14 +1,7 @@
-Create the file:
-
-mkdir data
-type nul > data\pause.flag
-
-(or just create an empty pause.flag file manually)
-
-Resume
-
-Delete it:
-
-del data\pause.flag
-
-Then rerun the same command you normally run (same run_id if you’re passing it; if not, your experiment launcher should accept a --run-id so it resumes the same run).
+To safely pause a running pipeline, press CTRL + SHIFT + P. The pipeline will finish its current operation, 
+save its state, create a run-specific pause flag, and stop execution gracefully, 
+allowing the job to be resumed later using the original Run ID. To immediately stop a pipeline run, press CTRL + SHIFT + Q. 
+This triggers an abort request, terminates the pipeline execution, 
+marks the run as aborted, and performs cleanup of temporary control files. 
+When resuming a paused run, execute the pipeline using the --resume and --run-id arguments to continue 
+from the last completed stage instead of restarting the entire workflow.
