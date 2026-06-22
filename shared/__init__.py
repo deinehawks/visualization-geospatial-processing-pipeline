@@ -1,15 +1,12 @@
 """
-Shared utilities package.
+Shared package.
 
-Avoid eager imports here so standalone tools can import lightweight shared
-modules without loading optional pipeline dependencies.
+Keep this file lightweight. Import utilities directly from their source modules,
+for example:
+
+from shared.paths import db_path
+from shared.logging import get_logger
+from shared.db.repo import PipelineRepo
 """
 
-
-def load_pipeline_config(*args, **kwargs):
-    from .config import load_pipeline_config as _load_pipeline_config
-
-    return _load_pipeline_config(*args, **kwargs)
-
-
-__all__ = ["load_pipeline_config"]
+__all__: list[str] = []
