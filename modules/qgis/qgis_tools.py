@@ -31,10 +31,8 @@ class QGISTools:
         self.gdalwarp_path = gdalwarp_path
         self.gdal2tiles_path = gdal2tiles_path
 
-    # ============================================================
-    # CLIP RASTER BY MASK
-    # ============================================================
 
+    # CLIP RASTER BY MASK
     def clip_raster_by_mask(
         self,
         *,
@@ -87,10 +85,8 @@ class QGISTools:
 
         return output_tif
 
-    # ============================================================
-    # GENERATE TILES
-    # ============================================================
 
+    # GENERATE TILES
     def generate_tiles(
         self,
         *,
@@ -104,8 +100,12 @@ class QGISTools:
         clean: bool = False,
     ) -> Path:
         """
-        Generate map tiles from a GeoTIFF (equivalent to QGIS
-        Raster → Miscellaneous → gdal2tiles).
+        Generate map tiles from a GeoTIFF using gdal2tiles.
+
+        Resume behavior:
+        - resume=True  -> keep existing output folder and pass --resume
+        - resume=False -> remove existing output folder before fresh tiling
+        - clean=True   -> force clean, unless resume=True
         """
         input_tif = Path(input_tif)
         output_dir = Path(output_dir)
@@ -113,35 +113,101 @@ class QGISTools:
         if not input_tif.exists():
             raise FileNotFoundError(f"Input raster not found: {input_tif}")
 
-        if clean and output_dir.exists():
-            shutil.rmtree(output_dir)
+        if resume and clean:
+            log_warn(
+                self.logger,
+                "Tile clean was requested together with resume=True; "
+                "ignoring clean so existing tiles can be reused.",
+            )
+            clean = False
+
+        if output_dir.exists() and clean:
+            log_warn(self.logger, f"Cleaning existing tile output folder: {output_dir}")
+            shutil.rmtree(output_dir, ignore_errors=True)
+
+        elif output_dir.exists() and not resume:
+            log_warn(
+                self.logger,
+                f"Removing existing tile output folder before fresh tiling: {output_dir}"
+            )
+            shutil.rmtree(output_dir, ignore_errors=True)
+
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        log_step(self.logger, 1,
-                 f"Generate tiles: {input_tif.name} → {output_dir.name}/")
+        # Remove stale GDAL auxiliary metadata files only.
+        # These are not map tiles and can cause Windows/GDAL unlink issues.
+        aux_count = 0
+        for aux_file in output_dir.rglob("*.aux.xml"):
+            try:
+                aux_file.unlink(missing_ok=True)
+                aux_count += 1
+            except Exception:
+                pass
+
+        if aux_count:
+            log_warn(self.logger, f"Removed {aux_count} stale GDAL aux files before tiling.")
+
+        existing_tile_count = (
+            sum(1 for _ in output_dir.rglob("*.png"))
+            + sum(1 for _ in output_dir.rglob("*.jpg"))
+            + sum(1 for _ in output_dir.rglob("*.jpeg"))
+            + sum(1 for _ in output_dir.rglob("*.webp"))
+        )
+
+        log_step(
+            self.logger,
+            1,
+            f"Generate tiles: {input_tif.name} → {output_dir.name}/",
+        )
+
         self.logger.info(
             f"  zoom={zoom} | profile={profile} | webviewer={webviewer} | "
-            f"copyright={copyright_text!r} | resume={resume}"
+            f"copyright={copyright_text!r} | resume={resume} | "
+            f"existing_tiles={existing_tile_count}"
         )
+
+        if resume and existing_tile_count:
+            self.logger.info(
+                "  Resume mode enabled: existing tiles will be reused when possible."
+            )
 
         gdal2tiles_path = Path(self.gdal2tiles_path)
         bat_path: Optional[Path] = None
 
+        env = os.environ.copy()
+
+        # Prevent GDAL from creating .aux.xml sidecar files.
+        # This helps avoid Windows unlink errors during gdal2tiles.
+        env["GDAL_PAM_ENABLED"] = "NO"
+
         if os.name == "nt" and gdal2tiles_path.suffix.lower() == ".py":
-            qgis_root = Path(
-                self.qgis_root) if self.qgis_root else gdal2tiles_path.parents[3]
-            o4w_env = qgis_root / "bin" / "o4w_env.bat"
-            qt_env = qgis_root / "bin" / "qt5_env.bat"
-            py_env = qgis_root / "bin" / "py3_env.bat"
+            if self.qgis_root:
+                qgis_root = Path(self.qgis_root)
+            else:
+                try:
+                    qgis_root = gdal2tiles_path.resolve().parents[3]
+                except IndexError:
+                    qgis_root = Path(env.get("OSGEO4W_ROOT", ""))
+
             qgis_python = qgis_root / "apps" / "Python312" / "python.exe"
+
+            # QGIS standalone installs usually store env scripts in etc/ini.
+            env_scripts = [
+                qgis_root / "bin" / "o4w_env.bat",
+                qgis_root / "etc" / "ini" / "python3.bat",
+                qgis_root / "etc" / "ini" / "qt5.bat",
+                qgis_root / "etc" / "ini" / "gdal.bat",
+                qgis_root / "etc" / "ini" / "proj-runtime-data.bat",
+            ]
 
             for required in (qgis_python, gdal2tiles_path):
                 if not required.exists():
-                    raise RuntimeError(
-                        f"Required QGIS file not found: {required}")
+                    raise RuntimeError(f"Required QGIS file not found: {required}")
 
             bat_lines = ["@echo off"]
-            for env_bat in (o4w_env, qt_env, py_env):
+            bat_lines.append("set GDAL_PAM_ENABLED=NO")
+
+            for env_bat in env_scripts:
                 if env_bat.exists():
                     bat_lines.append(f'call "{env_bat}"')
 
@@ -150,8 +216,10 @@ class QGISTools:
                 f' -p {profile} -z {zoom} -w {webviewer}'
                 f' --copyright "{copyright_text}"'
             )
+
             if resume:
                 gdal2tiles_cmd += " --resume"
+
             gdal2tiles_cmd += f' "{input_tif}" "{output_dir}"'
             bat_lines.append(gdal2tiles_cmd)
 
@@ -167,25 +235,34 @@ class QGISTools:
                 "-w", webviewer,
                 "--copyright", copyright_text,
             ]
+
             if resume:
                 cmd.append("--resume")
+
             cmd += [str(input_tif), str(output_dir)]
 
-        # ── Run ──────────────────────────────────────────────────────────
         t0 = time.perf_counter()
-        self.logger.info(
-            "  Tiling in progress… (this may take several minutes)")
+        self.logger.info("  Tiling in progress… (this may take several minutes)")
 
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            subprocess.run(
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+
         except FileNotFoundError:
             raise RuntimeError(f"gdal2tiles not found: {self.gdal2tiles_path}")
+
         except subprocess.CalledProcessError as e:
             raise RuntimeError(
                 f"gdal2tiles failed.\n"
                 f"STDERR:\n{(e.stderr or '')[:4000]}\n"
                 f"STDOUT:\n{(e.stdout or '')[:4000]}"
             )
+
         finally:
             if bat_path is not None:
                 try:
@@ -194,12 +271,18 @@ class QGISTools:
                     pass
 
         elapsed = time.perf_counter() - t0
-        tile_count = sum(1 for _ in output_dir.rglob("*.png")) + \
-            sum(1 for _ in output_dir.rglob("*.jpg"))
+
+        tile_count = (
+            sum(1 for _ in output_dir.rglob("*.png"))
+            + sum(1 for _ in output_dir.rglob("*.jpg"))
+            + sum(1 for _ in output_dir.rglob("*.jpeg"))
+            + sum(1 for _ in output_dir.rglob("*.webp"))
+        )
+
         log_ok(
             self.logger,
             f"Tiles generated | dir={output_dir.name}/ | "
-            f"~{tile_count} tiles | elapsed={elapsed:.1f}s"
+            f"~{tile_count} tiles | elapsed={elapsed:.1f}s",
         )
 
         return output_dir

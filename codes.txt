@@ -1,3 +1,14 @@
-running: 
 
-python main.py --survey "TLW_002_9Ha_A2S_100m_85f75s_7mps" --year 2026
+
+Queue:
+
+python main.py --survey "DNG-001_36.4Ha_M3C_100m_85f75s_8mps" --year 2026
+
+Running: 
+
+python main.py --survey "TLW_002_9Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id f9ac68e4-4606-4384-9ad8-9e480742578b
+
+command for generating maps
+
+ex:
+python map.py --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100m_85f75s_7mps,BCO-200_26.5Ha_M3C_100m_85f75s_8mps" --name "barbco-overall-map" --title "BARBCO Overall Survey Boundary Map" --export-print --logo "assets/logo.png"

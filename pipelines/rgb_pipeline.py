@@ -3,10 +3,20 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List, Tuple
-from shared import get_logger, PipelineRepo, db_path, StageRunner, PipelineControl
-from modules import run_kml, WebODMProcessor, run_filter, run_data_segregation
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
+
+from shared.logging import get_logger
+from shared.db.repo import PipelineRepo
+from shared.stage_runner import StageRunner
+from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
+from shared.paths import db_path
+
+from modules.kml_boundary_setter.kml_boundary_setter import run_kml
+from modules.webodm.webodm_processor import WebODMProcessor
+from modules.cross_run_image_filter.cross_run_image_filter import run_filter
+from modules.data_segregation.data_segregation import run_data_segregation
+from modules.qgis.qgis_tools import QGISTools
 
 import time
 import uuid
@@ -14,7 +24,6 @@ import logging
 import os
 import shutil
 from typing import Any
-from modules import QGISTools
 
 
 class RGBPipeline:
@@ -1232,7 +1241,7 @@ class RGBPipeline:
             if cached_dir is not None:
                 self._cleanup_upload_cache(cached_dir, logger)
 
-    def stage_qgis(self) -> Dict[str, Any]:
+    def stage_qgis(self, *, resume: bool = False) -> Dict[str, Any]:
         logger = self.loggers["qgis"]
         logger.info("Stage: QGIS Processing (clip + tiles)")
 
@@ -1384,6 +1393,9 @@ class RGBPipeline:
 
         # 3) Tiles
         if tiles_enabled:
+            tile_resume = bool(resume)
+            tile_clean = not tile_resume
+
             logger.info(
                 f"Generating tiles (sharp-corners) from {Path(unbounded_clipped).name}"
             )
@@ -1394,8 +1406,8 @@ class RGBPipeline:
                 profile=profile,
                 webviewer=webviewer,
                 copyright_text=copyright_text,
-                clean=True,
-                resume=False,
+                clean=tile_clean,
+                resume=tile_resume,
             )
 
             if bounded_ok:
@@ -1409,8 +1421,8 @@ class RGBPipeline:
                     profile=profile,
                     webviewer=webviewer,
                     copyright_text=copyright_text,
-                    clean=True,
-                    resume=False,
+                    clean=tile_clean,
+                    resume=tile_resume,
                 )
         else:
             logger.warning(
@@ -1937,7 +1949,7 @@ class RGBPipeline:
 
             self.runner.run(
                 "qgis",
-                self.stage_qgis,
+                lambda: self.stage_qgis(resume=resume),
                 output_key="qgis",
                 state=self.state,
                 force=_force("qgis"),
