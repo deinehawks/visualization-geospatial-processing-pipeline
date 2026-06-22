@@ -46,6 +46,8 @@ def export_qgis_print_layout(
             QgsRectangle,
             QgsUnitTypes,
             QgsVectorLayer,
+            QgsFeature,
+            QgsGeometry,
         )
         from qgis.PyQt.QtGui import QColor, QFont  # type: ignore[reportMissingImports]
 
@@ -90,44 +92,42 @@ def export_qgis_print_layout(
     project.setCrs(target_crs)
 
     boundaries_layer = QgsVectorLayer(str(boundaries_path), "Survey Boundaries", "ogr")
-    merged_layer = QgsVectorLayer(str(merged_path), "Overall Boundary", "ogr")
-
     if not boundaries_layer.isValid():
         raise RuntimeError(f"Failed to load layer: {boundaries_path}")
 
-    if not merged_layer.isValid():
-        raise RuntimeError(f"Failed to load layer: {merged_path}")
-
     source_crs = QgsCoordinateReferenceSystem("EPSG:4326")
     boundaries_layer.setCrs(source_crs)
-    merged_layer.setCrs(source_crs)
 
-    _style_polygon_layer(
-        boundaries_layer,
-        stroke="#2563eb",
-        fill="#3b82f6",
-        opacity=0.35,
-        width=0.6,
+    # Create a true dissolved boundary for print output.
+    # This removes internal lines between adjacent/overlapping survey boundaries.
+    merged_layer = _create_dissolved_boundary_layer(
+        source_layer=boundaries_layer,
+        layer_name="Overall Boundary",
     )
 
     _style_polygon_layer(
         merged_layer,
-        stroke="#dc2626",
-        fill="#ef4444",
-        opacity=0.18,
-        width=0.9,
+        stroke="#991b1b",
+        fill="#fca5a5",
+        opacity=0.32,
+        width=0.55,
     )
 
-    project.addMapLayer(boundaries_layer)
     project.addMapLayer(merged_layer)
 
     map_extent = _combined_projected_extent(
         project=project,
-        layers=[boundaries_layer, merged_layer],
+        layers=[merged_layer],
         target_crs=target_crs,
     )
 
-    map_extent = _buffer_extent(map_extent, factor=0.12)
+    # Match the map frame shape and add more breathing room.
+    map_extent = _fit_extent_to_frame(
+        map_extent,
+        frame_width=205.0,
+        frame_height=150.0,
+    )
+    map_extent = _buffer_extent(map_extent, factor=0.35)
 
     layout = QgsPrintLayout(project)
     layout.initializeDefaults()
@@ -253,6 +253,11 @@ def export_qgis_print_layout(
     pdf_path = package_dir / "print_map.pdf"
     png_path = package_dir / "preview.png"
 
+    pdf_path.unlink(missing_ok=True)
+    png_path.unlink(missing_ok=True)
+
+    exporter = QgsLayoutExporter(layout)
+
     # Remove previous exports first.
     # This prevents GDAL/QGIS PNG overwrite warnings such as:
     # "The PNG driver does not support update access to existing datasets."
@@ -337,6 +342,89 @@ def _init_qgis_application(QgsApplication):
     _QGIS_APP = QgsApplication([], False)
     _QGIS_APP.initQgis()
 
+def _create_dissolved_boundary_layer(
+    *,
+    source_layer: Any,
+    layer_name: str,
+) -> Any:
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    crs_authid = source_layer.crs().authid() or "EPSG:4326"
+    dissolved_layer = QgsVectorLayer(
+        f"MultiPolygon?crs={crs_authid}",
+        layer_name,
+        "memory",
+    )
+
+    provider = dissolved_layer.dataProvider()
+
+    geometries = []
+
+    for feature in source_layer.getFeatures():
+        if not feature.hasGeometry():
+            continue
+
+        geometry = feature.geometry()
+
+        if geometry is None or geometry.isEmpty():
+            continue
+
+        if not geometry.isGeosValid():
+            geometry = geometry.makeValid()
+
+        geometries.append(geometry)
+
+    if not geometries:
+        raise RuntimeError("No valid boundary geometries found for dissolve.")
+
+    dissolved_geometry = QgsGeometry.unaryUnion(geometries)
+
+    dissolved_feature = QgsFeature()
+    dissolved_feature.setGeometry(dissolved_geometry)
+
+    provider.addFeatures([dissolved_feature])
+    dissolved_layer.updateExtents()
+
+    if not dissolved_layer.isValid():
+        raise RuntimeError("Failed to create dissolved overall boundary layer.")
+
+    return dissolved_layer
+
+
+def _fit_extent_to_frame(
+    extent: Any,
+    *,
+    frame_width: float,
+    frame_height: float,
+) -> Any:
+    from qgis.core import QgsRectangle
+
+    width = extent.width()
+    height = extent.height()
+
+    if width <= 0:
+        width = 100
+
+    if height <= 0:
+        height = 100
+
+    target_ratio = frame_width / frame_height
+    current_ratio = width / height
+
+    center_x = (extent.xMinimum() + extent.xMaximum()) / 2
+    center_y = (extent.yMinimum() + extent.yMaximum()) / 2
+
+    if current_ratio > target_ratio:
+        height = width / target_ratio
+    else:
+        width = height * target_ratio
+
+    return QgsRectangle(
+        center_x - width / 2,
+        center_y - height / 2,
+        center_x + width / 2,
+        center_y + height / 2,
+    )
 
 def _style_polygon_layer(
     layer: Any,
