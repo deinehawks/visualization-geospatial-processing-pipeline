@@ -16,6 +16,7 @@ def main() -> None:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--survey-id", default=None, help="Optional fixed survey ID, e.g. AH-026002")
     parser.add_argument("--node-id", type=int, default=None)
+    parser.add_argument("--force-stage", action="append", default=[], help="Force a completed stage to rerun during resume. Can be used multiple times.",)
 
     args = parser.parse_args()
 
@@ -62,7 +63,10 @@ def main() -> None:
         force_segregation=False,
     )
 
-    result = pipeline.run(resume=args.resume)
+    result = pipeline.run(
+    resume=args.resume,
+    force_stages=set(args.force_stage or []),
+)
 
     print("\n===== PIPELINE RESULT =====")
     print(f"Success : {result.get('success')}")

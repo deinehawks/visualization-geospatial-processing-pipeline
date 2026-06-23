@@ -1,3 +1,5 @@
+# pyright: reportMissingImports=false
+
 from __future__ import annotations
 
 from datetime import datetime
@@ -103,6 +105,9 @@ def export_qgis_print_layout(
     merged_layer = _create_dissolved_boundary_layer(
         source_layer=boundaries_layer,
         layer_name="Overall Boundary",
+        project=project,
+        target_crs=target_crs,
+        dissolve_tolerance_m=3.0,
     )
 
     _style_polygon_layer(
@@ -342,14 +347,31 @@ def _init_qgis_application(QgsApplication):
     _QGIS_APP = QgsApplication([], False)
     _QGIS_APP.initQgis()
 
+
 def _create_dissolved_boundary_layer(
     *,
     source_layer: Any,
     layer_name: str,
+    project: Any,
+    target_crs: Any,
+    dissolve_tolerance_m: float = 2.0,
 ) -> Any:
-    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+    """
+    Create one dissolved overall boundary layer.
 
-    crs_authid = source_layer.crs().authid() or "EPSG:4326"
+    Uses a small buffer-union-negative-buffer workflow in projected CRS.
+    This helps remove internal lines caused by tiny gaps, overlaps, or
+    imperfect boundary alignment.
+    """
+    from qgis.core import (
+        QgsCoordinateTransform,
+        QgsFeature,
+        QgsGeometry,
+        QgsVectorLayer,
+    )
+
+    crs_authid = target_crs.authid() or "EPSG:3857"
+
     dissolved_layer = QgsVectorLayer(
         f"MultiPolygon?crs={crs_authid}",
         layer_name,
@@ -358,13 +380,19 @@ def _create_dissolved_boundary_layer(
 
     provider = dissolved_layer.dataProvider()
 
+    transform = QgsCoordinateTransform(
+        source_layer.crs(),
+        target_crs,
+        project,
+    )
+
     geometries = []
 
     for feature in source_layer.getFeatures():
         if not feature.hasGeometry():
             continue
 
-        geometry = feature.geometry()
+        geometry = QgsGeometry(feature.geometry())
 
         if geometry is None or geometry.isEmpty():
             continue
@@ -372,12 +400,38 @@ def _create_dissolved_boundary_layer(
         if not geometry.isGeosValid():
             geometry = geometry.makeValid()
 
-        geometries.append(geometry)
+        geometry.transform(transform)
+
+        # Clean small geometry issues after reprojection.
+        geometry = geometry.buffer(0, 8)
+
+        # Expand slightly so tiny gaps/edge mismatches touch before dissolve.
+        if dissolve_tolerance_m > 0:
+            geometry = geometry.buffer(dissolve_tolerance_m, 8)
+
+        if geometry and not geometry.isEmpty():
+            geometries.append(geometry)
 
     if not geometries:
         raise RuntimeError("No valid boundary geometries found for dissolve.")
 
     dissolved_geometry = QgsGeometry.unaryUnion(geometries)
+
+    if not dissolved_geometry or dissolved_geometry.isEmpty():
+        raise RuntimeError("Boundary dissolve produced an empty geometry.")
+
+    if not dissolved_geometry.isGeosValid():
+        dissolved_geometry = dissolved_geometry.makeValid()
+
+    # Shrink back after the positive buffer.
+    if dissolve_tolerance_m > 0:
+        dissolved_geometry = dissolved_geometry.buffer(-dissolve_tolerance_m, 8)
+
+    # Final cleanup.
+    if not dissolved_geometry.isGeosValid():
+        dissolved_geometry = dissolved_geometry.makeValid()
+
+    dissolved_geometry = dissolved_geometry.buffer(0, 8)
 
     dissolved_feature = QgsFeature()
     dissolved_feature.setGeometry(dissolved_geometry)
