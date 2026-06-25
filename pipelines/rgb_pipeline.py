@@ -1241,6 +1241,76 @@ class RGBPipeline:
             if cached_dir is not None:
                 self._cleanup_upload_cache(cached_dir, logger)
 
+    def _stage_webodm_upload_images(
+        self,
+        *,
+        source_folder: Path,
+        survey_id: str,
+        stage_name: str,
+    ) -> Path:
+        source_folder = Path(source_folder)
+        logger = self.loggers["webodm"]
+
+        if not source_folder.exists():
+            raise FileNotFoundError(f"Image source folder not found: {source_folder}")
+
+        image_files = []
+        for pattern in ("*.jpg", "*.jpeg", "*.JPG", "*.JPEG"):
+            image_files.extend(source_folder.glob(pattern))
+
+        # Deduplicate by filename, matching WebODM upload behavior.
+        unique_images: dict[str, Path] = {}
+        for image in image_files:
+            if image.is_file():
+                unique_images.setdefault(image.name.lower(), image)
+
+        image_files = sorted(unique_images.values(), key=lambda p: p.name.lower())
+
+        if not image_files:
+            raise RuntimeError(f"No JPG/JPEG images found in {source_folder}")
+
+        cache_root_env = os.getenv("WEBODM_UPLOAD_CACHE_ROOT")
+        cache_root = (
+            Path(cache_root_env)
+            if cache_root_env
+            else self.base_dir / "data" / "upload_cache"
+        )
+
+        target_folder = cache_root / survey_id / stage_name
+
+        logger.info(f"Staging WebODM upload images to local cache: {target_folder}")
+
+        if target_folder.exists():
+            shutil.rmtree(target_folder)
+
+        target_folder.mkdir(parents=True, exist_ok=True)
+
+        total_bytes = 0
+
+        for index, source_image in enumerate(image_files, start=1):
+            target_image = target_folder / source_image.name
+
+            try:
+                shutil.copy2(source_image, target_image)
+                total_bytes += target_image.stat().st_size
+            except Exception as e:
+                raise RuntimeError(
+                    f"Failed to stage image for WebODM upload: {source_image}"
+                ) from e
+
+            if index % 50 == 0 or index == len(image_files):
+                logger.info(
+                    f"Staged {index}/{len(image_files)} images "
+                    f"({total_bytes / (1024 ** 3):.2f} GB)"
+                )
+
+        logger.info(
+            f"WebODM upload staging complete: {len(image_files)} images "
+            f"| {total_bytes / (1024 ** 3):.2f} GB"
+        )
+
+        return target_folder
+
     def stage_qgis(self, *, resume: bool = False) -> Dict[str, Any]:
         logger = self.loggers["qgis"]
         logger.info("Stage: QGIS Processing (clip + tiles)")
@@ -1523,10 +1593,16 @@ class RGBPipeline:
                 success = True
                 runtime = 0.0
         else:
+            upload_image_folder = self._stage_webodm_upload_images(
+                source_folder=image_folder,
+                survey_id=survey_id,
+                stage_name="task4",
+            )
+
             current_task4_id = processor.create_task_with_images(
                 project_id=int(project_id),
                 name=task4_name,
-                image_folder=str(image_folder),
+                image_folder=str(upload_image_folder),
                 options=task4_options,
                 processing_node=webodm_cfg.get("node_id"),
             )
