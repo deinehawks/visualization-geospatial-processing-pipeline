@@ -242,11 +242,27 @@ def export_qgis_print_layout(
             frame_height=inset_frame_rect.height(),
         )
 
-        # Bigger buffer = zoomed-out location/context map
         inset_extent = _buffer_extent(inset_extent, factor=4.0)
 
-        inset_item.setExtent(inset_extent)
-        inset_item.refresh()
+        inset_png_path = package_dir / "inset_map.png"
+
+        _render_inset_map_image(
+            basemap_layer=basemap_layer,
+            boundary_layer=merged_layer,
+            target_crs=target_crs,
+            extent=inset_extent,
+            output_path=inset_png_path,
+            width_mm=inset_frame_rect.width(),
+            height_mm=inset_frame_rect.height(),
+            dpi=96,
+        )
+
+        _replace_inset_map_with_picture(
+            layout=layout,
+            inset_item=inset_item,
+            image_path=inset_png_path,
+            QgsLayoutItemPicture=QgsLayoutItemPicture,
+        )
 
     _set_label_text(layout, "map_title", map_title, QgsLayoutItemLabel)
     _set_label_text(layout, "map_location", map_location, QgsLayoutItemLabel)
@@ -289,21 +305,7 @@ def export_qgis_print_layout(
 
     exporter = QgsLayoutExporter(layout)
 
-    print(f"Exporting PDF: {pdf_temp_path}", flush=True)
-
-    pdf_settings = QgsLayoutExporter.PdfExportSettings()
-    pdf_result = exporter.exportToPdf(str(pdf_temp_path), pdf_settings)
-
-    print(f"PDF export result: {pdf_result}", flush=True)
-
-    if pdf_result != QgsLayoutExporter.Success:
-        raise RuntimeError(f"Failed to export PDF: {pdf_temp_path}")
-
-    if not pdf_temp_path.exists() or pdf_temp_path.stat().st_size == 0:
-        raise RuntimeError(f"PDF export produced an empty file: {pdf_temp_path}")
-
-    pdf_temp_path.replace(pdf_path)
-
+    # Export preview first so we can verify layout before PDF.
     image_settings = QgsLayoutExporter.ImageExportSettings()
     image_settings.dpi = min(dpi, 120)
 
@@ -320,6 +322,25 @@ def export_qgis_print_layout(
         raise RuntimeError(f"PNG export produced an empty file: {png_temp_path}")
 
     png_temp_path.replace(png_path)
+
+    # Export PDF after preview.
+    print(f"Exporting PDF: {pdf_temp_path}", flush=True)
+
+    pdf_settings = QgsLayoutExporter.PdfExportSettings()
+    pdf_settings.dpi = min(dpi, 150)
+    pdf_settings.rasterizeWholeImage = True
+
+    pdf_result = exporter.exportToPdf(str(pdf_temp_path), pdf_settings)
+
+    print(f"PDF export result: {pdf_result}", flush=True)
+
+    if pdf_result != QgsLayoutExporter.Success:
+        raise RuntimeError(f"Failed to export PDF: {pdf_temp_path}")
+
+    if not pdf_temp_path.exists() or pdf_temp_path.stat().st_size == 0:
+        raise RuntimeError(f"PDF export produced an empty file: {pdf_temp_path}")
+
+    pdf_temp_path.replace(pdf_path)
     
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -751,3 +772,104 @@ def _create_stadia_alidade_smooth_layer(QgsRasterLayer: Any) -> Any | None:
         return None
 
     return layer
+
+
+def _render_inset_map_image(
+    *,
+    basemap_layer: Any | None,
+    boundary_layer: Any,
+    target_crs: Any,
+    extent: Any,
+    output_path: Path,
+    width_mm: float,
+    height_mm: float,
+    dpi: int = 96,
+) -> None:
+    from qgis.PyQt.QtCore import QSize  # type: ignore[reportMissingImports]
+    from qgis.PyQt.QtGui import QColor, QImage, QPainter  # type: ignore[reportMissingImports]
+    from qgis.core import (  # type: ignore[reportMissingImports]
+        QgsFillSymbol,
+        QgsMapRendererCustomPainterJob,
+        QgsMapSettings,
+        QgsSingleSymbolRenderer,
+    )
+    output_path.unlink(missing_ok=True)
+
+    width_px = max(900, int((width_mm / 25.4) * dpi))
+    height_px = max(700, int((height_mm / 25.4) * dpi))
+
+    image = QImage(
+        QSize(width_px, height_px),
+        QImage.Format_ARGB32_Premultiplied,
+    )
+    image.fill(QColor(255, 255, 255).rgba())
+
+    settings = QgsMapSettings()
+    settings.setDestinationCrs(target_crs)
+    settings.setExtent(extent)
+    settings.setOutputSize(QSize(width_px, height_px))
+    settings.setOutputDpi(dpi)
+    settings.setBackgroundColor(QColor(255, 255, 255))
+
+    layers = []
+
+    if basemap_layer is not None:
+        layers.append(basemap_layer)
+
+    layers.append(boundary_layer)
+    settings.setLayers(layers)
+
+    old_renderer = boundary_layer.renderer().clone() if boundary_layer.renderer() else None
+
+    inset_symbol = QgsFillSymbol.createSimple(
+        {
+            "color": "255,0,0,70",
+            "outline_color": "180,0,0,255",
+            "outline_width": "1.2",
+            "outline_width_unit": "MM",
+        }
+    )
+
+    boundary_layer.setRenderer(QgsSingleSymbolRenderer(inset_symbol))
+    boundary_layer.triggerRepaint()
+
+    painter = QPainter(image)
+
+    try:
+        job = QgsMapRendererCustomPainterJob(settings, painter)
+        job.start()
+        job.waitForFinished()
+    finally:
+        painter.end()
+
+        if old_renderer is not None:
+            boundary_layer.setRenderer(old_renderer)
+            boundary_layer.triggerRepaint()
+
+        if not image.save(str(output_path), "PNG"):
+            raise RuntimeError(f"Failed to save inset map image: {output_path}")
+
+        if not output_path.exists() or output_path.stat().st_size == 0:
+            raise RuntimeError(f"Inset map image was not created: {output_path}")
+
+
+def _replace_inset_map_with_picture(
+    *,
+    layout: Any,
+    inset_item: Any,
+    image_path: Path,
+    QgsLayoutItemPicture: Any,
+) -> None:
+    picture = QgsLayoutItemPicture(layout)
+    picture.setId("map_inset_image")
+    picture.setPicturePath(str(image_path))
+
+    picture.attemptMove(inset_item.positionWithUnits())
+    picture.attemptResize(inset_item.sizeWithUnits())
+    picture.setZValue(inset_item.zValue())
+
+    layout.addLayoutItem(picture)
+
+    # Keep the QPT map item for placement/reference, but do not render it
+    # during final PDF/PNG export.
+    inset_item.setExcludeFromExports(True)
