@@ -37,6 +37,14 @@ if errorlevel 1 (
 
 echo.
 echo Running map export...
-"%QGIS_PYTHON%" map.py --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100m_85f75s_7mps,BCO-200_26.5Ha_M3C_100m_85f75s_8mps" --name "barbco-overall-map" --title "BARBCO Overall Survey Boundary Map" --export-print --logo "assets/logo.png"
+"%QGIS_PYTHON%" map.py ^
+  --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100m_85f75s_7mps,BCO-200_26.5Ha_M3C_100m_85f75s_8mps" ^
+  --name "barbco-overall-map" ^
+  --title "BARBCO Boundary Map" ^
+  --location "Tugbok District, Davao City" ^
+  --map-scale 15000 ^
+  --layout-template "assets/qgis_layouts/client_boundary_map.qpt" ^
+  --export-print ^
+  --logo "assets/logo.png"
 
 pause

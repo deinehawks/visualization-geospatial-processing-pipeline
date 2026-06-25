@@ -28,6 +28,10 @@ def export_map_package(
     output_root: Path,
     map_name: str,
     title: str | None = None,
+    location: str | None = None,
+    map_scale: int | None = None,
+    layout_template: Path | None = None,
+    disclaimer: str | None = None,
 ) -> MapPackageResult:
     map_slug = _slugify(map_name)
     output_dir = output_root / map_slug
@@ -111,6 +115,11 @@ def export_map_package(
     _write_json(boundaries_geojson, boundaries_collection)
     _write_json(merged_boundary_geojson, merged_collection)
 
+    default_disclaimer = (
+        "Disclaimer: This map is intended for visualization and reference purposes only. "
+        "Not for legal boundary determination or survey-grade use."
+    )
+
     metadata = {
         "map_name": map_slug,
         "title": title or map_name,
@@ -129,6 +138,17 @@ def export_map_package(
             "merged_boundary_geojson": "merged_boundary.geojson",
             "metadata_json": "map_metadata.json",
             "style_json": "style.json",
+        },
+        "location": location,
+        "layout": {
+            "title": title or map_name,
+            "location": location or "",
+            "map_scale": map_scale,
+            "layout_template": str(layout_template) if layout_template else None,
+            "basemap_attribution": "Basemap: © OpenStreetMap contributors",
+            "disclaimer": disclaimer or default_disclaimer,
+            "projection_label": "WGS 84 / UTM Zone 51N",
+            "grid_label": "WGS 84 Geographic Coordinates (EPSG:4326)",
         },
     }
 

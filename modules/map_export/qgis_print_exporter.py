@@ -50,9 +50,10 @@ def export_qgis_print_layout(
             QgsVectorLayer,
             QgsFeature,
             QgsGeometry,
+            QgsReadWriteContext,
         )
         from qgis.PyQt.QtGui import QColor, QFont  # type: ignore[reportMissingImports]
-
+        from qgis.PyQt.QtXml import QDomDocument  # type: ignore[reportMissingImports]
     except ImportError as e:
         raise RuntimeError(
             "QGIS Python libraries are not available. "
@@ -77,6 +78,46 @@ def export_qgis_print_layout(
         raise FileNotFoundError(f"Missing map metadata JSON: {metadata_path}")
 
     metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+
+    layout_cfg = metadata.get("layout") or {}
+
+    map_title = (
+        title
+        or layout_cfg.get("title")
+        or metadata.get("title")
+        or metadata.get("map_name")
+        or "Survey Boundary Map"
+    )
+
+    map_location = (
+        layout_cfg.get("location")
+        or metadata.get("location")
+        or ""
+    )
+
+    map_scale = layout_cfg.get("map_scale")
+
+    layout_template_value = layout_cfg.get("layout_template")
+    layout_template_path = (
+        Path(layout_template_value)
+        if layout_template_value
+        else None
+    )
+
+    osm_attribution = (
+        layout_cfg.get("basemap_attribution")
+        or "Basemap: © OpenStreetMap contributors"
+    )
+
+    map_disclaimer = (
+        layout_cfg.get("disclaimer")
+        or "Disclaimer: This map is intended for visualization and reference purposes only. Not for legal boundary determination or survey-grade use."
+    )
+
+    grid_label = (
+        layout_cfg.get("grid_label")
+        or "WGS 84 Geographic Coordinates (EPSG:4326)"
+    )
 
     map_title = title or metadata.get("title") or metadata.get("map_name") or "Survey Boundary Map"
 
@@ -137,6 +178,66 @@ def export_qgis_print_layout(
     layout = QgsPrintLayout(project)
     layout.initializeDefaults()
     layout.setName("print_map_layout")
+
+    if layout_template_path and layout_template_path.exists():
+        doc = QDomDocument()
+        template_text = layout_template_path.read_text(encoding="utf-8")
+
+        result = doc.setContent(template_text)
+
+        if isinstance(result, tuple):
+            ok = result[0]
+            error_message = result[1] if len(result) > 1 else ""
+        else:
+            ok = bool(result)
+            error_message = ""
+
+        if not ok:
+            raise RuntimeError(
+                f"Failed to load QPT template: {layout_template_path}. {error_message}"
+            )
+
+        layout.loadFromTemplate(doc, QgsReadWriteContext())
+
+        map_item = _get_layout_item(layout, "map_frame", QgsLayoutItemMap)
+        map_item.setExtent(map_extent)
+
+        if map_scale:
+            map_item.setScale(float(map_scale))
+
+        map_item.refresh()
+
+        _set_label_text(layout, "map_title", map_title, QgsLayoutItemLabel)
+        _set_label_text(layout, "map_location", map_location, QgsLayoutItemLabel)
+
+        scale_value = int(round(float(map_scale or map_item.scale())))
+
+        map_info = (
+            f"Scale 1:{scale_value:,}\n"
+            f"Projection: WGS 84 / UTM Zone 51N (EPSG:{target_epsg})\n"
+            f"Grid: {grid_label}"
+        )
+
+        _set_label_text(layout, "map_info", map_info, QgsLayoutItemLabel)
+        _set_label_text(layout, "osm_attribution", osm_attribution, QgsLayoutItemLabel)
+        _set_label_text(layout, "map_disclaimer", map_disclaimer, QgsLayoutItemLabel)
+
+        scale_bar = layout.itemById("scale_bar")
+        if scale_bar:
+            scale_bar.setLinkedMap(map_item)
+
+        if logo_path:
+            logo_item = layout.itemById("map_logo")
+            logo_path = Path(logo_path)
+
+            if logo_item and logo_path.exists():
+                logo_item.setPicturePath(str(logo_path))
+
+    else:
+        raise RuntimeError(
+            "Missing QGIS layout template. Expected: "
+            f"{layout_template_path or 'assets/qgis_layouts/client_boundary_map.qpt'}"
+        )
 
     page = layout.pageCollection().pages()[0]
     page.setPageSize("A4", QgsLayoutItemPage.Landscape)
@@ -622,3 +723,30 @@ def _nice_number(value: float) -> float:
         nice_fraction = 10
 
     return nice_fraction * (10 ** exponent)
+
+def _get_layout_item(layout: Any, item_id: str, item_type: Any | None = None) -> Any:
+    item = layout.itemById(item_id)
+
+    if item is None:
+        raise RuntimeError(
+            f"Missing layout item ID '{item_id}'. "
+            "Open the QPT in QGIS Print Layout and set the correct Item ID."
+        )
+
+    if item_type is not None and not isinstance(item, item_type):
+        raise RuntimeError(
+            f"Layout item '{item_id}' has the wrong type."
+        )
+
+    return item
+
+
+def _set_label_text(
+    layout: Any,
+    item_id: str,
+    text: str,
+    QgsLayoutItemLabel: Any,
+) -> None:
+    item = _get_layout_item(layout, item_id, QgsLayoutItemLabel)
+    item.setText(text)
+    item.adjustSizeToText()

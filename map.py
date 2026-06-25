@@ -95,6 +95,29 @@ def main() -> None:
         default=200,
         help="PNG preview export DPI.",
     )
+    parser.add_argument(
+        "--location",
+        default=None,
+        help="Location/address text shown under the map title.",
+    )
+    parser.add_argument(
+        "--map-scale",
+        type=int,
+        default=None,
+        help="Optional fixed map scale denominator. Example: 15000 for 1:15,000.",
+    )
+
+    parser.add_argument(
+        "--layout-template",
+        default="assets/qgis_layouts/client_boundary_map.qpt",
+        help="QGIS layout template (.qpt) used for print export.",
+    )
+
+    parser.add_argument(
+        "--disclaimer",
+        default=None,
+        help="Disclaimer text shown in the print layout.",
+    )
 
     args = parser.parse_args()
 
@@ -136,6 +159,10 @@ def main() -> None:
         output_root=output_root,
         map_name=map_name,
         title=title,
+        location=args.location,
+        map_scale=args.map_scale,
+        layout_template=Path(args.layout_template) if args.layout_template else None,
+        disclaimer=args.disclaimer,
     )
 
     print()

@@ -6,9 +6,10 @@ Queue:
 
 Running: 
 
-python main.py --survey "DNG-001_36.4Ha_M3C_100m_85f75s_8mps" --year 2026 --resume --run-id 16dd50a6-376d-47f0-8fd3-755799f 5e3cf --force-stage quality_gate  -- not done yet need to fallback to T4 
+python main.py --survey "DNG-001_36.4Ha_M3C_100m_85f75s_8mps" --year 2026 --resume --run-id 16dd50a6-376d-47f0-8fd3-755799f5e3cf --force-stage quality_gate  -- not done yet need to fallback to T4 
 
 command for generating maps
 
 ex:
 python map.py --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100m_85f75s_7mps,BCO-200_26.5Ha_M3C_100m_85f75s_8mps" --name "barbco-overall-map" --title "BARBCO Overall Survey Boundary Map" --export-print --logo "assets/logo.png"
+
