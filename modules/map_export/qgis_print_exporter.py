@@ -51,6 +51,7 @@ def export_qgis_print_layout(
             QgsFeature,
             QgsGeometry,
             QgsReadWriteContext,
+            QgsRasterLayer,
         )
         from qgis.PyQt.QtGui import QColor, QFont  # type: ignore[reportMissingImports]
         from qgis.PyQt.QtXml import QDomDocument  # type: ignore[reportMissingImports]
@@ -119,10 +120,11 @@ def export_qgis_print_layout(
         or "WGS 84 Geographic Coordinates (EPSG:4326)"
     )
 
-    map_title = title or metadata.get("title") or metadata.get("map_name") or "Survey Boundary Map"
-
     bounds = metadata.get("bounds") or {}
     center = metadata.get("center") or {}
+
+    if not bounds:
+        raise RuntimeError("Missing bounds in map_metadata.json. Cannot calculate map CRS.")
 
     center_lon = float(center.get("lon") or ((bounds["min_lon"] + bounds["max_lon"]) / 2))
     center_lat = float(center.get("lat") or ((bounds["min_lat"] + bounds["max_lat"]) / 2))
@@ -159,7 +161,43 @@ def export_qgis_print_layout(
         width=0.55,
     )
 
+    osm_layer = _create_osm_basemap_layer(QgsRasterLayer)
+
+    if osm_layer is not None:
+        project.addMapLayer(osm_layer)
+
     project.addMapLayer(merged_layer)
+
+    layout = QgsPrintLayout(project)
+    layout.initializeDefaults()
+    layout.setName("print_map_layout")
+
+    if not layout_template_path or not layout_template_path.exists():
+        raise RuntimeError(
+            "Missing QGIS layout template. Expected: "
+            f"{layout_template_path or 'assets/qgis_layouts/client_boundary_map.qpt'}"
+        )
+
+    doc = QDomDocument()
+    template_text = layout_template_path.read_text(encoding="utf-8")
+
+    result = doc.setContent(template_text)
+
+    if isinstance(result, tuple):
+        ok = result[0]
+        error_message = result[1] if len(result) > 1 else ""
+    else:
+        ok = bool(result)
+        error_message = ""
+
+    if not ok:
+        raise RuntimeError(
+            f"Failed to load QPT template: {layout_template_path}. {error_message}"
+        )
+
+    layout.loadFromTemplate(doc, QgsReadWriteContext())
+
+    map_item = _get_layout_item(layout, "map_frame", QgsLayoutItemMap)
 
     map_extent = _combined_projected_extent(
         project=project,
@@ -167,206 +205,53 @@ def export_qgis_print_layout(
         target_crs=target_crs,
     )
 
-    # Match the map frame shape and add more breathing room.
+    frame_rect = map_item.rect()
+
     map_extent = _fit_extent_to_frame(
         map_extent,
-        frame_width=205.0,
-        frame_height=150.0,
+        frame_width=frame_rect.width(),
+        frame_height=frame_rect.height(),
     )
-    map_extent = _buffer_extent(map_extent, factor=0.35)
 
-    layout = QgsPrintLayout(project)
-    layout.initializeDefaults()
-    layout.setName("print_map_layout")
+    map_extent = _buffer_extent(map_extent, factor=0.12)
 
-    if layout_template_path and layout_template_path.exists():
-        doc = QDomDocument()
-        template_text = layout_template_path.read_text(encoding="utf-8")
-
-        result = doc.setContent(template_text)
-
-        if isinstance(result, tuple):
-            ok = result[0]
-            error_message = result[1] if len(result) > 1 else ""
-        else:
-            ok = bool(result)
-            error_message = ""
-
-        if not ok:
-            raise RuntimeError(
-                f"Failed to load QPT template: {layout_template_path}. {error_message}"
-            )
-
-        layout.loadFromTemplate(doc, QgsReadWriteContext())
-
-        map_item = _get_layout_item(layout, "map_frame", QgsLayoutItemMap)
-        map_item.setExtent(map_extent)
-
-        if map_scale:
-            map_item.setScale(float(map_scale))
-
-        map_item.refresh()
-
-        _set_label_text(layout, "map_title", map_title, QgsLayoutItemLabel)
-        _set_label_text(layout, "map_location", map_location, QgsLayoutItemLabel)
-
-        scale_value = int(round(float(map_scale or map_item.scale())))
-
-        map_info = (
-            f"Scale 1:{scale_value:,}\n"
-            f"Projection: WGS 84 / UTM Zone 51N (EPSG:{target_epsg})\n"
-            f"Grid: {grid_label}"
-        )
-
-        _set_label_text(layout, "map_info", map_info, QgsLayoutItemLabel)
-        _set_label_text(layout, "osm_attribution", osm_attribution, QgsLayoutItemLabel)
-        _set_label_text(layout, "map_disclaimer", map_disclaimer, QgsLayoutItemLabel)
-
-        scale_bar = layout.itemById("scale_bar")
-        if scale_bar:
-            scale_bar.setLinkedMap(map_item)
-
-        if logo_path:
-            logo_item = layout.itemById("map_logo")
-            logo_path = Path(logo_path)
-
-            if logo_item and logo_path.exists():
-                logo_item.setPicturePath(str(logo_path))
-
-    else:
-        raise RuntimeError(
-            "Missing QGIS layout template. Expected: "
-            f"{layout_template_path or 'assets/qgis_layouts/client_boundary_map.qpt'}"
-        )
-
-    page = layout.pageCollection().pages()[0]
-    page.setPageSize("A4", QgsLayoutItemPage.Landscape)
-
-    # Page size is A4 landscape: 297mm x 210mm
-    margin = 10.0
-    map_x = 10.0
-    map_y = 30.0
-    map_w = 205.0
-    map_h = 150.0
-
-    # Title
-    title_item = QgsLayoutItemLabel(layout)
-    title_item.setText(map_title)
-    title_item.setFont(QFont("Arial", 18, QFont.Bold))
-    title_item.adjustSizeToText()
-    layout.addLayoutItem(title_item)
-    title_item.attemptMove(QgsLayoutPoint(10, 8, QgsUnitTypes.LayoutMillimeters))
-    title_item.attemptResize(QgsLayoutSize(270, 12, QgsUnitTypes.LayoutMillimeters))
-
-    # Map frame
-    map_item = QgsLayoutItemMap(layout)
-    map_item.setRect(20, 20, 200, 120)
     map_item.setExtent(map_extent)
-    map_item.setFrameEnabled(True)
-    layout.addLayoutItem(map_item)
-    map_item.attemptMove(QgsLayoutPoint(map_x, map_y, QgsUnitTypes.LayoutMillimeters))
-    map_item.attemptResize(QgsLayoutSize(map_w, map_h, QgsUnitTypes.LayoutMillimeters))
 
-    # Coordinate grid
-    _add_coordinate_grid(
-        map_item=map_item,
-        extent=map_extent,
-        QgsLayoutItemMapGrid=QgsLayoutItemMapGrid,
-        QColor=QColor,
-        QFont=QFont,
+    if map_scale:
+        map_item.setScale(float(map_scale))
+
+    map_item.refresh()
+
+    _set_label_text(layout, "map_title", map_title, QgsLayoutItemLabel)
+    _set_label_text(layout, "map_location", map_location, QgsLayoutItemLabel)
+
+    scale_value = int(round(float(map_scale or map_item.scale())))
+
+    projection_label = _utm_label_from_epsg(target_epsg)
+    
+    map_info = (
+        f"Scale 1:{scale_value:,}\n"
+        f"Projection: {projection_label} (EPSG:{target_epsg})\n"
+        f"Grid: {grid_label}"
     )
 
-    # Legend
-    legend = QgsLayoutItemLegend(layout)
-    legend.setTitle("Legend")
-    legend.setLinkedMap(map_item)
-    legend.setFrameEnabled(True)
-    layout.addLayoutItem(legend)
-    legend.attemptMove(QgsLayoutPoint(225, 32, QgsUnitTypes.LayoutMillimeters))
-    legend.attemptResize(QgsLayoutSize(60, 45, QgsUnitTypes.LayoutMillimeters))
+    _set_label_text(layout, "map_info", map_info, QgsLayoutItemLabel)
+    _set_label_text(layout, "osm_attribution", osm_attribution, QgsLayoutItemLabel)
+    _set_label_text(layout, "map_disclaimer", map_disclaimer, QgsLayoutItemLabel)
 
-    # Scale bar
-    scale_bar = QgsLayoutItemScaleBar(layout)
-    scale_bar.setStyle("Single Box")
-    scale_bar.setLinkedMap(map_item)
-    scale_bar.setUnits(QgsUnitTypes.DistanceMeters)
-    scale_bar.setNumberOfSegments(4)
-    scale_bar.setNumberOfSegmentsLeft(0)
-    scale_bar.setUnitsPerSegment(_nice_scale_segment(map_extent))
-    scale_bar.setUnitLabel("m")
-    scale_bar.setFont(QFont("Arial", 8))
-    scale_bar.setFrameEnabled(True)
-    layout.addLayoutItem(scale_bar)
-    scale_bar.attemptMove(QgsLayoutPoint(225, 85, QgsUnitTypes.LayoutMillimeters))
-    scale_bar.attemptResize(QgsLayoutSize(55, 12, QgsUnitTypes.LayoutMillimeters))
+    scale_bar = layout.itemById("scale_bar")
+    if scale_bar:
+        scale_bar.setLinkedMap(map_item)
 
-    # North arrow as a simple label, no external SVG required
-    north = QgsLayoutItemLabel(layout)
-    north.setText("N\n↑")
-    north.setFont(QFont("Arial", 22, QFont.Bold))
-    north.adjustSizeToText()
-    layout.addLayoutItem(north)
-    north.attemptMove(QgsLayoutPoint(250, 105, QgsUnitTypes.LayoutMillimeters))
-    north.attemptResize(QgsLayoutSize(25, 30, QgsUnitTypes.LayoutMillimeters))
+    logo_path = Path(logo_path) if logo_path else None
+    logo_item = layout.itemById("map_logo")
 
-    # Logo
-    if logo_path:
-        logo_path = Path(logo_path)
-        if logo_path.exists():
-            logo = QgsLayoutItemPicture(layout)
-            logo.setPicturePath(str(logo_path))
-            logo.setFrameEnabled(False)
-            layout.addLayoutItem(logo)
-            logo.attemptMove(QgsLayoutPoint(225, 145, QgsUnitTypes.LayoutMillimeters))
-            logo.attemptResize(QgsLayoutSize(55, 25, QgsUnitTypes.LayoutMillimeters))
-
-    # Metadata/footer
-    survey_count = metadata.get("survey_count", "—")
-    polygon_count = metadata.get("polygon_count", "—")
-    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    footer_text = (
-        f"CRS: EPSG:{target_epsg} | Surveys: {survey_count} | "
-        f"Polygons: {polygon_count} | Exported: {created_at}"
-    )
-
-    footer = QgsLayoutItemLabel(layout)
-    footer.setText(footer_text)
-    footer.setFont(QFont("Arial", 8))
-    footer.adjustSizeToText()
-    layout.addLayoutItem(footer)
-    footer.attemptMove(QgsLayoutPoint(10, 188, QgsUnitTypes.LayoutMillimeters))
-    footer.attemptResize(QgsLayoutSize(275, 8, QgsUnitTypes.LayoutMillimeters))
-
-    # Bounds label
-    bounds_text = (
-        "Bounds (WGS84): "
-        f"{bounds.get('min_lat'):.6f}, {bounds.get('min_lon'):.6f} "
-        "to "
-        f"{bounds.get('max_lat'):.6f}, {bounds.get('max_lon'):.6f}"
-        if bounds
-        else "Bounds: unavailable"
-    )
-
-    bounds_label = QgsLayoutItemLabel(layout)
-    bounds_label.setText(bounds_text)
-    bounds_label.setFont(QFont("Arial", 7))
-    bounds_label.adjustSizeToText()
-    layout.addLayoutItem(bounds_label)
-    bounds_label.attemptMove(QgsLayoutPoint(10, 197, QgsUnitTypes.LayoutMillimeters))
-    bounds_label.attemptResize(QgsLayoutSize(275, 6, QgsUnitTypes.LayoutMillimeters))
+    if logo_item and logo_path and logo_path.exists():
+        logo_item.setPicturePath(str(logo_path))
 
     pdf_path = package_dir / "print_map.pdf"
     png_path = package_dir / "preview.png"
 
-    pdf_path.unlink(missing_ok=True)
-    png_path.unlink(missing_ok=True)
-
-    exporter = QgsLayoutExporter(layout)
-
-    # Remove previous exports first.
-    # This prevents GDAL/QGIS PNG overwrite warnings such as:
-    # "The PNG driver does not support update access to existing datasets."
     pdf_path.unlink(missing_ok=True)
     png_path.unlink(missing_ok=True)
 
@@ -385,6 +270,8 @@ def export_qgis_print_layout(
 
     if image_result != QgsLayoutExporter.Success:
         raise RuntimeError(f"Failed to export PNG preview: {png_path}")
+    
+    created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     metadata.setdefault("outputs", {})
     metadata["outputs"]["print_map_pdf"] = "print_map.pdf"
@@ -746,7 +633,31 @@ def _set_label_text(
     item_id: str,
     text: str,
     QgsLayoutItemLabel: Any,
+    *,
+    adjust_to_text: bool = False,
 ) -> None:
     item = _get_layout_item(layout, item_id, QgsLayoutItemLabel)
     item.setText(text)
-    item.adjustSizeToText()
+
+    if adjust_to_text:
+        item.adjustSizeToText()
+
+def _create_osm_basemap_layer(QgsRasterLayer: Any) -> Any | None:
+    url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
+    layer = QgsRasterLayer(url, "OpenStreetMap", "wms")
+
+    if not layer.isValid():
+        return None
+
+    return layer
+
+def _utm_label_from_epsg(epsg: int) -> str:
+    if 32601 <= epsg <= 32660:
+        zone = epsg - 32600
+        return f"WGS 84 / UTM Zone {zone}N"
+
+    if 32701 <= epsg <= 32760:
+        zone = epsg - 32700
+        return f"WGS 84 / UTM Zone {zone}S"
+
+    return "WGS 84 / UTM"
