@@ -224,6 +224,30 @@ def export_qgis_print_layout(
 
     map_item.refresh()
 
+# inset map
+    inset_item = layout.itemById("map_inset")
+
+    if inset_item and isinstance(inset_item, QgsLayoutItemMap):
+        inset_extent = _combined_projected_extent(
+            project=project,
+            layers=[merged_layer],
+            target_crs=target_crs,
+        )
+
+        inset_frame_rect = inset_item.rect()
+
+        inset_extent = _fit_extent_to_frame(
+            inset_extent,
+            frame_width=inset_frame_rect.width(),
+            frame_height=inset_frame_rect.height(),
+        )
+
+        # Bigger buffer = zoomed-out location/context map
+        inset_extent = _buffer_extent(inset_extent, factor=4.0)
+
+        inset_item.setExtent(inset_extent)
+        inset_item.refresh()
+
     _set_label_text(layout, "map_title", map_title, QgsLayoutItemLabel)
     _set_label_text(layout, "map_location", map_location, QgsLayoutItemLabel)
 
@@ -251,39 +275,49 @@ def export_qgis_print_layout(
     if logo_item and logo_path and logo_path.exists():
         logo_item.setPicturePath(str(logo_path))
 
+# export pdf and png
     pdf_path = package_dir / "print_map.pdf"
     png_path = package_dir / "preview.png"
 
+    pdf_temp_path = package_dir / "print_map_tmp.pdf"
+    png_temp_path = package_dir / "preview_tmp.png"
+
     pdf_path.unlink(missing_ok=True)
     png_path.unlink(missing_ok=True)
+    pdf_temp_path.unlink(missing_ok=True)
+    png_temp_path.unlink(missing_ok=True)
 
     exporter = QgsLayoutExporter(layout)
 
+    print(f"Exporting PDF: {pdf_temp_path}", flush=True)
+
     pdf_settings = QgsLayoutExporter.PdfExportSettings()
-    pdf_result = exporter.exportToPdf(str(pdf_path), pdf_settings)
+    pdf_result = exporter.exportToPdf(str(pdf_temp_path), pdf_settings)
+
+    print(f"PDF export result: {pdf_result}", flush=True)
 
     if pdf_result != QgsLayoutExporter.Success:
-        raise RuntimeError(f"Failed to export PDF: {pdf_path}")
+        raise RuntimeError(f"Failed to export PDF: {pdf_temp_path}")
+
+    if not pdf_temp_path.exists() or pdf_temp_path.stat().st_size == 0:
+        raise RuntimeError(f"PDF export produced an empty file: {pdf_temp_path}")
+
+    pdf_temp_path.replace(pdf_path)
 
     image_settings = QgsLayoutExporter.ImageExportSettings()
     image_settings.dpi = min(dpi, 120)
 
-    png_temp_path = package_dir / f"preview_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
-
-    png_temp_path.unlink(missing_ok=True)
-    png_path.unlink(missing_ok=True)
-
-    print(f"Exporting PNG preview: {png_path} at {image_settings.dpi} DPI", flush=True)
+    print(f"Exporting PNG preview: {png_temp_path} at {image_settings.dpi} DPI", flush=True)
 
     image_result = exporter.exportToImage(str(png_temp_path), image_settings)
 
     print(f"PNG export result: {image_result}", flush=True)
 
     if image_result != QgsLayoutExporter.Success:
-        raise RuntimeError(f"Failed to export PNG preview: {png_path}")
+        raise RuntimeError(f"Failed to export PNG preview: {png_temp_path}")
 
-    if not png_temp_path.exists():
-        raise RuntimeError(f"PNG export reported success but file was not created: {png_temp_path}")
+    if not png_temp_path.exists() or png_temp_path.stat().st_size == 0:
+        raise RuntimeError(f"PNG export produced an empty file: {png_temp_path}")
 
     png_temp_path.replace(png_path)
     
