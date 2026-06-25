@@ -105,10 +105,10 @@ def export_qgis_print_layout(
         else None
     )
 
-    osm_attribution = (
-        layout_cfg.get("basemap_attribution")
-        or "Basemap: © OpenStreetMap contributors"
-    )
+    # osm_attribution = (
+    #     layout_cfg.get("basemap_attribution")
+    #     or "Basemap: © OpenStreetMap contributors"
+    # )
 
     map_disclaimer = (
         layout_cfg.get("disclaimer")
@@ -161,12 +161,14 @@ def export_qgis_print_layout(
         width=0.55,
     )
 
-    osm_layer = _create_osm_basemap_layer(QgsRasterLayer)
+    basemap_layer, basemap_attribution = _create_preferred_basemap_layer(QgsRasterLayer)
 
-    if osm_layer is not None:
-        project.addMapLayer(osm_layer)
+    if basemap_layer is not None:
+        project.addMapLayer(basemap_layer)
 
     project.addMapLayer(merged_layer)
+
+    osm_attribution = basemap_attribution
 
     layout = QgsPrintLayout(project)
     layout.initializeDefaults()
@@ -264,12 +266,26 @@ def export_qgis_print_layout(
         raise RuntimeError(f"Failed to export PDF: {pdf_path}")
 
     image_settings = QgsLayoutExporter.ImageExportSettings()
-    image_settings.dpi = dpi
+    image_settings.dpi = min(dpi, 120)
 
-    image_result = exporter.exportToImage(str(png_path), image_settings)
+    png_temp_path = package_dir / f"preview_tmp_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png"
+
+    png_temp_path.unlink(missing_ok=True)
+    png_path.unlink(missing_ok=True)
+
+    print(f"Exporting PNG preview: {png_path} at {image_settings.dpi} DPI", flush=True)
+
+    image_result = exporter.exportToImage(str(png_temp_path), image_settings)
+
+    print(f"PNG export result: {image_result}", flush=True)
 
     if image_result != QgsLayoutExporter.Success:
         raise RuntimeError(f"Failed to export PNG preview: {png_path}")
+
+    if not png_temp_path.exists():
+        raise RuntimeError(f"PNG export reported success but file was not created: {png_temp_path}")
+
+    png_temp_path.replace(png_path)
     
     created_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -661,3 +677,43 @@ def _utm_label_from_epsg(epsg: int) -> str:
         return f"WGS 84 / UTM Zone {zone}S"
 
     return "WGS 84 / UTM"
+
+def _create_preferred_basemap_layer(QgsRasterLayer: Any) -> tuple[Any | None, str]:
+    stadia_layer = _create_stadia_alidade_smooth_layer(QgsRasterLayer)
+
+    if stadia_layer is not None:
+        return (
+            stadia_layer,
+            "Basemap: © Stadia Maps, © OpenMapTiles, © OpenStreetMap contributors",
+        )
+
+    osm_layer = _create_osm_basemap_layer(QgsRasterLayer)
+
+    if osm_layer is not None:
+        return (
+            osm_layer,
+            "Basemap: © OpenStreetMap contributors",
+        )
+
+    return None, "Basemap unavailable"
+
+
+def _create_stadia_alidade_smooth_layer(QgsRasterLayer: Any) -> Any | None:
+    api_key = os.getenv("STADIA_MAPS_API_KEY", "").strip()
+
+    if not api_key:
+        return None
+
+    url = (
+        "type=xyz&url="
+        "https://tiles.stadiamaps.com/tiles/alidade_smooth/"
+        "{z}/{x}/{y}@2x.png"
+        f"?api_key={api_key}"
+    )
+
+    layer = QgsRasterLayer(url, "Stadia Alidade Smooth", "wms")
+
+    if not layer.isValid():
+        return None
+
+    return layer

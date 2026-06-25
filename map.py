@@ -178,7 +178,7 @@ def main() -> None:
     if args.export_print:
       from modules.map_export.qgis_print_exporter import export_qgis_print_layout
 
-      print("===== QGIS PRINT EXPORT =====")
+      print("===== QGIS PRINT EXPORT =====", flush=True)
 
       print_result = export_qgis_print_layout(
           package_dir=result.output_dir,
