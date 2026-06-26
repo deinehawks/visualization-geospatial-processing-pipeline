@@ -242,26 +242,35 @@ def export_qgis_print_layout(
             frame_height=inset_frame_rect.height(),
         )
 
+        # Keep your zoomed-out inset
         inset_extent = _buffer_extent(inset_extent, factor=4.0)
 
-        inset_png_path = package_dir / "inset_map.png"
+        inset_basemap_path = package_dir / "inset_basemap.png"
 
-        _render_inset_map_image(
+        _render_inset_basemap_image(
+            project=project,
             basemap_layer=basemap_layer,
+            target_crs=target_crs,
+            extent=inset_extent,
+            output_path=inset_basemap_path,
+            width_mm=inset_frame_rect.width(),
+            height_mm=inset_frame_rect.height(),
+            dpi=600,
+        )
+
+        _add_inset_basemap_picture(
+            layout=layout,
+            inset_item=inset_item,
+            image_path=inset_basemap_path,
+            QgsLayoutItemPicture=QgsLayoutItemPicture,
+        )
+
+        _configure_inset_boundary_overlay(
+            project=project,
+            inset_item=inset_item,
             boundary_layer=merged_layer,
             target_crs=target_crs,
             extent=inset_extent,
-            output_path=inset_png_path,
-            width_mm=inset_frame_rect.width(),
-            height_mm=inset_frame_rect.height(),
-            dpi=96,
-        )
-
-        _replace_inset_map_with_picture(
-            layout=layout,
-            inset_item=inset_item,
-            image_path=inset_png_path,
-            QgsLayoutItemPicture=QgsLayoutItemPicture,
         )
 
     _set_label_text(layout, "map_title", map_title, QgsLayoutItemLabel)
@@ -773,87 +782,86 @@ def _create_stadia_alidade_smooth_layer(QgsRasterLayer: Any) -> Any | None:
 
     return layer
 
-
-def _render_inset_map_image(
+def _render_inset_basemap_image(
     *,
+    project: Any,
     basemap_layer: Any | None,
-    boundary_layer: Any,
     target_crs: Any,
     extent: Any,
     output_path: Path,
     width_mm: float,
     height_mm: float,
-    dpi: int = 96,
+    dpi: int = 600,
 ) -> None:
-    from qgis.PyQt.QtCore import QSize  # type: ignore[reportMissingImports]
-    from qgis.PyQt.QtGui import QColor, QImage, QPainter  # type: ignore[reportMissingImports]
     from qgis.core import (  # type: ignore[reportMissingImports]
-        QgsFillSymbol,
-        QgsMapRendererCustomPainterJob,
-        QgsMapSettings,
-        QgsSingleSymbolRenderer,
+        QgsLayoutExporter,
+        QgsLayoutItemMap,
+        QgsLayoutPoint,
+        QgsLayoutSize,
+        QgsPrintLayout,
+        QgsUnitTypes,
     )
+
     output_path.unlink(missing_ok=True)
 
-    width_px = max(900, int((width_mm / 25.4) * dpi))
-    height_px = max(700, int((height_mm / 25.4) * dpi))
+    temp_layout = QgsPrintLayout(project)
+    temp_layout.initializeDefaults()
+    temp_layout.setName("temporary_inset_basemap_layout")
 
-    image = QImage(
-        QSize(width_px, height_px),
-        QImage.Format_ARGB32_Premultiplied,
+    page = temp_layout.pageCollection().page(0)
+    page.setPageSize(
+        QgsLayoutSize(
+            width_mm,
+            height_mm,
+            QgsUnitTypes.LayoutMillimeters,
+        )
     )
-    image.fill(QColor(255, 255, 255).rgba())
 
-    settings = QgsMapSettings()
-    settings.setDestinationCrs(target_crs)
-    settings.setExtent(extent)
-    settings.setOutputSize(QSize(width_px, height_px))
-    settings.setOutputDpi(dpi)
-    settings.setBackgroundColor(QColor(255, 255, 255))
+    map_item = QgsLayoutItemMap(temp_layout)
+    map_item.attemptMove(
+        QgsLayoutPoint(
+            0,
+            0,
+            QgsUnitTypes.LayoutMillimeters,
+        )
+    )
+    map_item.attemptResize(
+        QgsLayoutSize(
+            width_mm,
+            height_mm,
+            QgsUnitTypes.LayoutMillimeters,
+        )
+    )
 
-    layers = []
+    map_item.setCrs(target_crs)
+    map_item.setExtent(extent)
+    map_item.setBackgroundEnabled(True)
 
     if basemap_layer is not None:
-        layers.append(basemap_layer)
+        map_item.setLayers([basemap_layer])
+        map_item.setKeepLayerSet(True)
 
-    layers.append(boundary_layer)
-    settings.setLayers(layers)
+    temp_layout.addLayoutItem(map_item)
+    map_item.refresh()
 
-    old_renderer = boundary_layer.renderer().clone() if boundary_layer.renderer() else None
+    exporter = QgsLayoutExporter(temp_layout)
 
-    inset_symbol = QgsFillSymbol.createSimple(
-        {
-            "color": "255,0,0,70",
-            "outline_color": "180,0,0,255",
-            "outline_width": "1.2",
-            "outline_width_unit": "MM",
-        }
-    )
+    image_settings = QgsLayoutExporter.ImageExportSettings()
+    image_settings.dpi = dpi
 
-    boundary_layer.setRenderer(QgsSingleSymbolRenderer(inset_symbol))
-    boundary_layer.triggerRepaint()
+    print(f"Exporting inset basemap image: {output_path} at {dpi} DPI", flush=True)
 
-    painter = QPainter(image)
+    result = exporter.exportToImage(str(output_path), image_settings)
 
-    try:
-        job = QgsMapRendererCustomPainterJob(settings, painter)
-        job.start()
-        job.waitForFinished()
-    finally:
-        painter.end()
+    print(f"Inset basemap export result: {result}", flush=True)
 
-        if old_renderer is not None:
-            boundary_layer.setRenderer(old_renderer)
-            boundary_layer.triggerRepaint()
+    if result != QgsLayoutExporter.Success:
+        raise RuntimeError(f"Failed to export inset basemap image: {output_path}")
 
-        if not image.save(str(output_path), "PNG"):
-            raise RuntimeError(f"Failed to save inset map image: {output_path}")
-
-        if not output_path.exists() or output_path.stat().st_size == 0:
-            raise RuntimeError(f"Inset map image was not created: {output_path}")
-
-
-def _replace_inset_map_with_picture(
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        raise RuntimeError(f"Inset basemap image was not created: {output_path}")
+      
+def _add_inset_basemap_picture(
     *,
     layout: Any,
     inset_item: Any,
@@ -861,15 +869,60 @@ def _replace_inset_map_with_picture(
     QgsLayoutItemPicture: Any,
 ) -> None:
     picture = QgsLayoutItemPicture(layout)
-    picture.setId("map_inset_image")
+    picture.setId("map_inset_basemap")
     picture.setPicturePath(str(image_path))
+
+    try:
+        picture.setResizeMode(QgsLayoutItemPicture.Stretch)
+    except AttributeError:
+        pass
 
     picture.attemptMove(inset_item.positionWithUnits())
     picture.attemptResize(inset_item.sizeWithUnits())
-    picture.setZValue(inset_item.zValue())
+
+    # Put image below the live boundary overlay.
+    picture.setZValue(inset_item.zValue() - 0.1)
 
     layout.addLayoutItem(picture)
 
-    # Keep the QPT map item for placement/reference, but do not render it
-    # during final PDF/PNG export.
-    inset_item.setExcludeFromExports(True)
+def _configure_inset_boundary_overlay(
+    *,
+    project: Any,
+    inset_item: Any,
+    boundary_layer: Any,
+    target_crs: Any,
+    extent: Any,
+) -> None:
+    from qgis.core import (  # type: ignore[reportMissingImports]
+        QgsFillSymbol,
+        QgsSingleSymbolRenderer,
+    )
+
+    inset_boundary_layer = boundary_layer.clone()
+    inset_boundary_layer.setName("Inset Boundary Overlay")
+
+    inset_symbol = QgsFillSymbol.createSimple(
+        {
+            "color": "255,0,0,90",
+            "outline_color": "160,0,0,255",
+            "outline_width": "1.5",
+            "outline_width_unit": "MM",
+        }
+    )
+
+    inset_boundary_layer.setRenderer(QgsSingleSymbolRenderer(inset_symbol))
+
+    # Add silently to project so QGIS can render it, but do not show in layer tree.
+    project.addMapLayer(inset_boundary_layer, False)
+
+    inset_item.setCrs(target_crs)
+    inset_item.setExtent(extent)
+
+    # Only boundary here. Basemap is handled by the picture underneath.
+    inset_item.setLayers([inset_boundary_layer])
+    inset_item.setKeepLayerSet(True)
+
+    # Important: transparent map item so the basemap picture below is visible.
+    inset_item.setBackgroundEnabled(False)
+
+    inset_item.refresh()
