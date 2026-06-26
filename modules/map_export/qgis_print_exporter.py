@@ -15,7 +15,7 @@ def export_qgis_print_layout(
     package_dir: Path,
     title: str | None = None,
     logo_path: Path | None = None,
-    dpi: int = 200,
+    dpi: int = 400,
 ) -> dict[str, str]:
     """
     Export a print-ready PDF and PNG preview from a Phase 1 map package.
@@ -247,6 +247,8 @@ def export_qgis_print_layout(
 
         inset_basemap_path = package_dir / "inset_basemap.png"
 
+        inset_dpi = _read_int_env("MAP_EXPORT_INSET_DPI", 800)
+
         _render_inset_basemap_image(
             project=project,
             basemap_layer=basemap_layer,
@@ -255,7 +257,7 @@ def export_qgis_print_layout(
             output_path=inset_basemap_path,
             width_mm=inset_frame_rect.width(),
             height_mm=inset_frame_rect.height(),
-            dpi=600,
+            dpi=inset_dpi,
         )
 
         _add_inset_basemap_picture(
@@ -314,11 +316,14 @@ def export_qgis_print_layout(
 
     exporter = QgsLayoutExporter(layout)
 
+    preview_dpi = _read_int_env("MAP_EXPORT_PREVIEW_DPI", 120)
+    pdf_dpi = _read_int_env("MAP_EXPORT_PDF_DPI", 300)
+
     # Export preview first so we can verify layout before PDF.
     image_settings = QgsLayoutExporter.ImageExportSettings()
-    image_settings.dpi = min(dpi, 120)
+    image_settings.dpi = preview_dpi
 
-    print(f"Exporting PNG preview: {png_temp_path} at {image_settings.dpi} DPI", flush=True)
+    print(f"Exporting PNG preview: {png_temp_path} at {preview_dpi} DPI", flush=True)
 
     image_result = exporter.exportToImage(str(png_temp_path), image_settings)
 
@@ -333,12 +338,12 @@ def export_qgis_print_layout(
     png_temp_path.replace(png_path)
 
     # Export PDF after preview.
-    print(f"Exporting PDF: {pdf_temp_path}", flush=True)
-
     pdf_settings = QgsLayoutExporter.PdfExportSettings()
-    pdf_settings.dpi = min(dpi, 150)
+    pdf_settings.dpi = pdf_dpi
     pdf_settings.rasterizeWholeImage = True
 
+    print(f"Exporting PDF: {pdf_temp_path} at {pdf_dpi} DPI", flush=True)
+    
     pdf_result = exporter.exportToPdf(str(pdf_temp_path), pdf_settings)
 
     print(f"PDF export result: {pdf_result}", flush=True)
@@ -791,7 +796,7 @@ def _render_inset_basemap_image(
     output_path: Path,
     width_mm: float,
     height_mm: float,
-    dpi: int = 600,
+    dpi: int = 800,
 ) -> None:
     from qgis.core import (  # type: ignore[reportMissingImports]
         QgsLayoutExporter,
@@ -901,16 +906,10 @@ def _configure_inset_boundary_overlay(
     inset_boundary_layer = boundary_layer.clone()
     inset_boundary_layer.setName("Inset Boundary Overlay")
 
-    inset_symbol = QgsFillSymbol.createSimple(
-        {
-            "color": "255,0,0,90",
-            "outline_color": "160,0,0,255",
-            "outline_width": "1.5",
-            "outline_width_unit": "MM",
-        }
-    )
+    source_renderer = boundary_layer.renderer()
 
-    inset_boundary_layer.setRenderer(QgsSingleSymbolRenderer(inset_symbol))
+    if source_renderer is not None:
+        inset_boundary_layer.setRenderer(source_renderer.clone())
 
     # Add silently to project so QGIS can render it, but do not show in layer tree.
     project.addMapLayer(inset_boundary_layer, False)
@@ -926,3 +925,19 @@ def _configure_inset_boundary_overlay(
     inset_item.setBackgroundEnabled(False)
 
     inset_item.refresh()
+
+
+def _read_int_env(name: str, default: int) -> int:
+    value = os.getenv(name, "").strip()
+
+    if not value:
+        return default
+
+    try:
+        return int(value)
+    except ValueError:
+        print(
+            f"Invalid {name} value: {value!r}. Using default: {default}",
+            flush=True,
+        )
+        return default
