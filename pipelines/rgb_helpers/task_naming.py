@@ -220,3 +220,15 @@ class RGBTaskNamingMixin:
     ) -> str:
         task_label = self._webodm_task_label(task_key)
         return f"{survey_id}-RGB--{flag}-{task_label}"
+
+    def _webodm_primary_task_key(self) -> str:
+        webodm_cfg = self.config.get("webodm") or {}
+        return self._normalize_webodm_task_key(
+            str(webodm_cfg.get("primary_task") or "task2")
+        )
+
+    def _webodm_fallback_task_key(self) -> str:
+        webodm_cfg = self.config.get("webodm") or {}
+        return self._normalize_webodm_task_key(
+            str(webodm_cfg.get("fallback_task") or "task4")
+        )

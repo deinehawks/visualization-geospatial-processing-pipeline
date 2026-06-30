@@ -1782,9 +1782,11 @@ class RGBPipeline(
 
 
     def run_task4_fallback(self) -> Dict[str, Any]:
+        fallback_task = self._webodm_fallback_task_key()
+
         return self.run_webodm_fallback_task(
-            task_key="task4",
-            fallback_reason="quality_gate_requested_task4_fallback",
+            task_key=fallback_task,
+            fallback_reason=f"quality_gate_requested_{fallback_task}_fallback",
         )
         
 
@@ -1963,22 +1965,35 @@ class RGBPipeline(
                     "project_id": project_id,
                 }
 
-            if raw in ("fallback", "task4"):
-                logger.warning("User requested Task 4 fallback workflow.")
+            if raw in ("fallback", "task4", "fallback_task"):
+                fallback_task = self._webodm_fallback_task_key()
+
+                logger.warning(
+                    f"User requested fallback WebODM workflow: {fallback_task}"
+                )
+
                 try:
-                    task4_result = self.run_task4_fallback()
+                    fallback_result = self.run_webodm_fallback_task(
+                        task_key=fallback_task,
+                        fallback_reason=f"quality_gate_requested_{fallback_task}_fallback",
+                    )
                 except Exception:
-                    logger.exception("Task 4 fallback failed.")
+                    logger.exception(f"{fallback_task} fallback failed.")
+
+                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+
                     return {
                         "passed": False,
                         "restarts": restarts,
                         "project_id": project_id,
-                        "task4_failed": True,
+                        "fallback_task": fallback_task,
+                        "fallback_failed": True,
                     }
 
-                task4_state = task4_result.get("task4") or {}
-                if task4_state.get("success"):
-                    logger.info("Task 4 fallback completed successfully.")
+                fallback_state = fallback_result.get(fallback_task) or {}
+
+                if fallback_state.get("success"):
+                    logger.info(f"{fallback_task} fallback completed successfully.")
 
                     self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
 
@@ -1986,12 +2001,13 @@ class RGBPipeline(
                         "passed": True,
                         "restarts": restarts,
                         "project_id": project_id,
-                        "task4": task4_state,
+                        "fallback_task": fallback_task,
+                        fallback_task: fallback_state,
                         "selected_webodm_task": self.state.get("selected_webodm_task"),
                         "selected_orthomosaic": self.state.get("selected_orthomosaic"),
                     }
 
-                logger.warning("Task 4 fallback ran but did not succeed.")
+                logger.warning(f"{fallback_task} fallback ran but did not succeed.")
 
                 self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
 
@@ -1999,7 +2015,8 @@ class RGBPipeline(
                     "passed": False,
                     "restarts": restarts,
                     "project_id": project_id,
-                    "task4": task4_state,
+                    "fallback_task": fallback_task,
+                    fallback_task: fallback_state,
                 }
 
             if raw == "restart":

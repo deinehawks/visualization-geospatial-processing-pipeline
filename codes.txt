@@ -5,6 +5,7 @@ Queue:
 
 
 Running: 
+python main.py --survey "DNG-001_36.4Ha_M3C_100m_85f75s_8mps_p30" --year 2026  
 
 
 command for generating maps

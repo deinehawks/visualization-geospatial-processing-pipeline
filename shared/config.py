@@ -154,6 +154,10 @@ def load_pipeline_config() -> dict:
             "username": read_str_env("WEBODM_USERNAME", required=True),
             "password": read_str_env("WEBODM_PASSWORD", required=True),
             "node_id": read_int_env("WEBODM_NODE_ID", 0, minimum=1),
+
+            "primary_task": read_str_env("WEBODM_PRIMARY_TASK", "task2"),
+            "fallback_task": read_str_env("WEBODM_FALLBACK_TASK", "task4"),
+
             "task1_options": read_json_env("WEBODM_TASK1_OPTIONS_JSON", {}),
             "task2_options": read_json_env("WEBODM_TASK2_OPTIONS_JSON", {}),
             "task4_options": read_json_env("WEBODM_TASK4_OPTIONS_JSON", {}),
@@ -251,6 +255,23 @@ def load_pipeline_config() -> dict:
             if z < 0:
                 raise ValueError(f"QGIS_TILES_ZOOM must be >= 0, got {value!r}")
 
+    def validate_task_key(value: str | None, label: str) -> None:
+        if value is None:
+            raise ValueError(f"{label} is required")
+
+        value = str(value).strip().lower()
+
+        if not value:
+            raise ValueError(f"{label} must not be empty")
+
+        if not value.startswith("task"):
+            raise ValueError(f"{label} must start with 'task', got {value!r}")
+
+        number = value.replace("task", "", 1)
+
+        if not number.isdigit():
+            raise ValueError(f"{label} must be like task2, task4, task5, got {value!r}")
+
     # required paths
     validate_existing_path(config["paths"]["surveys_root"], "SURVEYS_ROOT")
     validate_existing_path(config["paths"]["field_data_root"], "FIELD_DATA_ROOT")
@@ -287,6 +308,8 @@ def load_pipeline_config() -> dict:
         "WEBODM_URL scheme",
         {"http", "https"},
     )
+    validate_task_key(config["webodm"]["primary_task"], "WEBODM_PRIMARY_TASK")
+    validate_task_key(config["webodm"]["fallback_task"], "WEBODM_FALLBACK_TASK")
 
     # tool validation
     validate_executable(config["exports"]["tools"]["gdalwarp_path"], "GDALWARP_PATH", required=False)
