@@ -82,6 +82,9 @@ def export_qgis_print_layout(
 
     layout_cfg = metadata.get("layout") or {}
 
+    orthomosaic_records = metadata.get("orthomosaics") or []
+    include_orthomosaic = bool(metadata.get("include_orthomosaic")) and bool(orthomosaic_records)
+
     map_title = (
         title
         or layout_cfg.get("title")
@@ -163,10 +166,60 @@ def export_qgis_print_layout(
 
     basemap_layer, basemap_attribution = _create_preferred_basemap_layer(QgsRasterLayer)
 
-    if basemap_layer is not None:
-        project.addMapLayer(basemap_layer)
+    orthomosaic_layers: list[Any] = []
 
+    if include_orthomosaic:
+        for record in orthomosaic_records:
+            ortho_path_value = record.get("source_orthomosaic")
+
+            if not ortho_path_value:
+                raise RuntimeError(
+                    f"Missing source_orthomosaic value in metadata record: {record}"
+                )
+
+            ortho_path = Path(ortho_path_value)
+
+            if not ortho_path.exists():
+                raise FileNotFoundError(f"Orthomosaic not found: {ortho_path}")
+
+            survey_name = record.get("survey_name") or ortho_path.stem
+
+            ortho_layer = QgsRasterLayer(
+                str(ortho_path),
+                f"Orthomosaic - {survey_name}",
+            )
+
+            if not ortho_layer.isValid():
+                raise RuntimeError(f"Failed to load orthomosaic raster: {ortho_path}")
+
+            orthomosaic_layers.append(ortho_layer)
+
+        if not orthomosaic_layers:
+            raise RuntimeError("Orthomosaic export was requested, but no raster layers were loaded.")
+
+
+    main_map_layers: list[Any] = []
+
+    # Add background layers to the project first.
+    if orthomosaic_layers:
+        for ortho_layer in orthomosaic_layers:
+            project.addMapLayer(ortho_layer)
+    else:
+        if basemap_layer is not None:
+            project.addMapLayer(basemap_layer)
+
+    # Add boundary layer after background layers.
     project.addMapLayer(merged_layer)
+
+    # QgsLayoutItemMap layer order is top-first.
+    # Boundary should be first so it appears above raster/basemap.
+    main_map_layers.append(merged_layer)
+
+    if orthomosaic_layers:
+        main_map_layers.extend(orthomosaic_layers)
+    else:
+        if basemap_layer is not None:
+            main_map_layers.append(basemap_layer)
 
     osm_attribution = basemap_attribution
 
@@ -218,6 +271,8 @@ def export_qgis_print_layout(
     map_extent = _buffer_extent(map_extent, factor=0.12)
 
     map_item.setExtent(map_extent)
+    map_item.setLayers(main_map_layers)
+    map_item.setKeepLayerSet(True)
 
     if map_scale:
         map_item.setScale(float(map_scale))
@@ -343,7 +398,7 @@ def export_qgis_print_layout(
     pdf_settings.rasterizeWholeImage = True
 
     print(f"Exporting PDF: {pdf_temp_path} at {pdf_dpi} DPI", flush=True)
-    
+
     pdf_result = exporter.exportToPdf(str(pdf_temp_path), pdf_settings)
 
     print(f"PDF export result: {pdf_result}", flush=True)

@@ -58,37 +58,31 @@ def main() -> None:
         default=None,
         help="Output map package name. Example: tlw-overall-map",
     )
-
     parser.add_argument(
         "--title",
         default=None,
         help="Human-readable map title.",
     )
-
     parser.add_argument(
         "--source-root",
         default=None,
         help="Root folder where survey folders are located. Defaults to FIELD_DATA_ROOT.",
     )
-
     parser.add_argument(
         "--output-root",
         default=None,
         help="Output root folder. Defaults to MAP_EXPORT_ROOT or exports/maps.",
     )
-
     parser.add_argument(
         "--export-print",
         action="store_true",
         help="Export print-ready PDF and PNG preview using QGIS.",
     )
-
     parser.add_argument(
         "--logo",
         default=None,
         help="Optional logo image path for the print layout.",
     )
-
     parser.add_argument(
         "--dpi",
         type=int,
@@ -106,17 +100,20 @@ def main() -> None:
         default=None,
         help="Optional fixed map scale denominator. Example: 15000 for 1:15,000.",
     )
-
     parser.add_argument(
         "--layout-template",
         default="assets/qgis_layouts/client_boundary_map.qpt",
         help="QGIS layout template (.qpt) used for print export.",
     )
-
     parser.add_argument(
         "--disclaimer",
         default=None,
         help="Disclaimer text shown in the print layout.",
+    )
+    parser.add_argument(
+        "--include-orthomosaic",
+        action="store_true",
+        help="Automatically find and include orthomosaic TIFF files in the map export.",
     )
 
     args = parser.parse_args()
@@ -163,6 +160,7 @@ def main() -> None:
         map_scale=args.map_scale,
         layout_template=Path(args.layout_template) if args.layout_template else None,
         disclaimer=args.disclaimer,
+        include_orthomosaic=args.include_orthomosaic,
     )
 
     print()
@@ -172,6 +170,7 @@ def main() -> None:
     print(f"Merged boundary : {result.merged_boundary_geojson}")
     print(f"Metadata        : {result.metadata_json}")
     print(f"Style           : {result.style_json}")
+    print(f"Orthomosaic : {'Yes' if args.include_orthomosaic else 'No'}")
     print("==============================")
     print()
 

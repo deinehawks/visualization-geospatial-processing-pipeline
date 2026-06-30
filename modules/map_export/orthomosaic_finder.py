@@ -46,7 +46,7 @@ def find_orthomosaic_file(source_root: Path, survey_name: str) -> OrthomosaicFil
     candidates.sort(key=_orthomosaic_sort_key)
 
     return OrthomosaicFile(
-        survey_name=survey_name,
+        survey_name=survey_dir.name,
         survey_dir=survey_dir,
         orthomosaic_path=candidates[0],
     )

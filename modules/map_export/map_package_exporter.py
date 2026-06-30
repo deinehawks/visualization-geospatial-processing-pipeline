@@ -9,7 +9,7 @@ import shutil
 
 from .boundary_finder import collect_boundary_files
 from .kml_to_geojson import extract_kml_from_kmz, parse_kml_to_features
-
+from .orthomosaic_finder import collect_orthomosaic_files
 
 @dataclass(frozen=True)
 class MapPackageResult:
@@ -32,6 +32,7 @@ def export_map_package(
     map_scale: int | None = None,
     layout_template: Path | None = None,
     disclaimer: str | None = None,
+    include_orthomosaic: bool = False,
 ) -> MapPackageResult:
     map_slug = _slugify(map_name)
     output_dir = output_root / map_slug
@@ -50,6 +51,22 @@ def export_map_package(
 
     all_features: list[dict[str, Any]] = []
     boundary_records: list[dict[str, Any]] = []
+    orthomosaic_records: list[dict[str, Any]] = []
+
+    if include_orthomosaic:
+        orthomosaic_files = collect_orthomosaic_files(
+            source_root=source_root,
+            survey_names=survey_names,
+        )
+
+        for item in orthomosaic_files:
+            orthomosaic_records.append(
+                {
+                    "survey_name": item.survey_name,
+                    "survey_dir": str(item.survey_dir),
+                    "source_orthomosaic": str(item.orthomosaic_path),
+                }
+            )
 
     for item in boundary_files:
         copied_boundary = source_boundary_dir / (
@@ -150,6 +167,9 @@ def export_map_package(
             "projection_label": "WGS 84 / UTM Zone 51N",
             "grid_label": "WGS 84 Geographic Coordinates (EPSG:4326)",
         },
+        "map_type": "orthomosaic" if include_orthomosaic else "boundary",
+        "include_orthomosaic": include_orthomosaic,
+        "orthomosaics": orthomosaic_records,
     }
 
     style = {

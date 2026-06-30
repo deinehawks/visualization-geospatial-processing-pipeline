@@ -73,7 +73,7 @@ def find_boundary_file(source_root: Path, survey_name: str) -> BoundaryFile:
     )
 
     return BoundaryFile(
-        survey_name=survey_name,
+        survey_name=survey_dir.name,
         survey_dir=survey_dir,
         boundary_path=candidates[0],
     )
@@ -101,6 +101,18 @@ def _resolve_survey_dir(
 ) -> Path:
     source_root = Path(source_root)
     survey_name = survey_name.strip()
+
+    survey_path = Path(survey_name)
+
+    # Allow exact dataset paths in --survey.
+    # Useful when the same survey folder name exists under multiple date folders.
+    if survey_path.exists():
+        if not survey_path.is_dir():
+            raise NotADirectoryError(f"Survey path is not a folder: {survey_path}")
+        return survey_path
+
+    if survey_path.is_absolute():
+        raise FileNotFoundError(f"Survey path does not exist: {survey_path}")
 
     if not source_root.exists():
         raise FileNotFoundError(f"Source root does not exist: {source_root}")
