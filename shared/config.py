@@ -98,6 +98,7 @@ def load_pipeline_config() -> dict:
             "crossrun_mode": read_str_env("CROSSRUN_MODE", "xc"),
             "task1_boundary_mode": read_str_env("TASK1_BOUNDARY_MODE", "xb"),
             "task2_boundary_mode": read_str_env("TASK2_BOUNDARY_MODE", "b"),
+            "task4_boundary_mode": read_str_env("TASK4_BOUNDARY_MODE", "b"),
         },
         "exports": {
             "enabled": read_bool_env("EXPORTS_ENABLED", True),
@@ -255,9 +256,11 @@ def load_pipeline_config() -> dict:
     validate_existing_path(config["paths"]["field_data_root"], "FIELD_DATA_ROOT")
 
     # naming
+    boundary_mode_allowed = {"b", "xb", "cb", "xcb", "cxb", "xcxb"}
     validate_choice(config["naming"]["crossrun_mode"], "CROSSRUN_MODE", {"c", "xc"})
-    validate_choice(config["naming"]["task1_boundary_mode"], "TASK1_BOUNDARY_MODE", {"xb", "b", "cb", "cxb", "xcxb", "xcb"})
-    validate_choice(config["naming"]["task2_boundary_mode"], "TASK2_BOUNDARY_MODE", {"b", "cb", "xcb"})
+    validate_choice(config["naming"]["task1_boundary_mode"], "TASK1_BOUNDARY_MODE", boundary_mode_allowed)
+    validate_choice(config["naming"]["task2_boundary_mode"], "TASK2_BOUNDARY_MODE", boundary_mode_allowed)
+    validate_choice(config["naming"]["task4_boundary_mode"], "TASK4_BOUNDARY_MODE", boundary_mode_allowed)
 
     # export templates
     validate_template(config["exports"]["ortho"]["filename_template"], "ORTHO_FILENAME_TEMPLATE", ["{flag}"])

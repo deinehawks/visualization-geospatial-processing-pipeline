@@ -1,7 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol, cast
+
+
+class _TaskNamingSupport(Protocol):
+    def _normalize_webodm_task_key(self, task_key: str) -> str:
+        ...
+
+    def _webodm_task_label(self, task_key: str) -> str:
+        ...
 
 
 class RGBOrthomosaicSelectionMixin:
@@ -9,21 +17,27 @@ class RGBOrthomosaicSelectionMixin:
     Helper methods for selecting the WebODM orthomosaic that downstream QGIS
     stages should use.
 
-    Rule:
-    WebODM decides the selected task.
-    QGIS clips the selected orthomosaic.
-    Tiles are generated from the selected clipped orthomosaic.
+    This mixin expects the main RGBPipeline class to provide:
+    - self.state
+
+    It also expects RGBTaskNamingMixin to be included in RGBPipeline.
     """
 
-    def _get_webodm_downloads(self) -> dict:
-        web = self.state.get("webodm") or {}
-        return web.get("downloads") or {}
+    state: dict[str, Any]
 
-    def _get_webodm_task_state(self, task_key: str) -> dict:
-        task_key = self._normalize_webodm_task_key(task_key)
+    def _task_naming(self) -> _TaskNamingSupport:
+        return cast(_TaskNamingSupport, self)
+
+    def _get_webodm_downloads(self) -> dict[str, Any]:
+        web = self.state.get("webodm") or {}
+        return dict(web.get("downloads") or {})
+
+    def _get_webodm_task_state(self, task_key: str) -> dict[str, Any]:
+        task_key = self._task_naming()._normalize_webodm_task_key(task_key)
+
         web = self.state.get("webodm") or {}
 
-        return web.get(task_key) or {}
+        return dict(web.get(task_key) or {})
 
     def _get_task_orthomosaic_path(
         self,
@@ -31,7 +45,8 @@ class RGBOrthomosaicSelectionMixin:
         *,
         require_exists: bool = True,
     ) -> Path | None:
-        task_key = self._normalize_webodm_task_key(task_key)
+        task_key = self._task_naming()._normalize_webodm_task_key(task_key)
+
         downloads = self._get_webodm_downloads()
         task_downloads = downloads.get(task_key) or {}
 
@@ -56,14 +71,14 @@ class RGBOrthomosaicSelectionMixin:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         extra: dict[str, Any] | None = None,
-    ) -> dict:
-        task_key = self._normalize_webodm_task_key(task_key)
-        task_label = self._webodm_task_label(task_key)
+    ) -> dict[str, Any]:
+        task_key = self._task_naming()._normalize_webodm_task_key(task_key)
+        task_label = self._task_naming()._webodm_task_label(task_key)
         task_state = self._get_webodm_task_state(task_key)
 
         source_path = Path(source_path)
 
-        selected = {
+        selected: dict[str, Any] = {
             "task_key": task_key,
             "task_label": task_label,
             "task_id": str(task_state.get("id") or ""),
@@ -94,8 +109,8 @@ class RGBOrthomosaicSelectionMixin:
         fallback_used: bool = False,
         fallback_reason: str | None = None,
         require_exists: bool = True,
-    ) -> dict:
-        task_key = self._normalize_webodm_task_key(task_key)
+    ) -> dict[str, Any]:
+        task_key = self._task_naming()._normalize_webodm_task_key(task_key)
 
         ortho_path = self._get_task_orthomosaic_path(
             task_key,
@@ -116,7 +131,7 @@ class RGBOrthomosaicSelectionMixin:
             fallback_reason=fallback_reason,
         )
 
-    def _get_selected_orthomosaic(self) -> dict:
+    def _get_selected_orthomosaic(self) -> dict[str, Any]:
         selected = self.state.get("selected_orthomosaic") or {}
 
         if not selected:
@@ -132,4 +147,4 @@ class RGBOrthomosaicSelectionMixin:
                 f"{source_path}"
             )
 
-        return selected
+        return dict(selected)

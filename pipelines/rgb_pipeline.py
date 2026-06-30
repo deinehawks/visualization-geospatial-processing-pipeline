@@ -21,6 +21,7 @@ from modules.qgis.qgis_tools import QGISTools
 from pipelines.rgb_helpers import (
     RGBTaskNamingMixin,
     RGBOrthomosaicSelectionMixin,
+    RGBUploadCacheMixin,
 )
 
 import time
@@ -34,6 +35,7 @@ from typing import Any
 class RGBPipeline(
     RGBTaskNamingMixin,
     RGBOrthomosaicSelectionMixin,
+    RGBUploadCacheMixin,
 ):
     """
     RGB Survey Pipeline (run_id-based, resume-safe)
@@ -513,11 +515,23 @@ class RGBPipeline(
         )
 
         excluded = self._safe_int(result.get("total_excluded"))
+        # Naming semantics:
+        # c  = crossrun/crosspath images were included
+        # xc = crossrun/crosspath images were excluded by the filter
+        #
+        # If the filter is enabled and applied, use "xc" even when total_excluded is 0.
+        # A zero exclusion count only means no crossrun images were detected, not that
+        # the filter was bypassed.
+        naming_cfg = self.config.get("naming", {})
+        crossrun_flag = str(naming_cfg.get("crossrun_mode") or "xc")
 
-        # Default pipeline semantics
-        crossrun_flag = "xc" if excluded > 0 else "c"
+        if crossrun_flag not in {"c", "xc"}:
+            raise ValueError(f"Invalid crossrun flag: {crossrun_flag!r}")
+
+
         self.state["crossrun_flag"] = crossrun_flag
         result["crossrun_flag"] = crossrun_flag
+        result["crossrun_excluded_count"] = excluded
 
         # Experiment naming label
         self.state["experiment_crossrun_label"] = "F"
@@ -729,6 +743,14 @@ class RGBPipeline(
                     require_free_multiplier=1.2,
                 )
                 upload_folder = cached_dir
+
+                self._remember_webodm_upload_folder(
+                    upload_folder=upload_folder,
+                    cached_dir=cached_dir,
+                    source_folder=image_folder,
+                    fallback_direct=False,
+                )
+
             except Exception as e:
                 logger.warning(
                     f"Upload cache unavailable, uploading directly from source. reason={e}"
@@ -736,12 +758,21 @@ class RGBPipeline(
                 cached_dir = None
                 upload_folder = image_folder
 
+                self._remember_webodm_upload_folder(
+                    upload_folder=upload_folder,
+                    cached_dir=None,
+                    source_folder=image_folder,
+                    fallback_direct=True,
+                    fallback_reason=str(e),
+                )
+
             processor = WebODMProcessor(
                 url=webodm_cfg["url"],
                 username=webodm_cfg["username"],
                 password=webodm_cfg["password"],
                 logger=logger,
             )
+
 
             project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
             project_name = f"{survey_id}{project_suffix}"
@@ -944,10 +975,10 @@ class RGBPipeline(
                 if task1_export_override:
                     filename = f"{task1_export_override}.tif"
                 else:
-                    filename = ortho_cfg.get(
-                        "filename_template",
-                        "orthomosaic--{flag}.tif"
-                    ).format(flag=task1_flag)
+                    filename = self._orthomosaic_filename(
+                        task_key="task1",
+                        flag=task1_flag,
+                    )
 
                 out_path = processor.export_orthomosaic(
                     project_id,
@@ -1110,10 +1141,10 @@ class RGBPipeline(
                 if task2_export_override:
                     filename = f"{task2_export_override}.tif"
                 else:
-                    filename = ortho_cfg.get(
-                        "filename_template",
-                        "orthomosaic--{flag}.tif"
-                    ).format(flag=task2_flag)
+                    filename = self._orthomosaic_filename(
+                        task_key="task2",
+                        flag=task2_flag,
+                    )
 
                 out_path = processor.export_orthomosaic(
                     project_id,
@@ -1128,8 +1159,20 @@ class RGBPipeline(
                 if out_path:
                     result["downloads"]["task2"]["orthomosaic"] = str(out_path)
                     result["downloads"]["task2"]["epsg"] = epsg
+
+                    selected = self._set_selected_orthomosaic(
+                        task_key="task2",
+                        source_path=out_path,
+                        flag=task2_flag,
+                        boundary_used=True,
+                        fallback_used=False,
+                    )
+
+                    result["selected_webodm_task"] = "task2"
+                    result["selected_orthomosaic"] = selected
                 else:
                     logger.warning("Could not download bounded orthomosaic for Task 2.")
+
 
             # ---------------- Downloads after TASK 2 ----------------
             if exports_cfg.get("enabled", False):
@@ -1246,8 +1289,10 @@ class RGBPipeline(
             return result
 
         finally:
-            if cached_dir is not None:
-                self._cleanup_upload_cache(cached_dir, logger)
+            # Do not clean the upload cache here.
+            # Quality Gate may trigger a fallback WebODM task, which should reuse
+            # the same staged upload folder instead of re-copying/re-uploading images.
+            pass
 
     def _stage_webodm_upload_images(
         self,
@@ -1321,12 +1366,11 @@ class RGBPipeline(
 
     def stage_qgis(self, *, resume: bool = False) -> Dict[str, Any]:
         logger = self.loggers["qgis"]
-        logger.info("Stage: QGIS Processing (clip + tiles)")
+        logger.info("Stage: QGIS Processing (selected orthomosaic clip + tiles)")
 
-        survey_id = self._require_survey_id()
         rgb_path = self._require_rgb_path()
 
-        qgis_cfg = (self.config.get("qgis") or {})
+        qgis_cfg = self.config.get("qgis") or {}
         if not bool(qgis_cfg.get("enabled", True)):
             logger.info("QGIS stage disabled (qgis.enabled=false).")
             return {"skipped": True}
@@ -1344,75 +1388,104 @@ class RGBPipeline(
                 return Path(fallback)
             raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
 
-        boundary_geojson_path = self.state.get("boundary_geojson_path")
-        if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-            raise RuntimeError("QGIS stage requires boundary_geojson_path (missing).")
+        def optional_dir_from_keys(
+            keys: list[str],
+            *,
+            fallback: Path,
+        ) -> Path:
+            for key in keys:
+                value = dirs.get(key)
+                if value:
+                    return Path(value)
 
-        web = self.state.get("webodm") or {}
-        dls = web.get("downloads") or {}
-        t1 = (dls.get("task1") or {})
-        t2 = (dls.get("task2") or {})
+            return Path(fallback)
 
-        unbounded_ortho = t1.get("orthomosaic")
-        bounded_ortho = t2.get("orthomosaic")
+        selected = self._get_selected_orthomosaic()
 
-        main_ortho = None
-        main_ortho_source = None
+        task_key = str(selected.get("task_key") or "").strip()
+        flag = str(selected.get("flag") or "").strip()
+        source_path = Path(str(selected.get("source_path") or ""))
+        boundary_used = bool(selected.get("boundary_used"))
+        tile_mode = "round-corners" if boundary_used else "soft-corners"
 
-        if unbounded_ortho and Path(unbounded_ortho).exists():
-            main_ortho = str(unbounded_ortho)
-            main_ortho_source = "task1"
-        elif bounded_ortho and Path(bounded_ortho).exists():
-            main_ortho = str(bounded_ortho)
-            main_ortho_source = "task2"
-        else:
-            raise RuntimeError(
-                "QGIS stage requires an orthomosaic from Task 1 or Task 2, but none was found."
+        if not task_key:
+            raise RuntimeError("Selected orthomosaic is missing task_key.")
+
+        if not flag:
+            raise RuntimeError("Selected orthomosaic is missing flag.")
+
+        if not source_path.exists():
+            raise FileNotFoundError(
+                f"Selected orthomosaic does not exist: {source_path}"
             )
 
-        logger.info(f"QGIS main orthomosaic source: {main_ortho_source} -> {Path(main_ortho).name}")
+        logger.info(
+            "QGIS selected orthomosaic: "
+            f"task={task_key} | file={source_path.name} | "
+            f"boundary_used={boundary_used} | tile_mode={tile_mode}"
+        )
 
-        naming_cfg = self.config.get("naming", {})
-        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
-        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
-        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
-        task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
-        task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
+        boundary_geojson_path = self.state.get("boundary_geojson_path")
+        boundary_geojson: Path | None = (
+            Path(str(boundary_geojson_path))
+            if boundary_geojson_path
+            else None
+        )
+
+        mask_geojson: Path | None = None
+
+        if boundary_used:
+            if boundary_geojson is None or not boundary_geojson.exists():
+                raise RuntimeError(
+                    "Selected orthomosaic is marked as bounded, but boundary_geojson_path "
+                    f"is missing or invalid: {boundary_geojson_path}"
+                )
+
+            mask_geojson = boundary_geojson
+        else:
+            if not boundary_geojson or not boundary_geojson.exists():
+                logger.warning(
+                    "No boundary GeoJSON available. QGIS will skip clipping and generate soft-corners tiles."
+                )
+            else:
+                logger.info(
+                    "Boundary GeoJSON exists, but selected orthomosaic is marked as unbounded. "
+                    "QGIS will use soft-corners tile workflow."
+                )
 
         clipped_ortho_dir = dir_from_key(
             "qgis_clipped_ortho",
-            fallback=(rgb_path / "qgis" / "clipped" / "ortho")
+            fallback=(rgb_path / "qgis" / "clipped" / "ortho"),
         )
-        tiles_sharp_dir = dir_from_key(
-            "tiles_ortho_sharp",
-            fallback=(rgb_path / "tiles" / "ortho" / "sharp-corners")
-        )
+
         tiles_round_dir = dir_from_key(
             "tiles_ortho_round",
-            fallback=(rgb_path / "tiles" / "ortho" / "round-corners")
+            fallback=(rgb_path / "tiles" / "ortho" / "round-corners"),
         )
 
-        clip_cfg = (qgis_cfg.get("clip") or {})
+        tiles_soft_dir = optional_dir_from_keys(
+            ["tiles_ortho_soft"],
+            fallback=(rgb_path / "tiles" / "ortho" / "soft-corners"),
+        )
+
+        clip_cfg = qgis_cfg.get("clip") or {}
         clip_enabled = bool(clip_cfg.get("enabled", True))
-        clip_tmpl = str(clip_cfg.get("filename_template") or "orthomosaic-clipped--{flag}.tif")
 
-        unbounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task1_flag)
-        bounded_clipped = clipped_ortho_dir / clip_tmpl.format(flag=task2_flag)
-
-        qgis_tools_cfg = (qgis_cfg.get("tools") or {})
+        qgis_tools_cfg = qgis_cfg.get("tools") or {}
         qgis_root = str(qgis_tools_cfg.get("qgis_root") or "")
         gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
         gdal2tiles_path = str(qgis_tools_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
 
-        tiles_cfg = (qgis_cfg.get("tiles") or {})
+        tiles_cfg = qgis_cfg.get("tiles") or {}
         tiles_enabled = bool(tiles_cfg.get("enabled", True))
         zoom = str(tiles_cfg.get("zoom") or "11-24")
         profile = str(tiles_cfg.get("profile") or "mercator")
         webviewer = str(tiles_cfg.get("webviewer") or "none")
         copyright_text = str(tiles_cfg.get("copyright") or "ASIMOV-HAWKS")
 
-        dst_nodata_raw = (clip_cfg.get("dst_nodata") or "")
+        dst_nodata_raw = clip_cfg.get("dst_nodata") or ""
         dst_nodata = None
+
         if isinstance(dst_nodata_raw, (int, float)):
             dst_nodata = float(dst_nodata_raw)
         elif isinstance(dst_nodata_raw, str) and dst_nodata_raw.strip() != "":
@@ -1420,7 +1493,8 @@ class RGBPipeline(
                 dst_nodata = float(dst_nodata_raw.strip())
             except ValueError:
                 raise ValueError(
-                    f"Invalid QGIS_CLIP_DST_NODATA value: '{dst_nodata_raw}' (must be a number or empty)"
+                    f"Invalid QGIS_CLIP_DST_NODATA value: '{dst_nodata_raw}' "
+                    "(must be a number or empty)"
                 )
 
         tools = QGISTools(
@@ -1430,56 +1504,62 @@ class RGBPipeline(
             gdal2tiles_path=gdal2tiles_path,
         )
 
-        # 1) Clip main ortho
-        if clip_enabled:
-            logger.info(f"Clipping MAIN ortho ({main_ortho_source}) -> {unbounded_clipped.name}")
+        clipped_path: Path
+
+        if boundary_used and clip_enabled:
+            clipped_filename = self._clipped_orthomosaic_filename(
+                task_key=task_key,
+                flag=flag,
+            )
+            clipped_path = clipped_ortho_dir / clipped_filename
+
+            logger.info(
+                f"Clipping selected orthomosaic ({task_key}) -> {clipped_path.name}"
+            )
+
+            if mask_geojson is None:
+                raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
+
             tools.clip_raster_by_mask(
-                input_tif=Path(main_ortho),
-                mask_geojson=Path(boundary_geojson_path),
-                output_tif=unbounded_clipped,
+                input_tif=source_path,
+                mask_geojson=mask_geojson,
+                output_tif=clipped_path,
                 dst_nodata=dst_nodata,
             )
-        else:
-            logger.warning(
-                "QGIS clip disabled (qgis.clip.enabled=false). Using main orthomosaic directly."
-            )
-            unbounded_clipped = Path(main_ortho)
 
-        # 2) Clip bounded separately only if Task 2 is not already the main source
-        bounded_ok = False
-        if main_ortho_source == "task2":
+        elif boundary_used and not clip_enabled:
+            logger.warning(
+                "QGIS clip disabled (qgis.clip.enabled=false). "
+                "Using selected bounded orthomosaic directly for tile generation."
+            )
+            clipped_path = source_path
+
+        else:
             logger.info(
-                "Task 2 orthomosaic is already the main QGIS source; skipping duplicate bounded clip."
+                "Selected orthomosaic is unbounded. "
+                "Skipping clip and using source orthomosaic for soft-corners tiles."
             )
-        elif bounded_ortho and Path(bounded_ortho).exists():
-            if clip_enabled:
-                logger.info(f"Clipping BOUNDED ortho -> {bounded_clipped.name}")
-                tools.clip_raster_by_mask(
-                    input_tif=Path(bounded_ortho),
-                    mask_geojson=Path(boundary_geojson_path),
-                    output_tif=bounded_clipped,
-                    dst_nodata=dst_nodata,
-                )
-                bounded_ok = True
-            else:
-                bounded_clipped = Path(bounded_ortho)
-                bounded_ok = True
-        else:
-            logger.warning(
-                "Bounded orthomosaic missing. Skipping bounded clip + round-corners tiles."
-            )
+            clipped_path = source_path
 
-        # 3) Tiles
+        selected["clipped_path"] = str(clipped_path)
+        selected["clipped_filename"] = clipped_path.name
+        selected["tile_mode"] = tile_mode
+
+        self.state["selected_orthomosaic"] = selected
+
+        tiles_dir = tiles_round_dir if boundary_used else tiles_soft_dir
+
         if tiles_enabled:
             tile_resume = bool(resume)
             tile_clean = not tile_resume
 
             logger.info(
-                f"Generating tiles (sharp-corners) from {Path(unbounded_clipped).name}"
+                f"Generating tiles ({tile_mode}) from {clipped_path.name} -> {tiles_dir}"
             )
+
             tools.generate_tiles(
-                input_tif=Path(unbounded_clipped),
-                output_dir=tiles_sharp_dir,
+                input_tif=clipped_path,
+                output_dir=tiles_dir,
                 zoom=zoom,
                 profile=profile,
                 webviewer=webviewer,
@@ -1488,28 +1568,19 @@ class RGBPipeline(
                 resume=tile_resume,
             )
 
-            if bounded_ok:
-                logger.info(
-                    f"Generating tiles (round-corners) from {Path(bounded_clipped).name}"
-                )
-                tools.generate_tiles(
-                    input_tif=Path(bounded_clipped),
-                    output_dir=tiles_round_dir,
-                    zoom=zoom,
-                    profile=profile,
-                    webviewer=webviewer,
-                    copyright_text=copyright_text,
-                    clean=tile_clean,
-                    resume=tile_resume,
-                )
+            selected["tiles_dir"] = str(tiles_dir)
         else:
             logger.warning(
                 "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation."
             )
+            selected["tiles_dir"] = None
+
+        self.state["selected_orthomosaic"] = selected
 
         return {
-            "boundary_geojson": str(boundary_geojson_path),
-            "main_ortho_source": main_ortho_source,
+            "boundary_geojson": str(boundary_geojson) if boundary_geojson else None,
+            "selected_webodm_task": task_key,
+            "selected_orthomosaic": selected,
             "tools": {
                 "gdalwarp_path": gdalwarp_path,
                 "gdal2tiles_path": gdal2tiles_path,
@@ -1517,30 +1588,31 @@ class RGBPipeline(
             "clip": {
                 "enabled": clip_enabled,
                 "dst_nodata": dst_nodata,
-                "filename_template": clip_tmpl,
+                "input": str(source_path),
+                "output": str(clipped_path),
             },
             "tiles": {
                 "enabled": tiles_enabled,
+                "mode": tile_mode,
+                "output_dir": str(tiles_dir) if tiles_enabled else None,
                 "zoom": zoom,
                 "profile": profile,
                 "webviewer": webviewer,
                 "copyright": copyright_text,
             },
-            "unbounded": {
-                "input": str(main_ortho),
-                "clipped": str(unbounded_clipped),
-                "tiles_dir": str(tiles_sharp_dir) if tiles_enabled else None,
-            },
-            "bounded": {
-                "input": str(bounded_ortho) if bounded_ortho else None,
-                "clipped": str(bounded_clipped) if bounded_ok else None,
-                "tiles_dir": str(tiles_round_dir) if (tiles_enabled and bounded_ok) else None,
-            },
         }
     
-    def run_task4_fallback(self) -> Dict[str, Any]:
+    def run_webodm_fallback_task(
+        self,
+        *,
+        task_key: str = "task4",
+        fallback_reason: str = "quality_gate_requested_fallback",
+    ) -> Dict[str, Any]:
         logger = self.loggers["webodm"]
-        logger.info("Running WebODM Task 4 fallback inside same project")
+        task_key = self._normalize_webodm_task_key(task_key)
+        task_label = self._webodm_task_label(task_key)
+
+        logger.info(f"Running WebODM fallback task: {task_key}")
 
         survey_id = self._require_survey_id()
         rgb_path = self._require_rgb_path()
@@ -1550,11 +1622,11 @@ class RGBPipeline(
         project_name = web.get("project_name") or survey_id
 
         if not project_id:
-            raise RuntimeError("Task 4 fallback requires existing WebODM project_id.")
+            raise RuntimeError(f"{task_key} fallback requires existing WebODM project_id.")
 
         boundary_geojson_path = self.state.get("boundary_geojson_path")
         if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-            raise RuntimeError("Task 4 fallback requires boundary GeoJSON.")
+            raise RuntimeError(f"{task_key} fallback requires boundary GeoJSON.")
 
         ds = self.state.get("data_segregation") or {}
         dirs = ds.get("dirs") or {}
@@ -1566,15 +1638,20 @@ class RGBPipeline(
         exports_cfg = self.config.get("exports", {})
         qgis_tools_cfg = (exports_cfg.get("tools") or {})
 
-        task4_options = dict(
-            webodm_cfg.get("task4_options", {})
+        task_options = self._webodm_task_options(task_key)
+        task_options["boundary"] = boundary_geojson
+
+        task_flag = self._webodm_task_flag(
+            task_key,
+            default_boundary_mode="b",
         )
 
-        task4_options["boundary"] = boundary_geojson
-        task4_name = f"{survey_id}-RGB--task4"
-        task4_root_dir = rgb_path / survey_id
-        task4_ortho_dir = task4_root_dir / "ortho"
-        task4_ortho_dir.mkdir(parents=True, exist_ok=True)
+        task_name = self.task_name_overrides.get(task_key)
+        if not task_name:
+            task_name = f"{survey_id}-RGB--{task_flag}-{task_label}"
+
+        task_ortho_dir = rgb_path / "ortho"
+        task_ortho_dir.mkdir(parents=True, exist_ok=True)
 
         processor = WebODMProcessor(
             url=webodm_cfg["url"],
@@ -1583,87 +1660,119 @@ class RGBPipeline(
             logger=logger,
         )
 
-        existing_task4_id = processor.find_task_by_name(int(project_id), task4_name)
+        existing_task_id = processor.find_task_by_name(int(project_id), task_name)
 
-        if existing_task4_id:
-            logger.info(f"Found existing Task 4: {existing_task4_id}")
-            current_task4_id = existing_task4_id
-            status = processor.get_task_status(int(project_id), current_task4_id)
+        if existing_task_id:
+            logger.info(f"Found existing {task_key}: {existing_task_id}")
+            current_task_id = str(existing_task_id)
+            status = processor.get_task_status(int(project_id), current_task_id)
 
             if status != "completed":
                 success, runtime, _info = processor.wait_for_completion(
                     int(project_id),
-                    current_task4_id,
+                    current_task_id,
                     live=False,
                     control_check=lambda: self._check_control_or_raise("webodm"),
                 )
             else:
                 success = True
                 runtime = 0.0
+
         else:
-            upload_image_folder = self._stage_webodm_upload_images(
-                source_folder=image_folder,
-                survey_id=survey_id,
-                stage_name="task4",
+            upload_image_folder = self._get_reusable_webodm_upload_folder(
+                default_source_dir=image_folder,
+                logger=logger,
             )
 
-            current_task4_id = processor.create_task_with_images(
+            current_task_id = processor.create_task_with_images(
                 project_id=int(project_id),
-                name=task4_name,
+                name=task_name,
                 image_folder=str(upload_image_folder),
-                options=task4_options,
+                options=task_options,
                 processing_node=webodm_cfg.get("node_id"),
             )
 
             success, runtime, _info = processor.wait_for_completion(
                 int(project_id),
-                current_task4_id,
+                current_task_id,
                 live=False,
                 control_check=lambda: self._check_control_or_raise("webodm"),
             )
 
-        task4_state = {
-            "id": str(current_task4_id),
-            "name": task4_name,
+        task_state = {
+            "id": str(current_task_id),
+            "name": task_name,
             "success": bool(success),
             "runtime_seconds": float(runtime),
+            "flag": task_flag,
+            "task_label": task_label,
         }
 
-        web["task4"] = task4_state
+        web[task_key] = task_state
 
         downloads = web.setdefault("downloads", {})
-        task4_downloads = downloads.setdefault("task4", {})
+        task_downloads = downloads.setdefault(task_key, {})
+
+        selected = None
 
         if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
             ortho_cfg = exports_cfg["ortho"]
             epsg = int(ortho_cfg.get("reproject_epsg", 4326))
             candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
 
+            filename = self._orthomosaic_filename(
+                task_key=task_key,
+                flag=task_flag,
+            )
+
             out_path = processor.export_orthomosaic(
                 int(project_id),
-                str(current_task4_id),
-                out_dir=task4_ortho_dir,
-                filename=f"{survey_id}.tif",
+                str(current_task_id),
+                out_dir=task_ortho_dir,
+                filename=filename,
                 epsg=epsg,
                 candidates=candidates,
                 gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
             )
 
             if out_path:
-                task4_downloads["orthomosaic"] = str(out_path)
-                task4_downloads["epsg"] = epsg
+                task_downloads["orthomosaic"] = str(out_path)
+                task_downloads["epsg"] = epsg
+
+                self.state["webodm"] = web
+
+                selected = self._set_selected_orthomosaic(
+                    task_key=task_key,
+                    source_path=out_path,
+                    flag=task_flag,
+                    boundary_used=True,
+                    fallback_used=True,
+                    fallback_reason=fallback_reason,
+                )
+
+                web["selected_webodm_task"] = task_key
+                web["selected_orthomosaic"] = selected
             else:
-                logger.warning("Could not download Task 4 orthomosaic.")
+                logger.warning(f"Could not download {task_key} orthomosaic.")
 
         self.state["webodm"] = web
 
         return {
-            "task4": task4_state,
-            "downloads": task4_downloads,
+            task_key: task_state,
+            "downloads": task_downloads,
             "project_id": project_id,
             "project_name": project_name,
+            "selected_webodm_task": task_key,
+            "selected_orthomosaic": selected,
         }
-    
+
+
+    def run_task4_fallback(self) -> Dict[str, Any]:
+        return self.run_webodm_fallback_task(
+            task_key="task4",
+            fallback_reason="quality_gate_requested_task4_fallback",
+        )
+        
 
     def stage_quality_gate(self) -> Dict[str, Any]:
         logger = self.loggers["pipeline"]
@@ -1803,11 +1912,42 @@ class RGBPipeline(
 
             if raw in ("yes", "y"):
                 logger.info("Quality gate PASSED by user.")
-                return {"passed": True, "restarts": restarts, "project_id": project_id}
+
+                try:
+                    task2_flag = self._webodm_task_flag(
+                        "task2",
+                        default_boundary_mode="b",
+                    )
+                    selected = self._select_existing_task_orthomosaic(
+                        task_key="task2",
+                        flag=task2_flag,
+                        boundary_used=True,
+                        fallback_used=False,
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not select Task 2 orthomosaic after quality pass: {e}")
+                    selected = None
+
+                self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+
+                return {
+                    "passed": True,
+                    "restarts": restarts,
+                    "project_id": project_id,
+                    "selected_webodm_task": self.state.get("selected_webodm_task"),
+                    "selected_orthomosaic": selected,
+                }
 
             if raw in ("fail", "f"):
                 logger.warning("Quality gate FAILED by user.")
-                return {"passed": False, "restarts": restarts, "project_id": project_id}
+
+                self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+
+                return {
+                    "passed": False,
+                    "restarts": restarts,
+                    "project_id": project_id,
+                }
 
             if raw in ("fallback", "task4"):
                 logger.warning("User requested Task 4 fallback workflow.")
@@ -1825,14 +1965,22 @@ class RGBPipeline(
                 task4_state = task4_result.get("task4") or {}
                 if task4_state.get("success"):
                     logger.info("Task 4 fallback completed successfully.")
+
+                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+
                     return {
                         "passed": True,
                         "restarts": restarts,
                         "project_id": project_id,
                         "task4": task4_state,
+                        "selected_webodm_task": self.state.get("selected_webodm_task"),
+                        "selected_orthomosaic": self.state.get("selected_orthomosaic"),
                     }
 
                 logger.warning("Task 4 fallback ran but did not succeed.")
+
+                self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+
                 return {
                     "passed": False,
                     "restarts": restarts,

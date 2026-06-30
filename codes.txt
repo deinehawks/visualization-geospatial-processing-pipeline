@@ -5,11 +5,13 @@ Queue:
 
 
 Running: 
-python main.py --survey "TLW-001_6.3Ha_M3C_100m_85f75s_8mps" --year 2026
+
 
 command for generating maps
 
 ex:
 python map.py --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100m_85f75s_7mps,BCO-200_26.5Ha_M3C_100m_85f75s_8mps" --name "barbco-overall-map" --title "BARBCO Overall Survey Boundary Map" --export-print --logo "assets/logo.png"
 
-  
+test:
+
+python main.py --survey "STM_001_1Ha_A2S_50m_85f75s_3mps" --year 2026 
