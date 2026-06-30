@@ -656,25 +656,35 @@ class RGBPipeline(
                 return Path(fallback)
             raise KeyError(f"Missing dir key in data_segregation.dirs: {key}")
 
-        crossrun_flag = self.state.get("crossrun_flag") or naming_cfg.get("crossrun_mode", "xc")
-
         boundary_available = bool(self.state.get("boundary_available"))
         boundary_geojson_path = self.state.get("boundary_geojson_path")
 
-        boundary_flag_task1 = naming_cfg.get("task1_boundary_mode", "xb")
-        boundary_flag_task2 = naming_cfg.get("task2_boundary_mode", "b")
+        task1_flag = self._webodm_task_flag(
+            "task1",
+            default_boundary_mode="xb",
+        )
 
-        task1_flag = f"{crossrun_flag}{boundary_flag_task1}"
-        task2_flag = f"{crossrun_flag}{boundary_flag_task2}"
+        task2_flag = self._webodm_task_flag(
+            "task2",
+            default_boundary_mode="b",
+        )
 
         task1_name = self.task_name_overrides.get("task1")
         task2_name = self.task_name_overrides.get("task2")
 
         if not task1_name:
-            task1_name = f"{survey_id}-RGB--{task1_flag}"
+            task1_name = self._webodm_task_name(
+                survey_id=survey_id,
+                flag=task1_flag,
+                task_key="task1",
+            )
 
         if not task2_name:
-            task2_name = f"{survey_id}-RGB--{task2_flag}"
+            task2_name = self._webodm_task_name(
+                survey_id=survey_id,
+                flag=task2_flag,
+                task_key="task2",
+            )
 
         task1_export_id = self.export_name_overrides.get("task1", task1_name)
         task2_export_id = self.export_name_overrides.get("task2", task2_name)
@@ -1648,7 +1658,11 @@ class RGBPipeline(
 
         task_name = self.task_name_overrides.get(task_key)
         if not task_name:
-            task_name = f"{survey_id}-RGB--{task_flag}-{task_label}"
+            task_name = self._webodm_task_name(
+                survey_id=survey_id,
+                flag=task_flag,
+                task_key=task_key,
+            )
 
         task_ortho_dir = rgb_path / "ortho"
         task_ortho_dir.mkdir(parents=True, exist_ok=True)

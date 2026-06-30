@@ -210,3 +210,13 @@ class RGBTaskNamingMixin:
             "Invalid boundary mode. Expected b or xb "
             f"(legacy full flags also accepted), got: {value!r}"
         )
+    
+    def _webodm_task_name(
+        self,
+        *,
+        survey_id: str,
+        flag: str,
+        task_key: str,
+    ) -> str:
+        task_label = self._webodm_task_label(task_key)
+        return f"{survey_id}-RGB--{flag}-{task_label}"
