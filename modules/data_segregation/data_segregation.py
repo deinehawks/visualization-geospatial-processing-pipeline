@@ -86,14 +86,14 @@ def resolve_source_dataset_dir(
     source_dir = Path(str(source_dir).strip()).expanduser()
 
     if source_dir.exists() and source_dir.is_dir():
-        if _is_probable_dataset_folder(source_dir) and _has_required_dataset_inputs(source_dir):
+        if _is_probable_dataset_folder(source_dir):
             log_ok(logger, f"Source dataset resolved directly: {source_dir}")
             return source_dir
 
         raise ValueError(
-            "The provided source path exists, but it does not look like a dataset folder:\n"
+            "The provided source path exists, but its folder name does not match the expected dataset naming pattern:\n"
             f"{source_dir}\n\n"
-            "Pass the actual dataset folder name instead, for example:\n"
+            "Expected example:\n"
             "DNG_001_36.4Ha_M3C_70m_85f75s_6mps"
         )
 
@@ -114,13 +114,7 @@ def resolve_source_dataset_dir(
         dataset_query=dataset_query,
     )
 
-    valid_candidates = [
-        candidate
-        for candidate in candidates
-        if _has_required_dataset_inputs(candidate)
-    ]
-
-    if not valid_candidates:
+    if not candidates:
         sample_folders = _sample_dataset_folders(field_data_root)
 
         hint = ""
@@ -130,21 +124,21 @@ def resolve_source_dataset_dir(
             )
 
         raise FileNotFoundError(
-            "Dataset folder was not found or does not contain both images and KML/KMZ.\n"
+            "Dataset folder was not found.\n"
             f"Dataset query: {dataset_query}\n"
             f"Search root: {field_data_root}"
             f"{hint}"
         )
 
-    valid_candidates.sort(key=_dataset_candidate_sort_key, reverse=True)
+    candidates.sort(key=_dataset_candidate_sort_key, reverse=True)
 
-    selected = valid_candidates[0]
+    selected = candidates[0]
 
-    if len(valid_candidates) > 1:
+    if len(candidates) > 1:
         log_warn(
             logger,
             "Multiple matching dataset folders found. Using the latest/first match:\n"
-            + "\n".join(f"  - {path}" for path in valid_candidates[:10]),
+            + "\n".join(f"  - {path}" for path in candidates[:10]),
         )
 
     log_ok(logger, f"Source dataset resolved: {selected}")
@@ -424,7 +418,23 @@ def run(
         log_ok(logger, f"KML extracted and saved: {selected_kml_path.name}")
 
     else:
-        raise ValueError("No KML or KMZ file found in source directory.")
+        found_files = sorted(
+            {
+                file.suffix.lower() or "[no extension]"
+                for file in source_dir.rglob("*")
+                if file.is_file()
+            }
+        )
+        raise ValueError(
+            "Boundary file is missing for the resolved dataset.\n"
+            f"Resolved dataset folder: {source_dir}\n\n"
+            "Expected at least one boundary file:\n"
+            "- .kml\n"
+            "- .kmz\n\n"
+            "Action needed:\n"
+            "Copy the mission boundary KML/KMZ into the dataset folder, then rerun the pipeline.\n\n"
+            f"Detected file extensions in this dataset: {found_files}"
+        )
 
     log_step(logger, 6, "Audit ignored files")
 
