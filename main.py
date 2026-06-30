@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from pathlib import Path
 from typing import Any
 
 from pipelines.rgb_pipeline import RGBPipeline
 from shared.config import load_pipeline_config
-
+from modules.data_segregation.data_segregation import resolve_source_dataset_dir
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run production RGB pipeline")
@@ -30,10 +31,21 @@ def main() -> None:
 
     field_data_root = Path(config["paths"]["field_data_root"])
     surveys_root = Path(config["paths"]["surveys_root"])
-    source_dir = field_data_root / args.survey
 
-    if not source_dir.exists():
-        raise FileNotFoundError(f"Survey folder not found: {source_dir}")
+    resolver_logger = logging.getLogger("rgb.source_resolver")
+
+    survey_arg = Path(args.survey)
+
+    source_input = (
+        survey_arg
+        if survey_arg.is_absolute()
+        else field_data_root / args.survey
+    )
+
+    source_dir = resolve_source_dataset_dir(
+        source_input,
+        resolver_logger,
+    )
 
     print("\n===== PRODUCTION RGB PIPELINE =====")
     print(f"Source dir   : {source_dir}")
