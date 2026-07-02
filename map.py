@@ -115,6 +115,13 @@ def main() -> None:
         action="store_true",
         help="Automatically find and include orthomosaic TIFF files in the map export.",
     )
+    parser.add_argument(
+        "--survey-root",
+        "--orthomosaic-root",
+        dest="survey_root",
+        default=None,
+        help="Root folder where processed survey outputs are located. Defaults to SURVEYS_ROOT.",
+    )
 
     args = parser.parse_args()
 
@@ -129,6 +136,16 @@ def main() -> None:
         raise ValueError(
             "Missing source root. Set FIELD_DATA_ROOT in .env or pass --source-root."
         )
+    
+    survey_root = Path(
+        args.survey_root
+        or os.getenv("SURVEYS_ROOT", "")
+    )
+
+    if args.include_orthomosaic and not str(survey_root):
+        raise ValueError(
+            "Missing survey root. Set SURVEYS_ROOT in .env or pass --survey-root when using --include-orthomosaic."
+        )
 
     output_root = Path(
         args.output_root
@@ -141,6 +158,7 @@ def main() -> None:
     print()
     print("===== MAP PACKAGE EXPORT =====")
     print(f"Source root : {source_root}")
+    print(f"Survey root : {survey_root if str(survey_root) else '[not set]'}")
     print(f"Output root : {output_root}")
     print(f"Map name    : {map_name}")
     print(f"Title       : {title}")
@@ -153,6 +171,7 @@ def main() -> None:
     result = export_map_package(
         survey_names=survey_names,
         source_root=source_root,
+        survey_root=survey_root if str(survey_root) else None,
         output_root=output_root,
         map_name=map_name,
         title=title,

@@ -170,7 +170,11 @@ def export_qgis_print_layout(
 
     if include_orthomosaic:
         for record in orthomosaic_records:
-            ortho_path_value = record.get("source_orthomosaic")
+            ortho_path_value = (
+                record.get("packaged_orthomosaic")
+                or record.get("relative_orthomosaic")
+                or record.get("source_orthomosaic")
+            )
 
             if not ortho_path_value:
                 raise RuntimeError(
@@ -178,6 +182,9 @@ def export_qgis_print_layout(
                 )
 
             ortho_path = Path(ortho_path_value)
+
+            if not ortho_path.is_absolute():
+                ortho_path = package_dir / ortho_path
 
             if not ortho_path.exists():
                 raise FileNotFoundError(f"Orthomosaic not found: {ortho_path}")

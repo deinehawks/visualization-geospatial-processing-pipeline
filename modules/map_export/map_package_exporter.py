@@ -27,6 +27,7 @@ def export_map_package(
     source_root: Path,
     output_root: Path,
     map_name: str,
+    survey_root: Path | None = None,
     title: str | None = None,
     location: str | None = None,
     map_scale: int | None = None,
@@ -37,12 +38,21 @@ def export_map_package(
     map_slug = _slugify(map_name)
     output_dir = output_root / map_slug
 
-    source_boundary_dir = output_dir / "source_boundaries"
-    extracted_kml_dir = output_dir / "extracted_kml"
+    boundaries_dir = output_dir / "boundaries"
+    source_boundary_dir = boundaries_dir / "source"
+    extracted_kml_dir = boundaries_dir / "extracted_kml"
+    orthomosaic_dir = output_dir / "orthomosaics"
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    boundaries_dir.mkdir(parents=True, exist_ok=True)
     source_boundary_dir.mkdir(parents=True, exist_ok=True)
     extracted_kml_dir.mkdir(parents=True, exist_ok=True)
+
+    if include_orthomosaic:
+        orthomosaic_dir.mkdir(
+            parents=True,
+            exist_ok=True,
+        )
 
     boundary_files = collect_boundary_files(
         source_root=source_root,
@@ -54,17 +64,42 @@ def export_map_package(
     orthomosaic_records: list[dict[str, Any]] = []
 
     if include_orthomosaic:
+
+        if survey_root is None:
+            raise ValueError(
+                "survey_root required when include_orthomosaic=True"
+            )
+
         orthomosaic_files = collect_orthomosaic_files(
-            source_root=source_root,
+            surveys_root=survey_root,
             survey_names=survey_names,
         )
 
-        for item in orthomosaic_files:
+        for ortho_path in orthomosaic_files:
+
+            copied_orthomosaic = _unique_output_path(
+                orthomosaic_dir,
+                ortho_path.name,
+            )
+
+            shutil.copy2(
+                ortho_path,
+                copied_orthomosaic,
+            )
+
             orthomosaic_records.append(
                 {
-                    "survey_name": item.survey_name,
-                    "survey_dir": str(item.survey_dir),
-                    "source_orthomosaic": str(item.orthomosaic_path),
+                    "source_orthomosaic": str(
+                        ortho_path
+                    ),
+                    "packaged_orthomosaic": str(
+                        copied_orthomosaic
+                    ),
+                    "relative_orthomosaic": str(
+                        copied_orthomosaic.relative_to(
+                            output_dir
+                        )
+                    ).replace("\\", "/"),
                 }
             )
 
@@ -142,6 +177,7 @@ def export_map_package(
         "title": title or map_name,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_root": str(source_root),
+        "survey_root": str(survey_root) if survey_root else None,
         "output_dir": str(output_dir),
         "survey_count": len(survey_names),
         "polygon_count": len(all_features),
@@ -155,6 +191,12 @@ def export_map_package(
             "merged_boundary_geojson": "merged_boundary.geojson",
             "metadata_json": "map_metadata.json",
             "style_json": "style.json",
+        },
+        "folders": {
+            "boundaries": "boundaries",
+            "source_boundaries": "boundaries/source",
+            "extracted_kml": "boundaries/extracted_kml",
+            "orthomosaics": "orthomosaics" if include_orthomosaic else None,
         },
         "location": location,
         "layout": {
@@ -379,3 +421,20 @@ def _slugify(value: str) -> str:
         slug = slug.replace("--", "-")
 
     return slug.strip("-") or "map-export"
+
+
+def _unique_output_path(folder: Path, filename: str) -> Path:
+    folder = Path(folder)
+    original = Path(filename)
+
+    stem = original.stem
+    suffix = original.suffix
+
+    candidate = folder / original.name
+    counter = 2
+
+    while candidate.exists():
+        candidate = folder / f"{stem}-{counter}{suffix}"
+        counter += 1
+
+    return candidate

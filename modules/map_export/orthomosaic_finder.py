@@ -1,92 +1,90 @@
 from __future__ import annotations
-
-from dataclasses import dataclass
 from pathlib import Path
-from .boundary_finder import _resolve_survey_dir
+import logging
 
-ORTHOMOSAIC_EXTENSIONS = {".tif", ".tiff"}
+logger = logging.getLogger("rgb.map_export")
 
-PREFERRED_ORTHO_SUBDIRS = [
-    Path("rgb") / "qgis" / "clipped" / "ortho",
-    Path("qgis") / "clipped" / "ortho",
-    Path("clipped") / "ortho",
-    Path("ortho"),
-]
-
-
-@dataclass(frozen=True)
-class OrthomosaicFile:
-    survey_name: str
-    survey_dir: Path
-    orthomosaic_path: Path
-
-
-def find_orthomosaic_file(source_root: Path, survey_name: str) -> OrthomosaicFile:
-    survey_dir = _resolve_survey_dir(
-        source_root=source_root,
-        survey_name=survey_name,
-    )
-
-    candidates: list[Path] = []
-
-    for relative_dir in PREFERRED_ORTHO_SUBDIRS:
-        search_dir = survey_dir / relative_dir
-
-        if search_dir.exists() and search_dir.is_dir():
-            candidates.extend(_find_rasters(search_dir))
-
-    if not candidates:
-        candidates.extend(_find_rasters(survey_dir))
-
-    if not candidates:
-        raise FileNotFoundError(
-            f"No orthomosaic TIFF found inside survey folder: {survey_dir}"
-        )
-
-    candidates.sort(key=_orthomosaic_sort_key)
-
-    return OrthomosaicFile(
-        survey_name=survey_dir.name,
-        survey_dir=survey_dir,
-        orthomosaic_path=candidates[0],
-    )
+ORTHOMOSAIC_PATTERN = "orthomosaic-clipped--*.tif"
 
 
 def collect_orthomosaic_files(
-    *,
-    source_root: Path,
+    surveys_root: Path,
     survey_names: list[str],
-) -> list[OrthomosaicFile]:
-    return [
-        find_orthomosaic_file(source_root, survey_name)
-        for survey_name in survey_names
-    ]
+) -> list[Path]:
 
+    if surveys_root is None:
+        raise ValueError("survey_root is required")
 
-def _find_rasters(folder: Path) -> list[Path]:
-    return [
-        path
-        for path in folder.rglob("*")
-        if path.is_file() and path.suffix.lower() in ORTHOMOSAIC_EXTENSIONS
-    ]
+    selected: list[Path] = []
 
+    for survey_name in survey_names:
 
-def _orthomosaic_sort_key(path: Path) -> tuple[int, int, int, str]:
-    name = path.name.lower()
-    full_path = str(path).lower()
+        survey_path = Path(survey_name)
 
-    # Prefer clipped orthomosaic output.
-    preferred_dir_score = 0 if "qgis\\clipped\\ortho" in full_path or "qgis/clipped/ortho" in full_path else 1
+        survey_id_file = (
+            survey_path / "survey_id.txt"
+        )
 
-    # Prefer orthomosaic-looking filenames.
-    name_score = 0 if any(
-        token in name
-        for token in ("ortho", "orthomosaic", "orthophoto", "odm_orthophoto")
-    ) else 1
+        if not survey_id_file.exists():
+            raise FileNotFoundError(
+                f"survey_id.txt not found in {survey_path}"
+            )
 
-    return (
-        preferred_dir_score,
-        name_score,
-        len(path.parts),
-        name,
-    )
+        survey_id = (
+            survey_id_file
+            .read_text(encoding="utf-8")
+            .strip()
+        )
+
+        ortho_dir = (
+            surveys_root
+            / survey_id[:4]
+        )
+
+        matches = list(
+            surveys_root.rglob(
+                f"{survey_id}/rgb/qgis/clipped/ortho/{ORTHOMOSAIC_PATTERN}"
+            )
+        )
+
+        logger.info("=" * 70)
+        logger.info("Survey            : %s", survey_name)
+        logger.info("Survey ID         : %s", survey_id)
+        logger.info("Searching under   : %s", surveys_root)
+        logger.info("Pattern           : %s", ORTHOMOSAIC_PATTERN)
+        logger.info("Candidates found  : %d", len(matches))
+
+        if matches:
+            logger.info("Candidate orthomosaics:")
+            for candidate in sorted(matches):
+                logger.info("  • %s", candidate)
+        else:
+            logger.warning("No orthomosaic candidates found.")
+
+        if not matches:
+            raise FileNotFoundError(
+                f"No clipped orthomosaic found for survey ID: {survey_id}"
+            )
+
+        matches.sort(
+            key=lambda p: (
+                # Highest priority: Task 4
+                "-t4" not in p.name.lower(),
+
+                # Second priority: old filename (no -t2/-t4)
+                ("-t2" in p.name.lower() or "-t4" in p.name.lower()),
+
+                # Lowest priority: Task 2
+                "-t2" in p.name.lower(),
+            )
+        )
+
+        selected_file = matches[0]
+
+        logger.info("Selected orthomosaic:")
+        logger.info("  → %s", selected_file)
+        logger.info("=" * 70)
+
+        selected.append(selected_file)
+
+    return selected

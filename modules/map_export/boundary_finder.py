@@ -13,6 +13,9 @@ DATASET_FOLDER_PATTERN = re.compile(
 
 DATE_FOLDER_PATTERN = re.compile(r"^\d{8}$")
 
+PROCESSED_SURVEY_ID_PATTERN = re.compile(
+    r"^[A-Za-z]{2,5}-\d{6}$"
+)
 
 @dataclass(frozen=True)
 class BoundaryFile:
@@ -190,7 +193,10 @@ def _find_survey_candidates(
 
 
 def _is_probable_dataset_folder(path: Path) -> bool:
-    return bool(DATASET_FOLDER_PATTERN.match(path.name))
+    return bool(
+        DATASET_FOLDER_PATTERN.match(path.name)
+        or PROCESSED_SURVEY_ID_PATTERN.match(path.name)
+    )
 
 
 def _normalize_folder_name(value: str) -> str:
