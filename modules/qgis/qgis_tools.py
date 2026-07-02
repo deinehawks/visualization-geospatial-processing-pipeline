@@ -55,6 +55,29 @@ class QGISTools:
         if not mask_geojson.exists():
             raise FileNotFoundError(f"Mask GeoJSON not found: {mask_geojson}")
 
+        # Preflight: make sure the destination has room for at least the
+        # source raster size again (clip output is <= input size, but we
+        # want headroom for a network share that may be near-full).
+        input_size = input_tif.stat().st_size
+        try:
+            free_bytes = shutil.disk_usage(output_tif.parent).free
+        except OSError:
+            free_bytes = None
+        if free_bytes is not None and free_bytes < input_size:
+            raise RuntimeError(
+                f"Insufficient free space at {output_tif.parent}: "
+                f"{free_bytes / (1024 ** 3):.2f} GB free, "
+                f"input raster is {input_size / (1024 ** 3):.2f} GB. "
+                "Free up space before re-running the clip."
+            )
+
+        # If a previous run died mid-write, a stale/corrupt output file
+        # can trip libtiff on the next attempt. -overwrite tells gdalwarp
+        # to replace it, but we remove it ourselves first to avoid any
+        # partial-file edge cases on network shares (Z:\ etc.).
+        if output_tif.exists():
+            output_tif.unlink()
+
         log_step(self.logger, 1,
                  f"Clip raster by mask: {input_tif.name} → {output_tif.name}")
 
@@ -64,6 +87,9 @@ class QGISTools:
             "-cutline",    str(mask_geojson),
             "-crop_to_cutline",
             "-of",         "GTiff",
+            "-co", "BIGTIFF=IF_SAFER",
+            "-co", "TILED=YES",
+            "-co", "COMPRESS=LZW",
         ]
         if dst_nodata is not None:
             cmd += ["-dstnodata", str(dst_nodata)]
@@ -75,6 +101,10 @@ class QGISTools:
         except FileNotFoundError:
             raise RuntimeError(f"gdalwarp not found: {self.gdalwarp_path}")
         except subprocess.CalledProcessError as e:
+            # Clean up whatever partial file gdalwarp left behind so the
+            # next attempt doesn't start from a corrupt TIFF.
+            if output_tif.exists():
+                output_tif.unlink(missing_ok=True)
             raise RuntimeError(
                 f"gdalwarp clip failed: {(e.stderr or '')[:1000]}")
 
