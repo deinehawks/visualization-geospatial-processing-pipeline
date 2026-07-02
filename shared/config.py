@@ -9,6 +9,27 @@ import os
 import shutil
 
 
+def _derive_gdalinfo_path(gdalwarp_path: str | None) -> str:
+    """
+    gdalinfo ships in the same bin/ folder as gdalwarp in QGIS's OSGeo4W
+    installs. If GDALINFO_PATH isn't set explicitly, look for gdalinfo
+    (or gdalinfo.exe on Windows) next to whatever GDALWARP_PATH points
+    to, so post-clip verification doesn't silently fall back to a bare
+    "gdalinfo" that likely isn't on PATH.
+    """
+    if not gdalwarp_path or gdalwarp_path == "gdalwarp":
+        return "gdalinfo"
+
+    warp_path = Path(gdalwarp_path)
+    candidate = warp_path.with_name(
+        "gdalinfo.exe" if warp_path.suffix.lower() == ".exe" else "gdalinfo"
+    )
+    if candidate.exists():
+        return str(candidate)
+
+    return "gdalinfo"
+
+
 def load_pipeline_config() -> dict:
     load_dotenv()
 
@@ -168,6 +189,26 @@ def load_pipeline_config() -> dict:
                 "qgis_root": read_str_env("QGIS_ROOT", ""),
                 "gdalwarp_path": read_str_env("GDALWARP_PATH", "gdalwarp"),
                 "gdal2tiles_path": read_str_env("GDAL2TILES_PATH", "gdal2tiles.py"),
+                # gdalinfo is used to verify a clipped raster is fully
+                # readable before reusing it / handing it to gdal2tiles.
+                # If GDALINFO_PATH isn't set explicitly, derive it from
+                # GDALWARP_PATH's folder (they ship side-by-side in the
+                # QGIS OSGeo4W bin/) rather than falling back to a bare
+                # "gdalinfo", which often isn't on PATH on Windows.
+                "gdalinfo_path": read_str_env(
+                    "GDALINFO_PATH",
+                    _derive_gdalinfo_path(read_str_env("GDALWARP_PATH", "gdalwarp")),
+                ),
+            },
+            "local_staging": {
+                # Copy the clipped raster to local disk before running
+                # gdal2tiles, then copy the finished tiles back to the
+                # network share. gdal2tiles does thousands of scattered
+                # reads over a long-running job, which is far more exposed
+                # to network-share hiccups than the single sequential copy
+                # done here. Disable if outputs already live on local disk.
+                "enabled": read_bool_env("QGIS_LOCAL_STAGING_ENABLED", True),
+                "dir": read_str_env("QGIS_LOCAL_STAGING_DIR", ""),
             },
             "clip": {
                 "enabled": read_bool_env("QGIS_CLIP_ENABLED", True),
@@ -316,6 +357,7 @@ def load_pipeline_config() -> dict:
     validate_executable(config["exports"]["tools"]["pdal_path"], "PDAL_PATH", required=False)
     validate_executable(config["qgis"]["tools"]["gdalwarp_path"], "QGIS gdalwarp_path", required=False)
     validate_executable(config["qgis"]["tools"]["gdal2tiles_path"], "GDAL2TILES_PATH", required=False)
+    validate_executable(config["qgis"]["tools"]["gdalinfo_path"], "QGIS gdalinfo_path (GDALINFO_PATH)", required=False)
 
     # qgis tiles
     validate_choice(config["qgis"]["tiles"]["profile"], "QGIS_TILES_PROFILE", {"mercator", "geodetic", "raster"})

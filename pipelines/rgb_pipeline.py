@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from pathlib import Path
@@ -29,6 +28,7 @@ import uuid
 import logging
 import os
 import shutil
+import tempfile
 from typing import Any
 
 
@@ -1500,6 +1500,8 @@ class RGBPipeline(
         gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
         gdal2tiles_path = str(qgis_tools_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
 
+        gdalinfo_path = str(qgis_tools_cfg.get("gdalinfo_path") or "gdalinfo")
+
         tiles_cfg = qgis_cfg.get("tiles") or {}
         tiles_enabled = bool(tiles_cfg.get("enabled", True))
         zoom = str(tiles_cfg.get("zoom") or "11-24")
@@ -1526,6 +1528,7 @@ class RGBPipeline(
             qgis_root=qgis_root,
             gdalwarp_path=gdalwarp_path,
             gdal2tiles_path=gdal2tiles_path,
+            gdalinfo_path=gdalinfo_path,
         )
 
         clipped_path: Path
@@ -1544,12 +1547,34 @@ class RGBPipeline(
             if mask_geojson is None:
                 raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
 
-            tools.clip_raster_by_mask(
-                input_tif=source_path,
-                mask_geojson=mask_geojson,
-                output_tif=clipped_path,
-                dst_nodata=dst_nodata,
-            )
+            # Stage-level resume: if this stage previously died in a later
+            # step (e.g. tiling), don't redo a clip that already succeeded.
+            # Verify the existing file is actually intact before trusting
+            # it — otherwise fall through and re-clip as normal.
+            skip_clip = False
+            if resume and clipped_path.exists():
+                logger.info(
+                    f"Resume: clipped orthomosaic already exists "
+                    f"({clipped_path.name}); verifying before reuse..."
+                )
+                try:
+                    tools.verify_raster_readable(clipped_path, retries=1, delay_s=2.0)
+                    skip_clip = True
+                    logger.info(
+                        f"Existing clip verified OK, skipping re-clip: {clipped_path.name}"
+                    )
+                except RuntimeError as e:
+                    logger.warning(
+                        f"Existing clipped file failed verification, will re-clip: {e}"
+                    )
+
+            if not skip_clip:
+                tools.clip_raster_by_mask(
+                    input_tif=source_path,
+                    mask_geojson=mask_geojson,
+                    output_tif=clipped_path,
+                    dst_nodata=dst_nodata,
+                )
 
         elif boundary_used and not clip_enabled:
             logger.warning(
@@ -1577,13 +1602,47 @@ class RGBPipeline(
             tile_resume = bool(resume)
             tile_clean = not tile_resume
 
+            local_staging_cfg = qgis_cfg.get("local_staging") or {}
+            local_staging_enabled = bool(local_staging_cfg.get("enabled", True))
+
+            tiling_input_path = clipped_path
+            tiling_output_dir = tiles_dir
+            local_staging_root: Path | None = None
+
+            if local_staging_enabled:
+                local_staging_root = Path(
+                    local_staging_cfg.get("dir")
+                    or (Path(tempfile.gettempdir()) / "ah-qgis-staging")
+                )
+                try:
+                    tiling_input_path = tools.stage_local_copy(
+                        clipped_path,
+                        local_staging_root / "ortho",
+                    )
+                    tiling_output_dir = local_staging_root / "tiles" / tile_mode
+                    logger.info(
+                        "Local staging enabled: tiling will read/write on "
+                        f"local disk ({tiling_output_dir}) and copy results "
+                        f"to {tiles_dir} afterward, to avoid sustained "
+                        "random-access reads over the network share during "
+                        "tile generation."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        f"Local staging failed ({e}); falling back to "
+                        f"tiling directly against {clipped_path}."
+                    )
+                    tiling_input_path = clipped_path
+                    tiling_output_dir = tiles_dir
+                    local_staging_root = None
+
             logger.info(
-                f"Generating tiles ({tile_mode}) from {clipped_path.name} -> {tiles_dir}"
+                f"Generating tiles ({tile_mode}) from {tiling_input_path.name} -> {tiling_output_dir}"
             )
 
             tools.generate_tiles(
-                input_tif=clipped_path,
-                output_dir=tiles_dir,
+                input_tif=tiling_input_path,
+                output_dir=tiling_output_dir,
                 zoom=zoom,
                 profile=profile,
                 webviewer=webviewer,
@@ -1591,6 +1650,18 @@ class RGBPipeline(
                 clean=tile_clean,
                 resume=tile_resume,
             )
+
+            if local_staging_root is not None:
+                logger.info(
+                    f"Copying tiles from local staging to network share: "
+                    f"{tiling_output_dir} -> {tiles_dir}"
+                )
+                t0 = time.perf_counter()
+                tiles_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copytree(tiling_output_dir, tiles_dir, dirs_exist_ok=True)
+                logger.info(
+                    f"Tile copy-back complete in {time.perf_counter() - t0:.1f}s"
+                )
 
             selected["tiles_dir"] = str(tiles_dir)
         else:

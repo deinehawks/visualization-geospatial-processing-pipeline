@@ -25,11 +25,53 @@ class QGISTools:
         qgis_root: str = "",
         gdalwarp_path: str = "gdalwarp",
         gdal2tiles_path: str = "gdal2tiles.py",
+        gdalinfo_path: str = "gdalinfo",
     ) -> None:
         self.logger = logger
         self.qgis_root = qgis_root
         self.gdalwarp_path = gdalwarp_path
         self.gdal2tiles_path = gdal2tiles_path
+        self.gdalinfo_path = gdalinfo_path
+
+
+    # STAGE FILE TO LOCAL DISK
+    def stage_local_copy(self, src: Path, local_dir: Path) -> Path:
+        """
+        Copy src (typically on a network share) to local_dir on local disk,
+        verifying the copy landed intact. Used to pull a raster off Z:\\
+        before handing it to gdal2tiles, which does thousands of small
+        reads over the life of a tiling run and is far more exposed to a
+        network hiccup than a single sequential clip/checksum pass.
+        """
+        src = Path(src)
+        local_dir = Path(local_dir)
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dst = local_dir / src.name
+
+        src_size = src.stat().st_size
+        if dst.exists() and dst.stat().st_size == src_size:
+            log_step(self.logger, 1, f"Local staging copy already present: {dst.name}")
+        else:
+            log_step(self.logger, 1, f"Staging {src.name} to local disk: {dst}")
+            t0 = time.perf_counter()
+            shutil.copy2(src, dst)
+            elapsed = time.perf_counter() - t0
+            log_ok(self.logger, f"Staged locally in {elapsed:.1f}s: {dst}")
+
+        dst_size = dst.stat().st_size
+        if dst_size != src_size:
+            dst.unlink(missing_ok=True)
+            raise RuntimeError(
+                f"Local staging copy size mismatch for {src.name}: "
+                f"source={src_size} bytes, copy={dst_size} bytes"
+            )
+
+        # Full read-back on the local copy too — cheap on local disk, and
+        # catches a bad copy (or a source that was itself unreadable)
+        # before we sink minutes into tiling it.
+        self.verify_raster_readable(dst, retries=1, delay_s=1.0)
+
+        return dst
 
 
     # CLIP RASTER BY MASK
@@ -87,6 +129,11 @@ class QGISTools:
             "-cutline",    str(mask_geojson),
             "-crop_to_cutline",
             "-of",         "GTiff",
+            # BIGTIFF=IF_SAFER: switch to BigTIFF automatically once the
+            # output is projected to cross the classic 4GB TIFF ceiling,
+            # instead of silently corrupting the write past that point
+            # (this is what produced the TIFFAppendToStrip/"No error"
+            # failures on the large orthomosaic).
             "-co", "BIGTIFF=IF_SAFER",
             "-co", "TILED=YES",
             "-co", "COMPRESS=LZW",
@@ -110,10 +157,73 @@ class QGISTools:
 
         elapsed = time.perf_counter() - t0
         size_mb = output_tif.stat().st_size / (1024 ** 2) if output_tif.exists() else 0
+
+        # gdalwarp reporting success does not guarantee every block has
+        # actually landed on a network share (Z:\ etc.) — SMB clients can
+        # hold recently-written blocks in a write-back cache for a moment
+        # after the writing process exits. If we hand the file straight to
+        # gdal2tiles, it can hit a block that isn't really there yet and
+        # fail with TIFFFillTile/"Read error ... got 0 bytes". So we force
+        # a full read-back here (every band, every block) and retry a
+        # couple of times with a short wait before giving up, rather than
+        # discovering the corruption 10+ minutes into tiling.
+        self.verify_raster_readable(output_tif, retries=3, delay_s=5.0)
+
         log_ok(
             self.logger, f"Clip complete | output={output_tif.name} | size={size_mb:.1f} MB | elapsed={elapsed:.1f}s")
 
         return output_tif
+
+    # VERIFY RASTER IS FULLY READABLE
+    def verify_raster_readable(
+        self,
+        tif_path: Path,
+        *,
+        retries: int = 3,
+        delay_s: float = 5.0,
+    ) -> None:
+        """
+        Force GDAL to read every block of every band in tif_path (via
+        `gdalinfo -checksum`), retrying a few times with a short delay.
+        This catches network-share write-back cache races where gdalwarp
+        exits successfully but the file isn't fully flushed to the remote
+        share yet. Raises RuntimeError if the file still isn't readable
+        after all retries.
+        """
+        last_err = ""
+        for attempt in range(1, retries + 1):
+            try:
+                subprocess.run(
+                    [str(self.gdalinfo_path), "-checksum", str(tif_path)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                )
+                return
+            except FileNotFoundError:
+                # gdalinfo not on PATH — skip verification rather than
+                # blocking the pipeline over a missing optional tool.
+                log_warn(
+                    self.logger,
+                    f"gdalinfo not found ({self.gdalinfo_path}); "
+                    "skipping post-clip read-back verification.",
+                )
+                return
+            except subprocess.CalledProcessError as e:
+                last_err = (e.stderr or "")[:1000]
+                if attempt < retries:
+                    log_warn(
+                        self.logger,
+                        f"Read-back check failed on attempt {attempt}/{retries} "
+                        f"for {tif_path.name} (likely network share flush delay); "
+                        f"retrying in {delay_s:.0f}s...",
+                    )
+                    time.sleep(delay_s)
+
+        raise RuntimeError(
+            f"Clipped output failed read-back verification after {retries} "
+            f"attempts: {tif_path.name} — {last_err}"
+        )
 
 
     # GENERATE TILES
