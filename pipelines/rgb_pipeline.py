@@ -204,6 +204,20 @@ class RGBPipeline(
                 )
                 self.state["webodm"] = ckpt
 
+        if not state.get("selected_orthomosaic"):
+            qg = state.get("quality_gate") or {}
+            sel = qg.get("selected_orthomosaic")
+            if sel and isinstance(sel, dict):
+                state["selected_orthomosaic"] = sel
+                self.loggers["pipeline"].info(
+                    f"Restored selected orthomosaic from quality_gate state: "
+                    f"task={sel.get('task_key')} | file={sel.get('source_filename')}"
+                )
+            if not state.get("selected_webodm_task"):
+                task_key = qg.get("selected_webodm_task")
+                if task_key:
+                    state["selected_webodm_task"] = task_key
+
     def _stage_will_run(self, stage_name: str, *, force: bool) -> bool:
         if force:
             return True
@@ -2216,6 +2230,7 @@ class RGBPipeline(
                 output_key="qgis",
                 state=self.state,
                 force=_force("qgis"),
+                stale_running_policy="rerun",
             )
 
             self.state["success"] = True
