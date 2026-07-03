@@ -1531,6 +1531,21 @@ class RGBPipeline(
             gdalinfo_path=gdalinfo_path,
         )
 
+        # Clip staging: gdalwarp writes to local disk first, then the result
+        # is verified and copied to the network destination (Z:\). This avoids
+        # SMB write-cache corruption on large TIFFs written directly to network
+        # shares, which causes TIFFAppendToStrip write errors mid-write.
+        local_staging_cfg = qgis_cfg.get("local_staging") or {}
+        local_staging_enabled = bool(local_staging_cfg.get("enabled", True))
+        if local_staging_enabled:
+            _clip_staging_base = Path(
+                local_staging_cfg.get("dir")
+                or (Path(tempfile.gettempdir()) / "ah-qgis-staging")
+            )
+            clip_staging_dir: Optional[Path] = _clip_staging_base / "clip" / self.run_id
+        else:
+            clip_staging_dir = None
+
         clipped_path: Path
 
         if boundary_used and clip_enabled:
@@ -1574,6 +1589,7 @@ class RGBPipeline(
                     mask_geojson=mask_geojson,
                     output_tif=clipped_path,
                     dst_nodata=dst_nodata,
+                    local_staging_dir=clip_staging_dir,
                 )
 
         elif boundary_used and not clip_enabled:

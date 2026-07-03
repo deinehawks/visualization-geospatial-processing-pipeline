@@ -771,20 +771,43 @@ class WebODMProcessor:
                 f"Failed downloading asset ='{asset_type}' -> {out_path}")
             return False
 
-    def run_gdalwarp(self, src: Path, dst: Path, epsg: int, *, gdalwarp_path: str = "gdalwarp") -> None:
+    def run_gdalwarp(
+        self,
+        src: Path,
+        dst: Path,
+        epsg: int,
+        *,
+        gdalwarp_path: str = "gdalwarp",
+    ) -> None:
         dst.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [str(gdalwarp_path), "-t_srs",
-               f"EPSG:{epsg}", str(src), str(dst)]
-        self.logger.info(f"Reprojecting via gdalwarp -> EPSG:{epsg}")
+        cmd = [
+            str(gdalwarp_path),
+            "-t_srs", f"EPSG:{epsg}",
+            "-co", "COMPRESS=LZW",
+            "-co", "TILED=YES",
+            "-co", "BLOCKXSIZE=512",
+            "-co", "BLOCKYSIZE=512",
+            "-co", "BIGTIFF=IF_SAFER",
+            "-co", "NUM_THREADS=ALL_CPUS",
+            str(src),
+            str(dst),
+        ]
+        self.logger.info(
+            f"Reprojecting via gdalwarp -> EPSG:{epsg} "
+            f"(LZW compressed, tiled 512×512)"
+        )
         try:
             subprocess.run(cmd, check=True, capture_output=True, text=True)
         except FileNotFoundError:
             self.logger.warning(
-                "gdalwarp not found. Skipping reprojection (keeping raw).")
+                "gdalwarp not found. Skipping reprojection (keeping raw)."
+            )
             shutil.copy2(src, dst)
-        except subprocess.CalledProcessError as e:
+        except subprocess.CalledProcessError as exc:
             self.logger.warning(
-                f"gdalwarp failed. Keeping raw. stderr={e.stderr[:200] if e.stderr else ''}")
+                f"gdalwarp failed. Keeping raw. "
+                f"stderr={exc.stderr[:200] if exc.stderr else ''}"
+            )
             shutil.copy2(src, dst)
 
     def run_pdal_translate(self, src: Path, dst: Path, *, pdal_path: str = "pdal") -> bool:
