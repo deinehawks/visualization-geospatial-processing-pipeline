@@ -82,14 +82,20 @@ class QGISTools:
         mask_geojson: Path,
         output_tif: Path,
         dst_nodata: Optional[float] = None,
+        local_staging_dir: Optional[Path] = None,
     ) -> Path:
         """
         Clip a GeoTIFF by a GeoJSON mask polygon (equivalent to QGIS
         Raster → Extraction → Clip raster by mask layer).
+
+        If local_staging_dir is provided, gdalwarp writes to a temp file
+        on local disk first, then the result is copied to output_tif.
+        This avoids SMB write-corruption on network shares (Z:\\) which
+        causes TIFFAppendToStrip write errors on large orthomosaics.
         """
-        input_tif = Path(input_tif)
+        input_tif   = Path(input_tif)
         mask_geojson = Path(mask_geojson)
-        output_tif = Path(output_tif)
+        output_tif  = Path(output_tif)
         output_tif.parent.mkdir(parents=True, exist_ok=True)
 
         if not input_tif.exists():
@@ -97,28 +103,47 @@ class QGISTools:
         if not mask_geojson.exists():
             raise FileNotFoundError(f"Mask GeoJSON not found: {mask_geojson}")
 
-        # Preflight: make sure the destination has room for at least the
-        # source raster size again (clip output is <= input size, but we
-        # want headroom for a network share that may be near-full).
         input_size = input_tif.stat().st_size
-        try:
-            free_bytes = shutil.disk_usage(output_tif.parent).free
-        except OSError:
-            free_bytes = None
-        if free_bytes is not None and free_bytes < input_size:
-            raise RuntimeError(
-                f"Insufficient free space at {output_tif.parent}: "
-                f"{free_bytes / (1024 ** 3):.2f} GB free, "
-                f"input raster is {input_size / (1024 ** 3):.2f} GB. "
-                "Free up space before re-running the clip."
-            )
 
-        # If a previous run died mid-write, a stale/corrupt output file
-        # can trip libtiff on the next attempt. -overwrite tells gdalwarp
-        # to replace it, but we remove it ourselves first to avoid any
-        # partial-file edge cases on network shares (Z:\ etc.).
-        if output_tif.exists():
-            output_tif.unlink()
+        # Decide where gdalwarp actually writes to.
+        # If a local staging dir is provided, write there first, then copy
+        # to the network destination. This avoids SMB write-cache corruption
+        # on large TIFFs written directly to Z:\ shares.
+        if local_staging_dir is not None:
+            local_staging_dir = Path(local_staging_dir)
+            local_staging_dir.mkdir(parents=True, exist_ok=True)
+            write_target = local_staging_dir / output_tif.name
+            using_local = True
+            self.logger.info(
+                f"Clip will write to local staging disk first: {write_target}"
+            )
+        else:
+            write_target = output_tif
+            using_local  = False
+
+        # Pre-flight: check free space on the write target's drive.
+        # Use 1.5× input size as a safe buffer (clipped output ≤ input,
+        # but LZW compression means actual size is unpredictable upfront).
+        needed_bytes = int(input_size * 1.5)
+        for check_path, label in [
+            (write_target.parent, "local staging" if using_local else "output"),
+            *( [(output_tif.parent, "network output")] if using_local else [] ),
+        ]:
+            try:
+                free = shutil.disk_usage(str(check_path)).free
+            except OSError:
+                free = None
+            if free is not None and free < needed_bytes:
+                raise RuntimeError(
+                    f"Insufficient free space on {label} drive ({check_path}):\n"
+                    f"  Free   : {free / (1024**3):.2f} GB\n"
+                    f"  Needed : {needed_bytes / (1024**3):.2f} GB (1.5× source)\n"
+                    "Free up space before re-running the clip."
+                )
+
+        # Remove any stale/corrupt file at the write target before starting.
+        if write_target.exists():
+            write_target.unlink()
 
         log_step(self.logger, 1,
                  f"Clip raster by mask: {input_tif.name} → {output_tif.name}")
@@ -126,21 +151,21 @@ class QGISTools:
         cmd = [
             str(self.gdalwarp_path),
             "-overwrite",
-            "-cutline",    str(mask_geojson),
+            "-cutline",        str(mask_geojson),
             "-crop_to_cutline",
-            "-of",         "GTiff",
-            # BIGTIFF=IF_SAFER: switch to BigTIFF automatically once the
-            # output is projected to cross the classic 4GB TIFF ceiling,
-            # instead of silently corrupting the write past that point
-            # (this is what produced the TIFFAppendToStrip/"No error"
-            # failures on the large orthomosaic).
+            "-of",             "GTiff",
+            # BIGTIFF=IF_SAFER: auto-switch to BigTIFF when output crosses
+            # the classic 4 GB TIFF ceiling, instead of silently corrupting.
             "-co", "BIGTIFF=IF_SAFER",
             "-co", "TILED=YES",
             "-co", "COMPRESS=LZW",
+            # Allow GDAL to use multiple threads for compression/IO.
+            "-wo", "NUM_THREADS=ALL_CPUS",
+            "-co", "NUM_THREADS=ALL_CPUS",
         ]
         if dst_nodata is not None:
             cmd += ["-dstnodata", str(dst_nodata)]
-        cmd += [str(input_tif), str(output_tif)]
+        cmd += [str(input_tif), str(write_target)]
 
         t0 = time.perf_counter()
         try:
@@ -148,30 +173,45 @@ class QGISTools:
         except FileNotFoundError:
             raise RuntimeError(f"gdalwarp not found: {self.gdalwarp_path}")
         except subprocess.CalledProcessError as e:
-            # Clean up whatever partial file gdalwarp left behind so the
-            # next attempt doesn't start from a corrupt TIFF.
-            if output_tif.exists():
-                output_tif.unlink(missing_ok=True)
+            # Clean up partial write so next attempt starts clean.
+            if write_target.exists():
+                write_target.unlink(missing_ok=True)
             raise RuntimeError(
-                f"gdalwarp clip failed: {(e.stderr or '')[:1000]}")
+                f"gdalwarp clip failed: {(e.stderr or '')[:1000]}"
+            )
 
         elapsed = time.perf_counter() - t0
+
+        # Verify the clipped file is fully readable before handing it off.
+        # On local disk this is fast; catches bad writes before tiling starts.
+        self.verify_raster_readable(write_target, retries=3, delay_s=5.0)
+
+        # If we wrote to local staging, copy to the final network destination.
+        if using_local and write_target != output_tif:
+            self.logger.info(
+                f"Clip verified locally — copying to network destination: "
+                f"{output_tif}"
+            )
+            t_copy = time.perf_counter()
+            shutil.copy2(write_target, output_tif)
+            copy_elapsed = time.perf_counter() - t_copy
+            self.logger.info(
+                f"Network copy complete in {copy_elapsed:.1f}s: {output_tif.name}"
+            )
+            # Verify the network copy too.
+            self.verify_raster_readable(output_tif, retries=3, delay_s=5.0)
+            # Clean up local staging file.
+            try:
+                write_target.unlink(missing_ok=True)
+            except Exception:
+                pass
+
         size_mb = output_tif.stat().st_size / (1024 ** 2) if output_tif.exists() else 0
-
-        # gdalwarp reporting success does not guarantee every block has
-        # actually landed on a network share (Z:\ etc.) — SMB clients can
-        # hold recently-written blocks in a write-back cache for a moment
-        # after the writing process exits. If we hand the file straight to
-        # gdal2tiles, it can hit a block that isn't really there yet and
-        # fail with TIFFFillTile/"Read error ... got 0 bytes". So we force
-        # a full read-back here (every band, every block) and retry a
-        # couple of times with a short wait before giving up, rather than
-        # discovering the corruption 10+ minutes into tiling.
-        self.verify_raster_readable(output_tif, retries=3, delay_s=5.0)
-
         log_ok(
-            self.logger, f"Clip complete | output={output_tif.name} | size={size_mb:.1f} MB | elapsed={elapsed:.1f}s")
-
+            self.logger,
+            f"Clip complete | output={output_tif.name} | "
+            f"size={size_mb:.1f} MB | elapsed={elapsed:.1f}s"
+        )
         return output_tif
 
     # VERIFY RASTER IS FULLY READABLE
