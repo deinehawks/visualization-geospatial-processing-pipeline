@@ -83,6 +83,31 @@ def fmt_duration(seconds: Optional[float]) -> str:
     return f"{s}s"
 
 
+_ISO_TIME_RE = re.compile(r"T(\d{2}:\d{2}:\d{2})")
+
+
+def fmt_time_hms(iso_str: Optional[str]) -> str:
+    """
+    Extract just the HH:MM:SS portion from an ISO-8601 timestamp like
+    '2026-06-19T06:28:27.110345+00:00'.
+
+    Previously this was done with a naive [-8:] slice, which grabs the
+    last 8 characters of the *whole string* — landing inside the
+    fractional-seconds/timezone-offset tail instead of the actual time
+    (e.g. '15+00:00' instead of '06:28:27'). This matches the 'T' marker
+    instead, so it's correct regardless of whether microseconds or a
+    timezone offset are present.
+    """
+    if not iso_str or iso_str == "—":
+        return "—"
+    m = _ISO_TIME_RE.search(iso_str)
+    if m:
+        return m.group(1)
+    # Not ISO-shaped (e.g. already just a time, or unexpected format) —
+    # fall back to showing it as-is rather than guessing wrong.
+    return iso_str
+
+
 def status_style(status: str) -> str:
     return {
         "completed": "green",
@@ -193,6 +218,23 @@ def get_stage_outputs_for_run(conn: sqlite3.Connection, run_id: str) -> Dict[str
         elif r["status"] == "completed":
             outputs[r["stage_name"]] = parsed
     return outputs
+
+
+def get_qgis_selected_task(qgis_output: Optional[dict]) -> Optional[str]:
+    """
+    Figure out which WebODM task (task2/task4) a qgis stage's output was
+    for, from its output_json. The field name for this has changed across
+    pipeline versions — current code writes 'selected_webodm_task', older
+    code wrote 'main_ortho_source' — so check both rather than assuming
+    one schema.
+    """
+    if not qgis_output:
+        return None
+    for key in ("selected_webodm_task", "main_ortho_source", "selected_task", "task"):
+        val = qgis_output.get(key)
+        if val:
+            return str(val).lower()
+    return None
 
 
 _TASK_KEY_RE = re.compile(r"^task\d+$", re.IGNORECASE)
@@ -309,6 +351,28 @@ _TILE_ELAPSED_RE_FALLBACK = re.compile(
     re.IGNORECASE,
 )
 
+# Which WebODM task (task2 / task4) the clip+tile run was for. Task 2 is
+# the normal bounded output; Task 4 only exists as a fallback when Task 2
+# failed quality gate — so which one shows up varies run to run, and we
+# want the label attached to the timing, not just a bare duration.
+#
+# Preferred source: the explicit selection line QGIS logs before clipping.
+_SELECTED_TASK_RE = re.compile(
+    r"QGIS selected orthomosaic:\s*task=(?P<task>\w+)",
+    re.IGNORECASE,
+)
+# Fallback source: "Clipping selected orthomosaic (task4) -> ..." — same
+# info, slightly older/newer wording.
+_CLIPPING_TASK_RE = re.compile(
+    r"clipping selected orthomosaic\s*\((?P<task>\w+)\)",
+    re.IGNORECASE,
+)
+# Last-resort source: the clipped output filename itself often carries a
+# "-t2"/"-t4" suffix (e.g. orthomosaic-clipped--xcb-t4.tif). Oldest runs
+# in this codebase's history used a generic filename with no such suffix,
+# in which case this simply won't match and we fall through to "unknown".
+_FILENAME_TASK_RE = re.compile(r"-t(?P<num>\d+)\.tif", re.IGNORECASE)
+
 
 def _first_match(patterns: List[re.Pattern], msg: str) -> Optional[re.Match]:
     for pat in patterns:
@@ -344,7 +408,20 @@ def extract_log_insights(
         "upload_cache_seconds": None,
         "clip_elapsed_seconds": None,
         "tile_elapsed_seconds": None,
+        # Which WebODM task (task2/task4) the clip+tiling ran against.
+        # None if it genuinely can't be determined from these logs (older
+        # runs before this was logged) — resolved further using DB output
+        # as a fallback by the caller.
+        "clip_task": None,
+        "tile_task": None,
+        # Every individual clip attempt seen in the logs, in case the
+        # pipeline retried clipping multiple times within one run (with
+        # possibly-different elapsed times, or in principle a different
+        # task if quality gate flipped selection mid-run).
+        "clip_attempts": [],
     }
+
+    current_task: Optional[str] = None
 
     for ev in events:
         msg   = ev["message"]
@@ -378,19 +455,40 @@ def extract_log_insights(
             except (ValueError, IndexError):
                 pass
 
+        # Track which WebODM task (task2/task4) is currently selected, so
+        # any clip/tile timing seen after this point gets tagged with it.
+        # Order matters here: events for a given log file are appended in
+        # file order, so this stays correct relative to the clip/tile
+        # lines that follow it in the same qgis.log.
+        m = _SELECTED_TASK_RE.search(msg) or _CLIPPING_TASK_RE.search(msg)
+        if m:
+            current_task = m.group("task").lower()
+
         # QGIS clip runtime
         m = _first_match([_CLIP_ELAPSED_RE_PRIMARY, _CLIP_ELAPSED_RE_FALLBACK], msg)
         if m:
             try:
-                insights["clip_elapsed_seconds"] = float(m.group("seconds"))
+                seconds = float(m.group("seconds"))
             except (ValueError, IndexError):
-                pass
+                seconds = None
+            if seconds is not None:
+                # Prefer a task suffix baked into this specific clip's
+                # output filename over the tracked context, since it's
+                # tied directly to this exact clip event.
+                fm = _FILENAME_TASK_RE.search(msg)
+                clip_task = f"task{fm.group('num')}" if fm else current_task
+                insights["clip_elapsed_seconds"] = seconds
+                insights["clip_task"] = clip_task
+                insights["clip_attempts"].append(
+                    {"task": clip_task, "seconds": seconds, "time": ev["time"]}
+                )
 
         # QGIS tile generation runtime (+ tile count if present)
         m = _first_match([_TILE_ELAPSED_RE_PRIMARY, _TILE_ELAPSED_RE_FALLBACK], msg)
         if m:
             try:
                 insights["tile_elapsed_seconds"] = float(m.group("seconds"))
+                insights["tile_task"] = current_task
             except (ValueError, IndexError):
                 pass
             try:
@@ -554,8 +652,8 @@ def analyse_survey(
                 f"[{scolor}]{sname}[/{scolor}]",
                 f"[{sstyle}]{s['status']}[/{sstyle}]",
                 f"[bold]{fmt_duration(s.get('runtime_seconds'))}[/bold]",
-                (s.get("started_at")  or "—")[-8:],
-                (s.get("finished_at") or "—")[-8:],
+                fmt_time_hms(s.get("started_at")),
+                fmt_time_hms(s.get("finished_at")),
                 " · ".join(notes_parts) or "[dim]—[/dim]",
             )
 
@@ -612,6 +710,14 @@ def analyse_survey(
             or insights["tile_elapsed_seconds"] is not None
         )
         if has_qgis_detail:
+            # Resolve the DB fallback once we know logs didn't have it.
+            db_task = get_qgis_selected_task(stage_outputs.get("qgis"))
+
+            def _task_label(task: Optional[str]) -> str:
+                if not task:
+                    return ""
+                return f"  ({task})"
+
             qt = Table(
                 title="[bold bright_green]QGIS detail[/bold bright_green]",
                 box=box.MINIMAL,
@@ -623,12 +729,43 @@ def analyse_survey(
             qt.add_column("Item")
             qt.add_column("Value", justify="right")
 
-            if insights["clip_elapsed_seconds"] is not None:
-                qt.add_row("Clip runtime", fmt_duration(insights["clip_elapsed_seconds"]))
+            # Clip: show one row per distinct task if the run ever switched
+            # (rare, but quality gate can flip task2 -> task4 mid-run), else
+            # a single row. Falls back to the DB-derived task if the logs
+            # never recorded a task at all for this run (older code).
+            clip_attempts = insights["clip_attempts"]
+            if clip_attempts:
+                tasks_seen = {a["task"] for a in clip_attempts if a["task"]}
+                if len(tasks_seen) > 1:
+                    # Task changed mid-run — show each task's most recent
+                    # attempt separately so it's clear which is which.
+                    latest_by_task: Dict[Optional[str], dict] = {}
+                    for a in clip_attempts:
+                        latest_by_task[a["task"]] = a  # last one wins
+                    for task, a in latest_by_task.items():
+                        label = task or db_task or "unknown task"
+                        qt.add_row(f"Clip runtime ({label})", fmt_duration(a["seconds"]))
+                else:
+                    task = insights["clip_task"] or db_task
+                    n = len(clip_attempts)
+                    suffix = _task_label(task)
+                    attempt_note = f"  [{n} attempts]" if n > 1 else ""
+                    qt.add_row(
+                        f"Clip runtime{suffix}",
+                        f"{fmt_duration(insights['clip_elapsed_seconds'])}{attempt_note}",
+                    )
+            elif insights["clip_elapsed_seconds"] is not None:
+                task = insights["clip_task"] or db_task
+                qt.add_row(
+                    f"Clip runtime{_task_label(task)}",
+                    fmt_duration(insights["clip_elapsed_seconds"]),
+                )
+
             if insights["tile_elapsed_seconds"] is not None:
                 tiles = insights["tile_count"]
+                task = insights["tile_task"] or db_task
                 qt.add_row(
-                    "Tile generation runtime",
+                    f"Tile generation runtime{_task_label(task)}",
                     fmt_duration(insights["tile_elapsed_seconds"])
                     + (f"  (~{tiles:,} tiles)" if tiles else ""),
                 )

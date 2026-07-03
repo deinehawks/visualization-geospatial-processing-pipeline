@@ -5,7 +5,7 @@ Queue:
 
 
 Running: 
-python main.py --survey "DNG-001_36.4Ha_M3C_100m_85f75s_8mps_p30" --year 2026 --resume --run-id dc6351bc-a51c-4f3a-b61e-bed0766f5a35 
+python main.py --survey "MCS_311_19Ha_A2S_100m_85f75s_7mps" --year 2026
 
 command for generating maps
 
