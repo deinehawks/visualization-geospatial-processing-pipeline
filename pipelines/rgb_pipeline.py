@@ -2078,11 +2078,21 @@ class RGBPipeline(
                         task_key=fallback_task,
                         fallback_reason=f"quality_gate_requested_{fallback_task}_fallback",
                     )
+                except RuntimeError as e:
+                    if str(e) in ("__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"):
+                        raise  # let run() handle pause/abort properly, don't treat as failure
+                    logger.exception(f"{fallback_task} fallback failed.")
+                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+                    return {
+                        "passed": False,
+                        "restarts": restarts,
+                        "project_id": project_id,
+                        "fallback_task": fallback_task,
+                        "fallback_failed": True,
+                    }
                 except Exception:
                     logger.exception(f"{fallback_task} fallback failed.")
-
                     self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-
                     return {
                         "passed": False,
                         "restarts": restarts,
