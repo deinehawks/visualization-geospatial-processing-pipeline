@@ -9,4 +9,5 @@ def connect(db_file: Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.execute("PRAGMA journal_mode = WAL;")   # safer for crashes + concurrent reads
     conn.execute("PRAGMA synchronous = NORMAL;") # balanced performance
+    conn.execute("PRAGMA busy_timeout = 5000;")  # wait up to 5s on lock instead of raising immediatel
     return conn
