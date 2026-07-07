@@ -5,7 +5,11 @@ Queue:
 
 
 Running: 
-python main.py --survey "MCS_311_19Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id 722f596f-e5d8-4afb-aee6-29a4dd5c7841
+python main.py --survey "BCO-107_5Ha_M3C_60m_85f75s_5mps" --year 2026
+
+
+Run Later:
+python main.py --survey "MCS_301_23.7Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id 9eab110c-38fb-4b6f-a2f9-9feae7c3664d --force-stage qgis
 
 command for generating maps
 

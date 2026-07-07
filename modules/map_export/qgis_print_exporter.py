@@ -171,8 +171,8 @@ def export_qgis_print_layout(
     if include_orthomosaic:
         for record in orthomosaic_records:
             ortho_path_value = (
-                record.get("packaged_orthomosaic")
-                or record.get("relative_orthomosaic")
+                record.get("relative_orthomosaic")
+                or record.get("packaged_orthomosaic")
                 or record.get("source_orthomosaic")
             )
 

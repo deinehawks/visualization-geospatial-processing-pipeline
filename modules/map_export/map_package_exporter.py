@@ -7,7 +7,7 @@ from typing import Any
 import json
 import shutil
 
-from .boundary_finder import collect_boundary_files
+from .boundary_finder import collect_boundary_files_by_survey_id
 from .kml_to_geojson import extract_kml_from_kmz, parse_kml_to_features
 from .orthomosaic_finder import collect_orthomosaic_files
 
@@ -48,14 +48,20 @@ def export_map_package(
     source_boundary_dir.mkdir(parents=True, exist_ok=True)
     extracted_kml_dir.mkdir(parents=True, exist_ok=True)
 
+    db_path = Path("data/pipeline.db")
+
     if include_orthomosaic:
         orthomosaic_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
+    
+    if survey_root is None:
+     raise ValueError("survey_root is required for boundary lookup")\
 
-    boundary_files = collect_boundary_files(
-        source_root=source_root,
+    boundary_files = collect_boundary_files_by_survey_id(
+        surveys_root=survey_root,
+        db_path=db_path,
         survey_names=survey_names,
     )
 
@@ -72,6 +78,7 @@ def export_map_package(
 
         orthomosaic_files = collect_orthomosaic_files(
             surveys_root=survey_root,
+            db_path=db_path,
             survey_names=survey_names,
         )
 

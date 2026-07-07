@@ -1,6 +1,8 @@
 from __future__ import annotations
 from pathlib import Path
 import logging
+import json
+from .survey_manifest import resolve_survey_id
 
 logger = logging.getLogger("rgb.map_export")
 
@@ -9,6 +11,7 @@ ORTHOMOSAIC_PATTERN = "orthomosaic-clipped--*.tif"
 
 def collect_orthomosaic_files(
     surveys_root: Path,
+    db_path: Path | None,
     survey_names: list[str],
 ) -> list[Path]:
 
@@ -18,28 +21,7 @@ def collect_orthomosaic_files(
     selected: list[Path] = []
 
     for survey_name in survey_names:
-
-        survey_path = Path(survey_name)
-
-        survey_id_file = (
-            survey_path / "survey_id.txt"
-        )
-
-        if not survey_id_file.exists():
-            raise FileNotFoundError(
-                f"survey_id.txt not found in {survey_path}"
-            )
-
-        survey_id = (
-            survey_id_file
-            .read_text(encoding="utf-8")
-            .strip()
-        )
-
-        ortho_dir = (
-            surveys_root
-            / survey_id[:4]
-        )
+        survey_id = resolve_survey_id(surveys_root, db_path, survey_name)
 
         matches = list(
             surveys_root.rglob(

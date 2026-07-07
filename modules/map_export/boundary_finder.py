@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from .survey_manifest import resolve_survey_id, load_manifest
 import re
-
+import json
 
 BOUNDARY_EXTENSIONS = {".kmz", ".kml"}
 
@@ -227,3 +228,91 @@ def _sample_dataset_folders(search_root: Path) -> list[Path]:
             break
 
     return samples
+
+
+def _load_manifest(survey_path: Path) -> dict:
+    manifest_file = survey_path / "manifest.json"
+
+    if not manifest_file.exists():
+        candidates = list(survey_path.rglob("manifest.json"))
+        if not candidates:
+            raise FileNotFoundError(
+                f"manifest.json not found in {survey_path} (or any subfolder)"
+            )
+        manifest_file = candidates[0]
+
+    return json.loads(manifest_file.read_text(encoding="utf-8"))
+
+
+def _resolve_survey_id(survey_name: str) -> str:
+    survey_path = Path(survey_name)
+    manifest = _load_manifest(survey_path)
+
+    survey_id = manifest.get("survey_id")
+    if not survey_id:
+        raise ValueError(f"'survey_id' key missing in manifest.json for {survey_path}")
+
+    return survey_id
+
+
+def find_boundary_file_by_survey_id(
+    surveys_root: Path,
+    db_path: Path | None,
+    survey_name: str,
+) -> BoundaryFile:
+    survey_id = resolve_survey_id(surveys_root, db_path, survey_name)
+
+    kml_file_name = None
+    try:
+        manifest = load_manifest(surveys_root, survey_id)
+        kml_file_name = manifest.get("kml_file")
+    except FileNotFoundError:
+        pass
+
+    candidates: list[Path] = []
+
+    if kml_file_name:
+        candidates = [
+            path
+            for path in surveys_root.rglob(f"{survey_id}/rgb/**/{kml_file_name}")
+            if path.is_file()
+        ]
+
+    if not candidates:
+        candidates = [
+            path
+            for path in surveys_root.rglob(f"{survey_id}/rgb/**/*")
+            if path.is_file() and path.suffix.lower() in BOUNDARY_EXTENSIONS
+        ]
+
+    if not candidates:
+        raise FileNotFoundError(
+            f"No boundary file found for survey ID: {survey_id}\n"
+            f"Looked under: {surveys_root}/**/{survey_id}/rgb/**"
+        )
+
+    candidates.sort(
+        key=lambda p: (
+            0 if p.suffix.lower() == ".kmz" else 1,
+            len(p.parts),
+            p.name.lower(),
+        )
+    )
+
+    return BoundaryFile(
+        survey_name=survey_id,
+        survey_dir=surveys_root / survey_id,
+        boundary_path=candidates[0],
+    )
+
+
+def collect_boundary_files_by_survey_id(
+    *,
+    surveys_root: Path,
+    db_path: Path | None,
+    survey_names: list[str],
+) -> list[BoundaryFile]:
+    return [
+        find_boundary_file_by_survey_id(surveys_root, db_path, survey_name)
+        for survey_name in survey_names
+    ]
