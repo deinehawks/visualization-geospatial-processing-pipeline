@@ -1531,21 +1531,48 @@ class RGBPipeline(
             gdalinfo_path=gdalinfo_path,
         )
 
-        # Clip staging: gdalwarp writes to local disk first, then the result
-        # is verified and copied to the network destination (Z:\). This avoids
-        # SMB write-cache corruption on large TIFFs written directly to network
-        # shares, which causes TIFFAppendToStrip write errors mid-write.
+        # ── Local staging setup ───────────────────────────────────────────────
+        # gdalwarp and gdal2tiles both write to local disk first, then results
+        # are copied to the network share. This avoids:
+        #   - SMB write-cache corruption during clip (TIFFAppendToStrip errors)
+        #   - sustained random-access reads over the network during tiling
+        #
+        # Staging root priority:
+        #   1. QGIS_LOCAL_STAGING_DIR  (explicit override)
+        #   2. UPLOAD_CACHE_ROOT       (reuse the existing E:\cache folder)
+        #   3. tempfile.gettempdir()   (last resort — may be C:\)
         local_staging_cfg = qgis_cfg.get("local_staging") or {}
         local_staging_enabled = bool(local_staging_cfg.get("enabled", True))
-        if local_staging_enabled:
-            _clip_staging_base = Path(
-                local_staging_cfg.get("dir")
-                or (Path(tempfile.gettempdir()) / "ah-qgis-staging")
-            )
-            clip_staging_dir: Optional[Path] = _clip_staging_base / "clip" / self.run_id
-        else:
-            clip_staging_dir = None
 
+        clip_staging_dir: Optional[Path] = None
+        local_staging_root: Optional[Path] = None
+
+        if local_staging_enabled:
+            _explicit_dir = (local_staging_cfg.get("dir") or "").strip()
+            if _explicit_dir:
+                _staging_base = Path(_explicit_dir)
+            else:
+                # Reuse UPLOAD_CACHE_ROOT (E:\cache) so we never fall back
+                # to C:\ temp. UPLOAD_CACHE_ROOT is already validated in
+                # config.py so it's guaranteed to exist.
+                _upload_cache_root = (
+                    (self.config.get("paths") or {}).get("upload_cache_root")
+                )
+                if _upload_cache_root:
+                    _staging_base = Path(_upload_cache_root) / "qgis-staging"
+                else:
+                    _staging_base = Path(tempfile.gettempdir()) / "ah-qgis-staging"
+                    logger.warning(
+                        f"UPLOAD_CACHE_ROOT not set — QGIS staging will use "
+                        f"temp dir: {_staging_base}. Set UPLOAD_CACHE_ROOT in "
+                        f".env to use your E:\\cache folder instead."
+                    )
+
+            clip_staging_dir = _staging_base / "clip" / self.run_id
+            local_staging_root = _staging_base / "tiles" / self.run_id
+            logger.info(f"QGIS local staging root: {_staging_base}")
+
+        # ── Clip ─────────────────────────────────────────────────────────────
         clipped_path: Path
 
         if boundary_used and clip_enabled:
@@ -1562,10 +1589,6 @@ class RGBPipeline(
             if mask_geojson is None:
                 raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
 
-            # Stage-level resume: if this stage previously died in a later
-            # step (e.g. tiling), don't redo a clip that already succeeded.
-            # Verify the existing file is actually intact before trusting
-            # it — otherwise fall through and re-clip as normal.
             skip_clip = False
             if resume and clipped_path.exists():
                 logger.info(
@@ -1614,46 +1637,43 @@ class RGBPipeline(
 
         tiles_dir = tiles_round_dir if boundary_used else tiles_soft_dir
 
+        # ── Tile generation ──────────────────────────────────────────────────
+        _staging_root: Optional[Path] = None
         if tiles_enabled:
             tile_resume = bool(resume)
             tile_clean = not tile_resume
 
-            local_staging_cfg = qgis_cfg.get("local_staging") or {}
-            local_staging_enabled = bool(local_staging_cfg.get("enabled", True))
-
             tiling_input_path = clipped_path
             tiling_output_dir = tiles_dir
-            local_staging_root: Path | None = None
+            _local_tile_staging_active = False
 
-            if local_staging_enabled:
-                local_staging_root = Path(
-                    local_staging_cfg.get("dir")
-                    or (Path(tempfile.gettempdir()) / "ah-qgis-staging")
-                )
+            if local_staging_root is not None:
+                _staging_root = local_staging_root 
                 try:
+                    _local_ortho_staging = local_staging_root / "ortho"
                     tiling_input_path = tools.stage_local_copy(
                         clipped_path,
-                        local_staging_root / "ortho",
+                        _local_ortho_staging,
                     )
                     tiling_output_dir = local_staging_root / "tiles" / tile_mode
+                    _local_tile_staging_active = True
                     logger.info(
-                        "Local staging enabled: tiling will read/write on "
+                        f"Local staging enabled: tiling will read/write on "
                         f"local disk ({tiling_output_dir}) and copy results "
-                        f"to {tiles_dir} afterward, to avoid sustained "
-                        "random-access reads over the network share during "
-                        "tile generation."
+                        f"to {tiles_dir} afterward."
                     )
                 except Exception as e:
                     logger.warning(
-                        f"Local staging failed ({e}); falling back to "
+                        f"Local staging setup failed ({e}); falling back to "
                         f"tiling directly against {clipped_path}."
                     )
                     tiling_input_path = clipped_path
                     tiling_output_dir = tiles_dir
-                    local_staging_root = None
+                    _local_tile_staging_active = False
 
             logger.info(
-                f"Generating tiles ({tile_mode}) from {tiling_input_path.name} -> {tiling_output_dir}"
+                f"Generating tiles ({tile_mode}) from "
+                f"{tiling_input_path.name} -> {tiling_output_dir}"
             )
 
             tools.generate_tiles(
@@ -1667,7 +1687,7 @@ class RGBPipeline(
                 resume=tile_resume,
             )
 
-            if local_staging_root is not None:
+            if _local_tile_staging_active:
                 logger.info(
                     f"Copying tiles from local staging to network share: "
                     f"{tiling_output_dir} -> {tiles_dir}"
@@ -1678,6 +1698,25 @@ class RGBPipeline(
                 logger.info(
                     f"Tile copy-back complete in {time.perf_counter() - t0:.1f}s"
                 )
+
+                # ── Cleanup local staging ────────────────────────────────────
+                # Remove all staging dirs for this run now that tiles are
+                # safely on the network share. Done here (after copy-back)
+                # so that a failed copy-back leaves the local tiles intact
+                # for manual recovery.
+                for _stale_dir, _label in [
+                    (clip_staging_dir,          "clip staging"),
+                    (_staging_root / "ortho" if _staging_root else None, "ortho staging"),
+                    (tiling_output_dir,          "tile staging"),
+                ]:
+                    if _stale_dir is not None and _stale_dir.exists():
+                        try:
+                            shutil.rmtree(_stale_dir)
+                            logger.info(f"Cleaned up {_label}: {_stale_dir}")
+                        except Exception as _e:
+                            logger.warning(
+                                f"Could not clean up {_label} ({_stale_dir}): {_e}"
+                            )
 
             selected["tiles_dir"] = str(tiles_dir)
         else:
