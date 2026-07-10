@@ -46,7 +46,6 @@ echo Running map export...
   --location "Tugbok District, Davao City" ^
   --map-scale 15000 ^
   --layout-template "assets/qgis_layouts/client_boundary_map.qpt" ^
-  --include-orthomosaic ^
   --export-print ^
   --logo "assets/logo.png"
 

@@ -8,7 +8,16 @@ from typing import Any
 import json
 import math
 import os
+from osgeo import gdal
 
+from osgeo import gdal
+
+def _quiet_gdal_error_handler(err_class, err_num, err_msg):
+    if "PNG driver does not support update access" in err_msg:
+        return
+    gdal.CPLDefaultErrorHandler(err_class, err_num, err_msg)
+
+gdal.PushErrorHandler(_quiet_gdal_error_handler)
 
 def export_qgis_print_layout(
     *,
@@ -207,26 +216,25 @@ def export_qgis_print_layout(
 
     main_map_layers: list[Any] = []
 
-    # Add background layers to the project first.
+    if basemap_layer is not None:
+        project.addMapLayer(basemap_layer)
+
     if orthomosaic_layers:
         for ortho_layer in orthomosaic_layers:
             project.addMapLayer(ortho_layer)
-    else:
-        if basemap_layer is not None:
-            project.addMapLayer(basemap_layer)
 
     # Add boundary layer after background layers.
     project.addMapLayer(merged_layer)
 
     # QgsLayoutItemMap layer order is top-first.
-    # Boundary should be first so it appears above raster/basemap.
+    # Boundary on top, then orthomosaics, then basemap at the very bottom.
     main_map_layers.append(merged_layer)
 
     if orthomosaic_layers:
         main_map_layers.extend(orthomosaic_layers)
-    else:
-        if basemap_layer is not None:
-            main_map_layers.append(basemap_layer)
+
+    if basemap_layer is not None:
+        main_map_layers.append(basemap_layer)
 
     osm_attribution = basemap_attribution
 
@@ -1003,3 +1011,4 @@ def _read_int_env(name: str, default: int) -> int:
             flush=True,
         )
         return default
+    

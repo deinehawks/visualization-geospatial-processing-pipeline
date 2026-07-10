@@ -1,0 +1,50 @@
+Enter PSQL = docker exec -it db psql -U postgres -d webodm_dev
+
+oldest to newest projects:
+
+SELECT
+    p.id,
+    p.name,
+    MIN(t.created_at) AS first_task_date,
+    COUNT(t.id) AS tasks
+FROM app_project p
+LEFT JOIN app_task t ON t.project_id = p.id
+GROUP BY p.id, p.name
+ORDER BY first_task_date ASC;
+
+
+Step 1: Delete task
+
+DELETE FROM app_task
+WHERE project_id = 242;
+
+Verify: 
+SELECT COUNT(*)
+FROM app_task
+WHERE project_id = 242;
+
+Step 2: Delete the project record
+
+DELETE FROM app_project
+WHERE id = 242;
+
+DETAIL: Key (id)=(242) is still referenced from table "app_projectuserobjectpermission".
+
+solution: 
+DELETE FROM app_projectuserobjectpermission
+WHERE content_object_id = 242;
+
+Verify:
+SELECT *
+FROM app_project
+WHERE id = 242;
+
+Step 3: Delete the project folder
+
+Open PowerShell and run:
+docker run --rm -v webodm_appmedia:/data alpine rm -rf /data/project/242
+
+Step 4: Check freed space
+docker exec broker df -h 
+or 
+  docker run --rm -v webodm_appmedia:/data alpine du -sh /data/project

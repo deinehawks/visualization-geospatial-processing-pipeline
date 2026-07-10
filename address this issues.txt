@@ -1,0 +1,3 @@
+- refactor the database schema for better statistics
+- 3d generator does not work (pcd and ply)
+- Clean up cache tiles and ortho in local disk C:

@@ -45,6 +45,7 @@ class WebODMProcessor:
             raise RuntimeError("WebODM auth succeeded but no token returned.")
 
         self.headers = {"Authorization": f"JWT {self.token}"}
+        self.session.headers.update(self.headers)
         self.logger.info("Authentication successful")
 
     # Projects / Tasks
@@ -1037,11 +1038,11 @@ class WebODMProcessor:
 
     def delete_task(self, project_id: int, task_id: str) -> None:
         """
-        Delete a task from WebODM. Raises on failure.
+        Delete (remove) a task from WebODM. Raises on failure.
         """
-        resp = self.session.delete(
-            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/",
+        resp = self.session.post(
+            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/remove/",
             timeout=30,
         )
         resp.raise_for_status()
-        self.logger.info(f"Deleted task {task_id} from project {project_id}")
+        self.logger.info(f"Removed task {task_id} from project {project_id}")

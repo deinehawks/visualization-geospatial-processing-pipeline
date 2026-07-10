@@ -1799,6 +1799,41 @@ class RGBPipeline(
                 logger=logger,
             )
 
+            # If no reusable cache was found, actively stage to local disk before
+            # uploading — streaming a multi-GB multipart upload directly off Z:\
+            # is prone to SMB hiccups killing the request mid-transfer.
+            if upload_image_folder == image_folder:
+                upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
+                if not upload_cache_root_cfg:
+                    upload_cache_root_cfg = os.getenv("UPLOAD_CACHE_ROOT")
+                local_root = Path(upload_cache_root_cfg) if upload_cache_root_cfg else Path(
+                    os.getenv("TEMP", r"C:\temp")
+                )
+                cache_root = local_root / "automation-pipeline" / "upload_cache" / f"{self.run_id}_{task_key}"
+
+                try:
+                    cached_dir, _ = self._stage_upload_cache(
+                        src_dir=image_folder,
+                        cache_root=cache_root,
+                        logger=logger,
+                        progress_every=25,
+                        require_free_multiplier=1.2,
+                    )
+                    upload_image_folder = cached_dir
+                    self._remember_webodm_upload_folder(
+                        upload_folder=upload_image_folder,
+                        cached_dir=cached_dir,
+                        source_folder=image_folder,
+                        fallback_direct=False,
+                    )
+                    logger.info(f"Staged {task_key} upload to local disk: {upload_image_folder}")
+                except Exception as e:
+                    logger.warning(
+                        f"Local staging failed for {task_key} upload, falling back to "
+                        f"direct upload from source. reason={e}"
+                    )
+                    upload_image_folder = image_folder
+
             current_task_id = processor.create_task_with_images(
                 project_id=int(project_id),
                 name=task_name,
