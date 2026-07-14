@@ -12,7 +12,7 @@ import requests
 import subprocess
 import shutil
 import tempfile
-
+import struct
 
 class WebODMProcessor:
     def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
@@ -811,56 +811,137 @@ class WebODMProcessor:
             )
             shutil.copy2(src, dst)
 
-    def run_pdal_translate(self, src: Path, dst: Path, *, pdal_path: str = "pdal") -> bool:
-        dst.parent.mkdir(parents=True, exist_ok=True)
+    def convert_laz_to_pcd(
+        self,
+        src: Path,
+        dst: Path,
+        *,
+        max_points: int = 3_000_000,
+        viewpoint: str = "0 0 0 1 0 0 0",
+    ) -> bool:
+        """
+        Convert a LAZ/LAS point cloud to ODM-compatible binary_compressed PCD
+        readable by Three.js PCDLoader.
 
-        pipeline = [
-            {
-                "type": "readers.las",
-                "filename": str(src),
-            },
-            {
-                "type": "writers.pcd",
-                "filename": str(dst),
-                "compression": "binary",
-                "order": "X,Y,Z,Red,Green,Blue",
-                "keep_unspecified": False,
-            },
-        ]
+        Uses open3d + lzf — does NOT use PDAL writers.pcd which produces
+        plain 'binary' format that Three.js cannot read.
 
-        self.logger.info(f"PDAL -> {dst.name} | binary PCD | XYZRGB")
-
-        pipeline_path = None
+        Field layout: intensity rgb x y z (column-major, LZF compressed)
+        RGB encoding: packed uint32 bits as float32 (0x00RRGGBB → float)
+        """
         try:
-            with tempfile.NamedTemporaryFile(
-                mode="w",
-                suffix=".json",
-                delete=False,
-                encoding="utf-8",
-            ) as f:
-                json.dump(pipeline, f, indent=2)
-                pipeline_path = f.name
-
-            cmd = [str(pdal_path), "pipeline", pipeline_path]
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
-            return True
-
-        except FileNotFoundError:
-            self.logger.warning("pdal not found. Skipping conversion.")
-            return False
-
-        except subprocess.CalledProcessError as e:
+            import lzf
+            import numpy as np
+            import open3d as o3d
+        except ImportError as exc:
             self.logger.warning(
-                f"pdal pipeline failed for {dst.name}. stderr={e.stderr[:500] if e.stderr else ''}"
+                f"Cannot convert LAZ → PCD: missing dependency ({exc}). "
+                "Install with: pip install open3d python-lzf numpy"
             )
             return False
 
-        finally:
-            if pipeline_path:
-                try:
-                    Path(pipeline_path).unlink(missing_ok=True)
-                except Exception:
-                    pass
+        dst.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            self.logger.info(f"Reading point cloud: {src.name}")
+            pcd = o3d.io.read_point_cloud(str(src))
+            pcd = pcd.remove_non_finite_points()
+            n_original = len(pcd.points)
+
+            if n_original == 0:
+                self.logger.warning(f"Point cloud is empty after loading: {src}")
+                return False
+
+            self.logger.info(f"Loaded {n_original:,} points")
+
+            # Downsample to browser-safe size
+            if n_original > max_points:
+                self.logger.info(
+                    f"Downsampling {n_original:,} → {max_points:,} points "
+                    f"(random, preserves natural distribution)"
+                )
+                indices = np.random.choice(n_original, size=max_points, replace=False)
+                pcd = pcd.select_by_index(indices.tolist())
+
+            n = len(pcd.points)
+            points = np.asarray(pcd.points, dtype=np.float32)
+            x, y, z = points[:, 0], points[:, 1], points[:, 2]
+
+            # Pack RGB as float32 (Three.js PCDLoader requirement)
+            # Bit layout: 0x00RRGGBB reinterpreted as IEEE-754 float
+            if pcd.has_colors():
+                colors = np.asarray(pcd.colors)
+                r = (np.clip(colors[:, 0], 0, 1) * 255).astype(np.uint32)
+                g = (np.clip(colors[:, 1], 0, 1) * 255).astype(np.uint32)
+                b = (np.clip(colors[:, 2], 0, 1) * 255).astype(np.uint32)
+                rgb_float = ((r << 16) | (g << 8) | b).view(np.float32)
+                intensity = (
+                    0.2126 * colors[:, 0] +
+                    0.7152 * colors[:, 1] +
+                    0.0722 * colors[:, 2]
+                ).astype(np.float32)
+            else:
+                self.logger.warning("Point cloud has no colors — rgb and intensity will be zero.")
+                rgb_float = np.zeros(n, dtype=np.float32)
+                intensity  = np.zeros(n, dtype=np.float32)
+
+            # Column-major layout (PCL binary_compressed requirement)
+            # Fields: [all intensity][all rgb][all x][all y][all z]
+            col_major = np.concatenate([intensity, rgb_float, x, y, z]).tobytes()
+            uncompressed_size = len(col_major)
+
+            self.logger.info(
+                f"Compressing {uncompressed_size / 1024**2:.1f} MB uncompressed data (LZF)…"
+            )
+            compressed = lzf.compress(col_major)
+            compressed_size = len(compressed)
+            self.logger.info(
+                f"Compressed: {compressed_size / 1024**2:.1f} MB "
+                f"({compressed_size / uncompressed_size * 100:.1f}% of original)"
+            )
+
+            header = (
+                "# .PCD v0.7 - Point Cloud Data file format\n"
+                "VERSION 0.7\n"
+                "FIELDS intensity rgb x y z\n"
+                "SIZE 4 4 4 4 4\n"
+                "TYPE F F F F F\n"
+                "COUNT 1 1 1 1 1\n"
+                f"WIDTH {n}\n"
+                "HEIGHT 1\n"
+                f"VIEWPOINT {viewpoint}\n"
+                f"POINTS {n}\n"
+                "DATA binary_compressed\n"
+            )
+
+            with open(dst, "wb") as fh:
+                fh.write(header.encode("ascii"))
+                fh.write(struct.pack("<I", compressed_size))
+                fh.write(struct.pack("<I", uncompressed_size))
+                fh.write(compressed)
+
+            size_mb = dst.stat().st_size / 1024**2
+            self.logger.info(
+                f"PCD written: {dst.name} | {n:,} points | {size_mb:.1f} MB"
+            )
+
+            # Quick round-trip verification
+            check = o3d.io.read_point_cloud(str(dst))
+            if len(check.points) != n:
+                self.logger.warning(
+                    f"PCD verification mismatch: wrote {n} points, "
+                    f"read back {len(check.points)}"
+                )
+                return False
+
+            self.logger.info(f"PCD verified: {len(check.points):,} points round-trip OK")
+            return True
+
+        except Exception as exc:
+            self.logger.exception(f"LAZ → PCD conversion failed: {exc}")
+            if dst.exists():
+                dst.unlink(missing_ok=True)
+            return False
 
     def export_orthomosaic(
         self,
@@ -907,14 +988,15 @@ class WebODMProcessor:
         *,
         out_dir: Path,
         laz_archive_name: str,
-        ply_name: str = "model.ply",
         pcd_name: str = "odm.pcd",
         candidates: Iterable[str] = ("georeferenced_model.laz",),
         pdal_path: str = "pdal",
+        max_points: int = 3_000_000,
+        viewpoint: str = "0 0 0 1 0 0 0",
     ) -> dict:
         out_dir.mkdir(parents=True, exist_ok=True)
-
         laz_path = out_dir / laz_archive_name
+
         downloaded = False
         used_asset = None
         for asset in candidates:
@@ -924,23 +1006,21 @@ class WebODMProcessor:
                 break
 
         if not downloaded:
-            self.logger.warning(
-                f"LAZ download failed. candidates={list(candidates)}")
-            return {"laz": None, "ply": None, "pcd": None, "asset_type": None}
+            self.logger.warning(f"LAZ download failed. candidates={list(candidates)}")
+            return {"laz": None, "pcd": None, "asset_type": None}
 
         self.logger.info(f"Pointcloud downloaded using asset = {used_asset}")
 
-        ply_path = out_dir / ply_name
         pcd_path = out_dir / pcd_name
-
-        ok_ply = self.run_pdal_translate(
-            laz_path, ply_path, pdal_path=pdal_path)
-        ok_pcd = self.run_pdal_translate(
-            laz_path, pcd_path, pdal_path=pdal_path)
+        ok_pcd = self.convert_laz_to_pcd(
+            laz_path,
+            pcd_path,
+            max_points=max_points,
+            viewpoint=viewpoint,
+        )
 
         return {
             "laz": str(laz_path),
-            "ply": str(ply_path) if ok_ply else None,
             "pcd": str(pcd_path) if ok_pcd else None,
             "asset_type": used_asset,
         }

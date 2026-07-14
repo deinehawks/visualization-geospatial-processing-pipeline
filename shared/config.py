@@ -149,6 +149,8 @@ def load_pipeline_config() -> dict:
                 "enabled": read_bool_env("EXPORT_POINTCLOUD", True),
                 "out_dir_key": read_str_env("POINTCLOUD_OUT_DIR_KEY", "3d"),
                 "filename_template": read_str_env("POINTCLOUD_FILENAME_TEMPLATE", "{survey_id}-RGB-{flag}.ply"),
+                "max_points": read_int_env("POINTCLOUD_MAX_POINTS", 3_000_000, minimum=100_000),
+                "viewpoint":  read_str_env("POINTCLOUD_VIEWPOINT", "0 0 0 1 0 0 0"),
                 "asset_candidates": read_csv_env(
                     "POINTCLOUD_ASSET_CANDIDATES",
                     [
