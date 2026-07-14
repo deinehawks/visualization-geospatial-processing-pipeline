@@ -24,10 +24,10 @@ gdal.PushErrorHandler(_quiet_gdal_error_handler)
 # regardless of where the current survey sits within it. Adjust if the
 # framing needs to be tighter/looser.
 DAVAO_CITY_BOUNDS_WGS84 = {
-    "min_lon": 125.35,
-    "min_lat": 6.95,
-    "max_lon": 125.85,
-    "max_lat": 7.35,
+    "min_lon": 125.3063,
+    "min_lat": 6.8710,
+    "max_lon": 125.9308,
+    "max_lat": 7.3282,
 }
 
 

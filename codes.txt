@@ -5,7 +5,7 @@ python main.py --survey "BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30" --year 2026
 
 Running: 
 
-python main.py --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps_p30" --year 2026 --resume --run-id e8f153ea-e1a4-4273-9ad3-bfe6dd02e400
+python main.py --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps_p30" --year 2026 --resume --run-id e8f153ea-e1a4-4273-9ad3-bfe6dd02e400 --force-stage quality_gate
 
 Run Later:
 

@@ -374,27 +374,62 @@ def quality_gate_prompt(
     task1: dict,
     task2: dict,
     webodm_url: str = "",
+    task4: dict | None = None,
+    fallback_review: bool = False,
 ) -> str:
+    """
+    Display the quality gate prompt and return the operator's input.
 
+    When fallback_review=True, the prompt shows a banner indicating that
+    the fallback task (task4) has completed and needs review before the
+    pipeline proceeds to QGIS. The operator must explicitly approve or
+    reject the fallback output — the pipeline never auto-approves it.
+    """
     t1_label = f"{task1.get('name', '—')}  (id={task1.get('id', '—')})"
     t2_label = (
         f"{task2.get('name', '—')}  (id={task2.get('id', '—')})"
         if task2
         else "—"
     )
+    t4_label = (
+        f"{task4.get('name', '—')}  (id={task4.get('id', '—')})"
+        if task4
+        else None
+    )
     dashboard = f"{webodm_url}/dashboard/{project_id}" if webodm_url else "—"
 
     panel = [
         f"{MAGENTA}{BOLD}{_qg_line('═')}{RESET}",
-        f"{MAGENTA}{BOLD}  QUALITY GATE{RESET}",
+    ]
+
+    if fallback_review:
+        panel += [
+            f"{YELLOW}{BOLD}  FALLBACK QUALITY GATE  —  Review task4 output before proceeding{RESET}",
+            f"{YELLOW}  Check the WebODM dashboard for distortions before typing 'yes'.{RESET}",
+        ]
+    else:
+        panel.append(f"{MAGENTA}{BOLD}  QUALITY GATE{RESET}")
+
+    panel += [
         f"{MAGENTA}{_qg_line()}{RESET}",
         f"  Survey     : {CYAN}{survey_id}{RESET}",
         f"  Project ID : {CYAN}{project_id}{RESET}",
         f"  Task 1     : {WHITE}{t1_label}{RESET}",
         f"  Task 2     : {WHITE}{t2_label}{RESET}",
+    ]
+
+    if t4_label:
+        panel.append(
+            f"  Task 4     : {YELLOW}{t4_label}{RESET}"
+            + (f"  {BOLD}← review this{RESET}" if fallback_review else "")
+        )
+
+    panel += [
         f"  Dashboard  : {GREY}{dashboard}{RESET}",
         f"{MAGENTA}{_qg_line()}{RESET}",
         f"  {BOLD}Commands{RESET}",
+        f"  {YELLOW}yes / y{RESET}                → Approve and proceed to QGIS",
+        f"  {YELLOW}fail / f{RESET}               → Fail the pipeline",
         f"  {YELLOW}restart{RESET}                → Restart QA task (dataset)",
         f"  {YELLOW}restart t1|t2{RESET}          → Restart specific task",
         f"  {YELLOW}restart t1|t2 <stage>{RESET}  → Restart from a stage",

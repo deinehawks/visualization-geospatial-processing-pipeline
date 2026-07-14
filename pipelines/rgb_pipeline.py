@@ -1263,10 +1263,10 @@ class RGBPipeline(
                         current_task2_id,
                         out_dir=pc_dir,
                         laz_archive_name=f"{task2_export_id}.laz",
-                        ply_name=f"{task2_export_id}.ply",
                         pcd_name=f"{task2_export_id}.pcd",
                         candidates=laz_candidates,
-                        pdal_path=pdal_path,
+                        max_points=int(pc_cfg.get("max_points", 3_000_000)),
+                        viewpoint=str(pc_cfg.get("viewpoint", "0 0 0 1 0 0 0")),
                     )
 
                     result["downloads"]["task2"]["pointcloud_laz"] = pc_out.get("laz")
@@ -2085,10 +2085,15 @@ class RGBPipeline(
             return {"passed": None, "restarts": restarts, "task": updated_task_state}
 
         # ── Interactive loop ─────────────────────────────────────────
+        _fallback_reviewed = False
+        _fallback_task_state: dict = {}
+        fallback_task: str = self._webodm_fallback_task_key()
+
         while True:
             web = self.state.get("webodm") or {}
             task1 = web.get("task1") or {}
             task2 = web.get("task2") or {}
+            task4 = web.get("task4") or {}
 
             default_task_id, default_task_name = _pick_default_task()
 
@@ -2099,24 +2104,44 @@ class RGBPipeline(
                 task1=task1,
                 task2=task2 if task2.get("id") else {},
                 webodm_url=self.config.get("webodm", {}).get("url", ""),
+                task4=task4 if task4.get("id") else None,
+                fallback_review=_fallback_reviewed,
             )
 
             if raw in ("yes", "y"):
-                logger.info("Quality gate PASSED by user.")
+                if _fallback_reviewed:
+                    logger.info(
+                        f"Quality gate PASSED by user — "
+                        f"fallback ({fallback_task}) approved after review."
+                    )
+                else:
+                    logger.info("Quality gate PASSED by user.")
 
                 try:
-                    task2_flag = self._webodm_task_flag(
-                        "task2",
-                        default_boundary_mode="b",
-                    )
-                    selected = self._select_existing_task_orthomosaic(
-                        task_key="task2",
-                        flag=task2_flag,
-                        boundary_used=True,
-                        fallback_used=False,
-                    )
+                    if _fallback_reviewed:
+                        fallback_flag = self._webodm_task_flag(
+                            fallback_task,
+                            default_boundary_mode="b",
+                        )
+                        selected = self._select_existing_task_orthomosaic(
+                            task_key=fallback_task,
+                            flag=fallback_flag,
+                            boundary_used=True,
+                            fallback_used=True,
+                        )
+                    else:
+                        task2_flag = self._webodm_task_flag(
+                            "task2",
+                            default_boundary_mode="b",
+                        )
+                        selected = self._select_existing_task_orthomosaic(
+                            task_key="task2",
+                            flag=task2_flag,
+                            boundary_used=True,
+                            fallback_used=False,
+                        )
                 except Exception as e:
-                    logger.warning(f"Could not select Task 2 orthomosaic after quality pass: {e}")
+                    logger.warning(f"Could not select orthomosaic after quality pass: {e}")
                     selected = None
 
                 self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
@@ -2125,6 +2150,8 @@ class RGBPipeline(
                     "passed": True,
                     "restarts": restarts,
                     "project_id": project_id,
+                    "fallback_task": fallback_task if _fallback_reviewed else None,
+                    fallback_task: _fallback_task_state if _fallback_reviewed else None,
                     "selected_webodm_task": self.state.get("selected_webodm_task"),
                     "selected_orthomosaic": selected,
                 }
@@ -2177,32 +2204,27 @@ class RGBPipeline(
 
                 fallback_state = fallback_result.get(fallback_task) or {}
 
-                if fallback_state.get("success"):
-                    logger.info(f"{fallback_task} fallback completed successfully.")
-
+                if not fallback_state.get("success"):
+                    logger.warning(f"{fallback_task} fallback ran but did not succeed.")
                     self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-
                     return {
-                        "passed": True,
+                        "passed": False,
                         "restarts": restarts,
                         "project_id": project_id,
                         "fallback_task": fallback_task,
                         fallback_task: fallback_state,
-                        "selected_webodm_task": self.state.get("selected_webodm_task"),
-                        "selected_orthomosaic": self.state.get("selected_orthomosaic"),
                     }
 
-                logger.warning(f"{fallback_task} fallback ran but did not succeed.")
-
-                self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-
-                return {
-                    "passed": False,
-                    "restarts": restarts,
-                    "project_id": project_id,
-                    "fallback_task": fallback_task,
-                    fallback_task: fallback_state,
-                }
+                # Fallback completed — but don't auto-approve. Loop back into
+                # the quality gate prompt so the operator can review the
+                # fallback output in WebODM for distortions before proceeding.
+                logger.info(
+                    f"{fallback_task} fallback completed. "
+                    f"Returning to quality gate for review — "
+                    f"check the WebODM dashboard before approving."
+                )
+                _fallback_reviewed = True
+                _fallback_task_state = fallback_state
 
             if raw == "restart":
                 res = restart_and_wait(
