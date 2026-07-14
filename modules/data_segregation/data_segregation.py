@@ -68,6 +68,7 @@ def generate_next_survey_id(surveys_root: Path, year: int, logger: logging.Logge
 def resolve_source_dataset_dir(
     source_dir: Path,
     logger: logging.Logger,
+    date_hint: Optional[str] = None,
 ) -> Path:
     """
     Resolve the actual dataset folder.
@@ -132,16 +133,48 @@ def resolve_source_dataset_dir(
 
     candidates.sort(key=_dataset_candidate_sort_key, reverse=True)
 
-    selected = candidates[0]
-
     if len(candidates) > 1:
-        log_warn(
-            logger,
-            "Multiple matching dataset folders found. Using the latest/first match:\n"
-            + "\n".join(f"  - {path}" for path in candidates[:10]),
-        )
+        # If --date was provided, try to auto-select without prompting
+        if date_hint:
+            matched = [c for c in candidates if date_hint in str(c)]
+            if len(matched) == 1:
+                selected = matched[0]
+                log_ok(logger, f"Source dataset resolved via --date hint: {selected}")
+                return selected
+            elif len(matched) == 0:
+                raise FileNotFoundError(
+                    f"--date {date_hint!r} provided but no matching folder found.\n"
+                    + "\n".join(f"  - {c}" for c in candidates)
+                )
+            # Multiple matches even with date hint — fall through to prompt
 
-    log_ok(logger, f"Source dataset resolved: {selected}")
+        # Multiple date folders contain the same survey name.
+        # Print to console and force the user to pick — never silently
+        # pick one, since choosing the wrong date produces bad survey data.
+        print("\n[!] Multiple matching dataset folders found:")
+        for i, path in enumerate(candidates[:10], 1):
+            print(f"    {i}) {path}")
+        print()
+
+        while True:
+            try:
+                raw = input(
+                    f"    Select folder [1–{len(candidates[:10])}] "
+                    f"or press Ctrl+C to cancel: "
+                ).strip()
+            except (KeyboardInterrupt, EOFError):
+                raise RuntimeError(
+                    "Dataset folder selection cancelled by user."
+                )
+            if raw.isdigit() and 1 <= int(raw) <= len(candidates[:10]):
+                selected = candidates[int(raw) - 1]
+                break
+            print(f"    Invalid input. Enter a number between 1 and {len(candidates[:10])}.")
+
+        log_ok(logger, f"Source dataset selected by user: {selected}")
+    else:
+        selected = candidates[0]
+        log_ok(logger, f"Source dataset resolved: {selected}")
 
     return selected
 
@@ -360,14 +393,28 @@ def run(
     total = len(images)
     t0 = time.perf_counter()
 
-    for i, img in enumerate(images, 1):
-        shutil.copy2(img, raw_dir / img.name)
-        if i % 25 == 0 or i == total:
-            log_progress(
-                logger, "Copying images",
-                current=i, total=total,
-                elapsed=time.perf_counter() - t0,
-            )
+    for idx, img in enumerate(images, 1):
+            dst = raw_dir / img.name
+            # Per-file retry handles transient SMB/network glitches
+            # (WinError 2, WinError 64) without restarting the whole stage.
+            for attempt in range(1, 4):
+                try:
+                    shutil.copy2(img, dst)
+                    break
+                except OSError as e:
+                    if attempt == 3:
+                        raise RuntimeError(
+                            f"Failed to copy image after 3 attempts: {img}\n"
+                            f"Destination: {dst}\n"
+                            f"Error: {e}\n\n"
+                            "Check that the source network drive (Y:\\) is still "
+                            "connected and the file is accessible."
+                        ) from e
+                    logger.warning(
+                        f"Copy failed for {img.name} (attempt {attempt}/3): {e} "
+                        f"— retrying in 3s"
+                    )
+                    time.sleep(3)
 
     log_progress_done(logger, "Copying images", total=total,
                       elapsed=time.perf_counter() - t0)
