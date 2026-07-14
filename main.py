@@ -18,6 +18,15 @@ def main() -> None:
     parser.add_argument("--survey-id", default=None, help="Optional fixed survey ID, e.g. AH-026002")
     parser.add_argument("--node-id", type=int, default=None)
     parser.add_argument("--force-stage", action="append", default=[], help="Force a completed stage to rerun during resume. Can be used multiple times.",)
+    parser.add_argument(
+        "--date",
+        default=None,
+        metavar="YYYYMMDD",
+        help=(
+            "Date folder to use when multiple matches exist for --survey "
+            "(e.g. 20260414). Skips the interactive prompt."
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -45,6 +54,7 @@ def main() -> None:
     source_dir = resolve_source_dataset_dir(
         source_input,
         resolver_logger,
+        date_hint=args.date,
     )
 
     print("\n===== PRODUCTION RGB PIPELINE =====")

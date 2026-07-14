@@ -45,7 +45,8 @@ echo Running map export...
   --title "BARBCO Orthomosaic Map" ^
   --location "Tugbok District, Davao City" ^
   --map-scale 15000 ^
-  --layout-template "assets/qgis_layouts/client_boundary_map.qpt" ^
+  --layout-template "assets/qgis_layouts/client_boundary_map-v4.qpt" ^
+  --include-orthomosaic ^
   --export-print ^
   --logo "assets/logo.png"
 

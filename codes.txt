@@ -1,19 +1,18 @@
 
 
 Queue:
-
-
+python main.py --survey "BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30" --year 2026 
 
 Running: 
 
-
+python main.py --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps_p30" --year 2026 --resume --run-id e8f153ea-e1a4-4273-9ad3-bfe6dd02e400
 
 Run Later:
-python main.py --survey "BCO-103_24.6Ha_A2S_80m_85f75s_5mps" --year 2026 --resume --run-id 4abb0625-fc7f-48d2-8c4f-e5a1a66e1c09
-python main.py --survey "MCS_301_23.7Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id 9eab110c-38fb-4b6f-a2f9-9feae7c3664d --force-stage quality_gate
+
 
 Done:
 python main.py --survey "BCO-107_5Ha_M3C_60m_85f75s_5mps" --year 2026 --resume --run-id 6827b4ea-1649-4bc2-8a6e-c6b45ff19ae5
+python main.py --survey "MCS_301_23.7Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id 9eab110c-38fb-4b6f-a2f9-9feae7c3664d --force-stage quality_gate
 
 command for generating maps
 
@@ -22,6 +21,17 @@ python map.py --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100
 
 
 
+
+
+
+Apr 13, 2026 - BCO-102_32Ha_M3C_100m_85f75s_8mps_p30
+Apr 13, 2026 - BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30
+
+Apr 14, 2026 - BCO-102_32Ha_M3C_100m_85f75s_8mps_p30
+Apr 14, 2026 - BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30 
+
+Apr 15, 2026 - BCO-200_26.5Ha_M3C_100m_85f75s_8mps_p30
+Apr 16, 2026 - BCO-200_26.5Ha_M3C_100m_85f75s_8mps_p45
 
 
 

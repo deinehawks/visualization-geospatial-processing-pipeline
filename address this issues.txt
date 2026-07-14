@@ -1,3 +1,7 @@
 - refactor the database schema for better statistics
 - 3d generator does not work (pcd and ply)
-- Clean up cache tiles and ortho in local disk C:
+- Clean up cache tiles and ortho in local disk C:    - DONE 
+- webodm transform crs investigate size increase of tiff files
+- robust pause and abort system
+  problem: 
+   When processing data in separate terminals, the Pause and Abort functions affect all terminals simultaneously

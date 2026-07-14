@@ -1,0 +1,2 @@
+python pause_run.py <run_id>
+python pause_run.py <run_id> abort
