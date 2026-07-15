@@ -430,6 +430,23 @@ def _build_print_layout(ctx: ExportContext) -> None:
 
     layout.loadFromTemplate(doc, q.QgsReadWriteContext())
 
+    title_item = layout.itemById("map_title")
+
+    print("Before:", title_item.text())
+
+    from qgis.core import QgsLayoutItemLabel
+
+    print("\n===== ALL ITEMS =====")
+
+    for item in layout.items():
+        if hasattr(item, "id"):
+            print(
+                f"{type(item).__name__:<30}"
+                f" ID={item.id()!r}"
+                f" UUID={item.uuid()}"
+            )
+
+    print("=======================")
     ctx.layout = layout
 
 
@@ -511,6 +528,19 @@ def _export_print_outputs(ctx: ExportContext) -> dict[str, str]:
 
     for path in (pdf_path, png_path, pdf_temp_path, png_temp_path):
         path.unlink(missing_ok=True)
+
+    # -----------------------------
+    # DEBUG
+    # -----------------------------
+    title_item = ctx.layout.itemById("map_title")
+
+    print("\n===== EXPORT TITLE =====")
+    print("Title:", title_item.text())
+    print("========================\n")
+
+    # -----------------------------
+    # Exporter
+    # -----------------------------
 
     exporter = q.QgsLayoutExporter(ctx.layout)
 
@@ -1041,19 +1071,17 @@ def _get_layout_item(layout: Any, item_id: str, item_type: Any | None = None) ->
     return item
 
 
-def _set_label_text(
-    layout: Any,
-    item_id: str,
-    text: str,
-) -> None:
-
+def _set_label_text(layout, item_id, text):
     item = layout.itemById(item_id)
 
     if item is None:
+        print(f"{item_id} NOT FOUND")
         return
 
+    print("Old:", item.text())
     item.setText(text)
-
+    item.refresh()
+    print("New:", item.text())
 
 def _create_osm_basemap_layer(QgsRasterLayer: Any) -> Any | None:
     url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
@@ -1370,3 +1398,5 @@ def _configure_inset_map(
             label_item_id,
             label_text,
         )
+
+    layout.refresh()

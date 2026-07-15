@@ -550,7 +550,7 @@
    </customproperties>
   </LayoutObject>
  </LayoutItem>
- <LayoutItem marginX="0" labelText="BARBCO  Boundary Map&#xa;" positionLock="false" opacity="1" referencePoint="0" itemRotation="0" uuid="{2091ce07-79cd-443b-8df4-132a60188c2e}" outlineWidthM="0.3,mm" frame="false" background="false" excludeFromExports="0" blendMode="0" halign="4" positionOnPage="49.6137,4.37903,mm" htmlState="0" templateUuid="{2091ce07-79cd-443b-8df4-132a60188c2e}" groupUuid="" frameJoinStyle="miter" marginY="0" id="map_title" zValue="9" type="65641" size="197.773,12.778,mm" visibility="1" position="49.6137,4.37903,mm" valign="32">
+ <LayoutItem marginX="0" labelText="Whole World Agri-Tourism Farm and Resort&#xa;" positionLock="false" opacity="1" referencePoint="0" itemRotation="0" uuid="{2091ce07-79cd-443b-8df4-132a60188c2e}" outlineWidthM="0.3,mm" frame="false" background="false" excludeFromExports="0" blendMode="0" halign="4" positionOnPage="49.6137,4.37903,mm" htmlState="0" templateUuid="{2091ce07-79cd-443b-8df4-132a60188c2e}" groupUuid="" frameJoinStyle="miter" marginY="0" id="map_title" zValue="9" type="65641" size="197.773,12.778,mm" visibility="1" position="49.6137,4.37903,mm" valign="32">
   <FrameColor blue="0" alpha="255" green="0" red="0"/>
   <BackgroundColor blue="255" alpha="255" green="255" red="255"/>
   <LayoutObject>

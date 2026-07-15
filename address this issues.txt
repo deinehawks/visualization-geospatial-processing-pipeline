@@ -1,7 +1,16 @@
+- Alternative Workflow (to be implemented)
+  before October 2026
+
+  If ortho, T4 nadir
+  If 3d, T2-B oblique (p30 or p45)
+
 - refactor the database schema for better statistics
-- 3d generator does not work (pcd and ply)
+- 3d generator does not work (pcd and ply) - DONE
 - Clean up cache tiles and ortho in local disk C:    - DONE 
 - webodm transform crs investigate size increase of tiff files
 - robust pause and abort system
   problem: 
    When processing data in separate terminals, the Pause and Abort functions affect all terminals simultaneously
+
+
+tile generation should be 11-25
