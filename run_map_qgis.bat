@@ -1,10 +1,38 @@
 @echo off
 setlocal
 
+REM ============================================================
 REM Run from the folder where this .bat file is located
+REM ============================================================
 cd /d "%~dp0"
 
+REM ============================================================
+REM Project Settings
+REM ============================================================
+
+set SURVEY=Y:\Visualization\field-data\2026\sorted\20260421\Dagaang\DNG-001_36.4Ha_M3C_100m_85f75s_8mps
+
+set MAP_NAME=dagaang-overall-map
+
+set TITLE=Whole World Agri-Tourism Farm and Resort
+
+set LOCATION=Del Pilar, New Corella
+
+set REGION=Davao del Norte
+
+set MAP_SCALE=15000
+
+set LAYOUT=assets/qgis_layouts/client_boundary_map-v6.qpt
+
+set LOGO=assets/logo.png
+
+REM Optional
+set DISCLAIMER=Disclaimer: This map is intended for visualization and reference purposes only.
+
+REM ============================================================
 REM QGIS install paths
+REM ============================================================
+
 set QGIS_ROOT=C:\PROGRA~1\QGIS34~1.7
 set QGIS_APP=%QGIS_ROOT%\apps\qgis-ltr
 set QGIS_PYTHON=%QGIS_ROOT%\bin\python.exe
@@ -37,17 +65,20 @@ if errorlevel 1 (
 
 echo.
 echo Running map export...
+
 "%QGIS_PYTHON%" map.py ^
   --source-root "Z:\field-data-2026\sorted" ^
   --survey-root "Z:\surveys" ^
-  --survey "Y:\Visualization\field-data\2026\sorted\20260421\Dagaang\DNG-001_36.4Ha_M3C_100m_85f75s_8mps" ^
-  --name "dagaang-overall-map" ^
-  --title "Whole World Agri-Tourism Farm and Resort" ^
-  --location "Del Pilar, New Corella" ^
-  --map-scale 15000 ^
-  --layout-template "assets/qgis_layouts/client_boundary_map-v6.qpt" ^
+  --survey "%SURVEY%" ^
+  --name "%MAP_NAME%" ^
+  --title "%TITLE%" ^
+  --location "%LOCATION%" ^
+  --region "%REGION%" ^
+  --disclaimer "%DISCLAIMER%" ^
+  --map-scale %MAP_SCALE% ^
+  --layout-template "%LAYOUT%" ^
   --include-orthomosaic ^
   --export-print ^
-  --logo "assets/logo.png"
+  --logo "%LOGO%"
 
 pause

@@ -447,3 +447,43 @@ def quality_gate_prompt(
     sys.stdout.write(f"\n{BOLD}  Your decision:{RESET} ")
     sys.stdout.flush()
     return input().strip().lower()
+
+
+def _apply_layout_variables(ctx: ExportContext) -> None:
+    """
+    Populate all QGIS Layout Labels using Layout Item IDs.
+
+    Example:
+        map_title -> "BARBCO Boundary Map"
+        map_location -> "Davao City"
+    """
+
+    from qgis.core import QgsLayoutItemLabel
+
+    if not ctx.layout_variables:
+        return
+
+    print("\n===== APPLYING LAYOUT VARIABLES =====")
+
+    for item_id, value in ctx.layout_variables.items():
+
+        item = ctx.layout.itemById(item_id)
+
+        if item is None:
+            print(f"[WARN] '{item_id}' not found in template.")
+            continue
+
+        if not isinstance(item, QgsLayoutItemLabel):
+            print(f"[WARN] '{item_id}' is not a label.")
+            continue
+
+        old = item.text()
+
+        item.setText(str(value))
+        item.refresh()
+
+        print(f"{item_id}")
+        print(f"    OLD: {old}")
+        print(f"    NEW: {value}")
+
+    print("====================================\n")

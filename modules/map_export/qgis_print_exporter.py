@@ -90,6 +90,7 @@ class ExportContext:
     basemap_layer: Any
     basemap_attribution: str
     main_map_layers: list[Any]
+    layout_variables: dict[str, str]
 
     # Set by _build_print_layout
     layout: Any
@@ -102,12 +103,14 @@ class ExportContext:
         logo_path: Path | None,
         dpi: int,
         qgis: SimpleNamespace,
+        layout_variables: dict[str, str] | None = None,
     ) -> None:
         self.package_dir = package_dir
         self.title = title
         self.logo_path = logo_path
         self.dpi = dpi
         self.qgis = qgis
+        self.layout_variables = layout_variables or {}
 
 
 # QGIS import bootstrap
@@ -255,6 +258,23 @@ def _load_metadata_config(ctx: ExportContext) -> None:
     ctx.layout_template_path = layout_template_path
     ctx.map_disclaimer = map_disclaimer
     ctx.grid_label = grid_label
+    ctx.layout_variables = {
+        "map_title": ctx.map_title,
+        "map_location": ctx.map_location,
+        "map_disclaimer": ctx.map_disclaimer,
+
+        "osm_attribution": "",
+
+        "map_info":
+            f"Scale 1:{ctx.map_scale:,}\n"
+            f"Projection: {_utm_label_from_epsg(ctx.target_epsg)} "
+            f"(EPSG:{ctx.target_epsg})\n"
+            f"Grid: {ctx.grid_label}",
+
+        # inset labels
+        "label_inset": ctx.map_location,
+        "label_inset_2": "Davao City",
+    }
 
 
 def _compute_target_crs(ctx: ExportContext) -> None:
@@ -430,24 +450,9 @@ def _build_print_layout(ctx: ExportContext) -> None:
 
     layout.loadFromTemplate(doc, q.QgsReadWriteContext())
 
-    title_item = layout.itemById("map_title")
-
-    print("Before:", title_item.text())
-
-    from qgis.core import QgsLayoutItemLabel
-
-    print("\n===== ALL ITEMS =====")
-
-    for item in layout.items():
-        if hasattr(item, "id"):
-            print(
-                f"{type(item).__name__:<30}"
-                f" ID={item.id()!r}"
-                f" UUID={item.uuid()}"
-            )
-
-    print("=======================")
     ctx.layout = layout
+
+    _apply_layout_variables(ctx)
 
 
 def _configure_main_map(ctx: ExportContext) -> Any:
@@ -492,8 +497,6 @@ def _configure_insets(ctx: ExportContext) -> None:
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
         QgsCoordinateReferenceSystem=q.QgsCoordinateReferenceSystem,
         map_item_id="map_inset",
-        label_item_id="label_inset",
-        label_text=ctx.map_location or "Project Location",
     )
 
     # Inset 2: always a fixed Davao City overview, regardless of survey
@@ -509,8 +512,6 @@ def _configure_insets(ctx: ExportContext) -> None:
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
         QgsCoordinateReferenceSystem=q.QgsCoordinateReferenceSystem,
         map_item_id="map_inset_2",
-        label_item_id="label_inset_2",
-        label_text="Davao City",
         fixed_extent_wgs84=DAVAO_CITY_BOUNDS_WGS84,
     )
 
@@ -610,6 +611,7 @@ def export_qgis_print_layout(
     title: str | None = None,
     logo_path: Path | None = None,
     dpi: int = 400,
+    layout_variables: dict[str, str] | None = None,
 ) -> dict[str, str]:
     """
     Export a print-ready PDF and PNG preview from a Phase 1 map package.
@@ -629,6 +631,7 @@ def export_qgis_print_layout(
         logo_path=logo_path,
         dpi=dpi,
         qgis=qgis_classes,
+        layout_variables=layout_variables,
     )
 
     _validate_package_paths(ctx)
@@ -1071,18 +1074,6 @@ def _get_layout_item(layout: Any, item_id: str, item_type: Any | None = None) ->
     return item
 
 
-def _set_label_text(layout, item_id, text):
-    item = layout.itemById(item_id)
-
-    if item is None:
-        print(f"{item_id} NOT FOUND")
-        return
-
-    print("Old:", item.text())
-    item.setText(text)
-    item.refresh()
-    print("New:", item.text())
-
 def _create_osm_basemap_layer(QgsRasterLayer: Any) -> Any | None:
     url = "type=xyz&url=https://tile.openstreetmap.org/{z}/{x}/{y}.png"
     layer = QgsRasterLayer(url, "OpenStreetMap", "wms")
@@ -1310,8 +1301,6 @@ def _configure_inset_map(
     target_crs: Any,
     QgsLayoutItemPicture: Any,
     map_item_id: str,
-    label_item_id: str | None = None,
-    label_text: str | None = None,
     QgsCoordinateReferenceSystem: Any | None = None,
     fixed_extent_wgs84: dict[str, float] | None = None,
 ) -> None:
@@ -1392,11 +1381,49 @@ def _configure_inset_map(
         extent=inset_extent,
     )
 
-    if label_item_id and label_text:
-        _set_label_text(
-            layout,
-            label_item_id,
-            label_text,
-        )
-
     layout.refresh()
+
+
+def _apply_layout_variables(ctx: ExportContext) -> None:
+    """
+    Populate layout labels using their Layout Item IDs.
+
+    Example:
+
+        {
+            "map_title": "...",
+            "map_location": "...",
+            "map_author": "...",
+        }
+
+    """
+
+    from qgis.core import QgsLayoutItemLabel
+
+    if not ctx.layout_variables:
+        return
+
+    print("\n===== APPLYING LAYOUT VARIABLES =====")
+
+    for item_id, value in ctx.layout_variables.items():
+
+        item = ctx.layout.itemById(item_id)
+
+        if item is None:
+            print(f"[WARN] Layout item '{item_id}' not found.")
+            continue
+
+        if not isinstance(item, QgsLayoutItemLabel):
+            print(f"[WARN] '{item_id}' is not a label.")
+            continue
+
+        old = item.text()
+
+        item.setText(str(value))
+        item.refresh()
+
+        print(f"{item_id}")
+        print(f"  OLD : {old}")
+        print(f"  NEW : {value}")
+
+    print("====================================\n")

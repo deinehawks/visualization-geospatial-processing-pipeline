@@ -95,6 +95,11 @@ def main() -> None:
         help="Location/address text shown under the map title.",
     )
     parser.add_argument(
+        "--region",
+        default=None,
+        help="Province/Region shown in the overview inset.",
+    )
+    parser.add_argument(
         "--map-scale",
         type=int,
         default=None,
@@ -196,13 +201,13 @@ def main() -> None:
     if args.export_print:
       from modules.map_export.qgis_print_exporter import export_qgis_print_layout
 
-      print("===== QGIS PRINT EXPORT =====", flush=True)
+      print("===== QGIS PRINT EXPORT =====", flush=True)    
 
       print_result = export_qgis_print_layout(
-          package_dir=result.output_dir,
-          title=title,
-          logo_path=Path(args.logo) if args.logo else None,
-          dpi=args.dpi,
+         package_dir=result.output_dir,
+         title=title,
+         logo_path=Path(args.logo) if args.logo else None,
+         dpi=args.dpi,
       )
 
       print(f"PDF     : {print_result['pdf']}")
@@ -210,7 +215,6 @@ def main() -> None:
       print(f"CRS     : {print_result['crs']}")
       print("=============================")
       print()
-
 
 if __name__ == "__main__":
     main()
