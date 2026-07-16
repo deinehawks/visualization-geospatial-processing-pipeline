@@ -33,7 +33,7 @@ These entries identify required decisions without selecting final architectures.
 
 | Decision ID | Date | Status | Context | Decision | Alternatives considered | Consequences | Related files or issues |
 |---|---|---|---|---|---|---|---|
-| ADR-001 | 2026-07-16 | Pending | Normal test discovery is currently unsafe and no framework is declared. | Pending. | pytest; standard-library unittest; another approved runner. | Determines fixtures, markers, discovery rules, and developer workflow. | R13; `tests/`; `requirements.txt` |
+| ADR-001 | 2026-07-16 | Accepted | Normal test discovery is currently unsafe and no framework is declared. | Use pytest as the default test framework. | Standard-library unittest; another approved runner. | pytest becomes a development/test dependency; configuration, markers, and safe handling of existing scripts are required. | R13; `tests/`; `requirements.txt` |
 | ADR-002 | 2026-07-16 | Pending | Run/stage log context must remain correct under threads and multiple pipeline instances. | Pending. | `contextvars`; per-run logger adapters; explicit structured event objects; per-run logger names. | Affects log compatibility, handler ownership, and reporting tools. | R05; `shared/logging.py`; `query_survey_stats.py` |
 | ADR-003 | 2026-07-16 | Pending | Intermediate work and final published survey artifacts need separate ownership. | Pending. | Run-scoped workspace plus atomic publish; versioned immutable outputs plus pointer; serialized in-place writes. | Affects storage, compatibility, cleanup, recovery, and map consumers. | R02, R07; `modules/data_segregation/`; `pipelines/rgb_pipeline.py` |
 | ADR-004 | 2026-07-16 | Pending | Conflicting survey/resource use must be coordinated across the intended deployment topology. | Pending. | Database leases; OS/file locks; lock service; scheduler-enforced exclusivity. | Affects stale recovery, multi-host support, and operational complexity. | R02–R04; Phase 4 |
@@ -46,6 +46,29 @@ These entries identify required decisions without selecting final architectures.
 | ADR-011 | 2026-07-16 | Pending | Job scheduling topology determines state-store and lock requirements. | Pending. | Single-host multi-process; single-host service with workers; multi-host durable queue; retain manual independent CLI runs. | Affects dependencies, SQLite viability, deployment, and operations. | R01, R04; Phase 12 |
 | ADR-012 | 2026-07-16 | Pending | Quality approval must support unattended execution without losing manual oversight. | Pending. | Persisted manual approval; rules-based automatic gate; external API/UI; hybrid shadow mode. | Affects authorization, auditability, worker capacity, and output quality risk. | R12; `stage_quality_gate`; Phase 13 |
 
+## Accepted decisions
+
+### ADR-001 — Use pytest as the default test framework
+
+- **Decision ID:** ADR-001
+- **Date:** 2026-07-16
+- **Status:** Accepted
+- **Context:**
+  - The repository currently has no configured test framework.
+  - Existing files under `tests/` are executable scripts rather than isolated tests.
+  - Future phases require temporary directories, temporary SQLite databases, monkeypatching, parameterization, markers, and controlled integration tests.
+- **Decision:**
+  - pytest will be the canonical default test runner.
+  - Normal tests must run without production `.env`, real WebODM, QGIS/GDAL execution, production SQLite, or production survey directories.
+  - External integration tests must be explicitly marked and excluded by default.
+  - Operational and manual scripts must not live under default test discovery.
+- **Alternatives considered:** Standard-library unittest or another approved runner.
+- **Consequences:**
+  - pytest becomes a development/test dependency.
+  - pytest configuration and markers must be added.
+  - Existing test scripts must be converted, moved, or safely gated.
+- **Related files or issues:** R13; `tests/`; `requirements.txt`; `docs/refactor/TEST_STRATEGY.md`; Phase 1.
+
 ## Decision index
 
-No architectural decision is accepted yet. All entries above are unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001 is accepted. ADR-002 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
