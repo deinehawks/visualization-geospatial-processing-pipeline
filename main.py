@@ -28,6 +28,19 @@ def main() -> None:
         ),
     )
 
+    # WebODM task mode: mutually exclusive flags
+    task_group = parser.add_mutually_exclusive_group()
+    task_group.add_argument(
+        "--task2",
+        action="store_true",
+        help="Run WebODM Task 2 only (3d , legacy mode)",
+    )
+    task_group.add_argument(
+        "--task4",
+        action="store_true",
+        help="Run WebODM Task 4 only (bounded orthomosaic, default)",
+    )
+
     args = parser.parse_args()
 
     if args.resume and not args.run_id:
@@ -57,12 +70,24 @@ def main() -> None:
         date_hint=args.date,
     )
 
+    # Determine webodm_mode from CLI flags
+    if args.task2:
+        webodm_mode = "task2"
+        mode_display = "Task 2 only (3d)"
+    elif args.task4:
+        webodm_mode = "task4"
+        mode_display = "Task 4 only (bounded orthomosaic)"
+    else:
+        # Default to task4
+        webodm_mode = "task4"
+        mode_display = "Task 4 only (bounded orthomosaic, default)"
+
     print("\n===== PRODUCTION RGB PIPELINE =====")
     print(f"Source dir   : {source_dir}")
     print(f"Surveys root : {surveys_root}")
     print(f"Year         : {args.year}")
     print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
-    print("WebODM mode  : Task 2 only")
+    print(f"WebODM mode  : {mode_display}")
     print("===================================\n")
 
     pipeline = RGBPipeline(
@@ -78,9 +103,9 @@ def main() -> None:
         use_year_subdir_override=True,
         export_name_overrides=None, # using naming templates
 
-        # run Task 2 only
+        # WebODM task mode
         skip_task1_webodm=True,
-        skip_task2_webodm=False,
+        webodm_mode=webodm_mode,
         task1_bounded=False,
         force_segregation=False,
     )

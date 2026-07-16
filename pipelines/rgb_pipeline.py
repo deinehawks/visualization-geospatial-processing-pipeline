@@ -245,6 +245,7 @@ class RGBPipeline(
             rgb_path=self.rgb_path,
             skip_task1_webodm=self.skip_task1_webodm,
             skip_task2_webodm=self.skip_task2_webodm,
+            skip_task4_webodm=self.skip_task4_webodm,
         )
 
         self.loggers["pipeline"].info(
@@ -709,10 +710,11 @@ class RGBPipeline(
 
         skip_task1 = bool(getattr(self, "skip_task1_webodm", False))
         skip_task2 = bool(getattr(self, "skip_task2_webodm", False))
+        skip_task4 = bool(getattr(self, "skip_task4_webodm", False))
         task1_bounded = bool(getattr(self, "task1_bounded", False))
 
-        if skip_task1 and skip_task2:
-            raise RuntimeError("Both WebODM Task 1 and Task 2 are skipped. Nothing to run.")
+        if skip_task1 and skip_task2 and skip_task4:
+            raise RuntimeError("All WebODM tasks are skipped. Nothing to run.")
 
         if skip_task1 and task1_bounded:
             logger.warning("task1_bounded is set but Task 1 is skipped; ignoring task1_bounded.")
@@ -826,6 +828,16 @@ class RGBPipeline(
                     "task2": None,
                     "downloads": {"task1": {}, "task2": {}},
                 })
+
+            # Update state with project info so Task 4 can find it if run as primary
+            self.state["webodm"] = {
+                "project_id": project_id,
+                "project_name": project_name,
+                "task1": prev_task1 if prev_project_id else (None if skip_task1 else {}),
+                "task2": prev_task2 if prev_project_id else None,
+                "task4": prev_web.get("task4") or {},
+                "downloads": prev_web.get("downloads") or {"task1": {}, "task2": {}, "task4": {}},
+            }
 
             # ---------------- TASK 1 ----------------
             if skip_task1:
@@ -1028,87 +1040,104 @@ class RGBPipeline(
             if skip_task2:
                 logger.info("Skipping WebODM Task 2 by request.")
                 result["boundary_reason"] = "Task 2 skipped by request."
-                self._clear_webodm_checkpoint()
-                return result
-
-            if not boundary_available:
+            elif not boundary_available:
                 msg = "Boundary not available. Skipping Task 2 (bounded models)."
                 logger.warning(msg)
                 result["boundary_reason"] = msg
-                return result
-
-            if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+            elif not boundary_geojson_path or not Path(boundary_geojson_path).exists():
                 msg = "Boundary flag is True but GeoJSON path is missing. Skipping Task 2."
                 logger.warning(msg)
                 result["boundary_reason"] = msg
-                return result
+            else:
+                # Task 2 can run - boundary is available and not skipped
+                boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
+                task2_options = dict(webodm_cfg.get("task2_options", {}))
+                task2_options["boundary"] = boundary_geojson
 
-            boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
-            task2_options = dict(webodm_cfg.get("task2_options", {}))
-            task2_options["boundary"] = boundary_geojson
-
-            t2_already_done = (
-                prev_task2.get("id")
-                and prev_task2.get("success") is True
-            )
-
-            if t2_already_done:
-                current_task2_id = str(prev_task2["id"])
-                t2_success = True
-                t2_runtime = float(prev_task2.get("runtime_seconds") or 0)
-                logger.info(
-                    f"Resuming: Task 2 already completed "
-                    f"(id={current_task2_id}) — skipping upload and processing"
+                t2_already_done = (
+                    prev_task2.get("id")
+                    and prev_task2.get("success") is True
                 )
 
-            else:
-                existing_task2_id = None
-                if prev_project_id:
-                    existing_task2_id = processor.find_task_by_name(project_id, task2_name)
-                    if existing_task2_id:
-                        logger.info(
-                            f"Resuming: found existing Task 2 in WebODM by name "
-                            f"'{task2_name}' (id={existing_task2_id}) — checking status"
-                        )
-
-                if existing_task2_id:
-                    task2_status = processor.get_task_status(project_id, existing_task2_id)
+                if t2_already_done:
+                    current_task2_id = str(prev_task2["id"])
+                    t2_success = True
+                    t2_runtime = float(prev_task2.get("runtime_seconds") or 0)
                     logger.info(
-                        f"Resuming: Task 2 current status in WebODM: {task2_status!r}"
+                        f"Resuming: Task 2 already completed "
+                        f"(id={current_task2_id}) — skipping upload and processing"
                     )
-
-                    if task2_status == "completed":
-                        current_task2_id = existing_task2_id
-                        t2_success = True
-                        t2_runtime = 0.0
+    
+                else:
+                    existing_task2_id = None
+                    if prev_project_id:
+                        existing_task2_id = processor.find_task_by_name(project_id, task2_name)
+                        if existing_task2_id:
+                            logger.info(
+                                f"Resuming: found existing Task 2 in WebODM by name "
+                                f"'{task2_name}' (id={existing_task2_id}) — checking status"
+                            )
+    
+                    if existing_task2_id:
+                        task2_status = processor.get_task_status(project_id, existing_task2_id)
                         logger.info(
-                            f"Resuming: Task 2 already completed in WebODM "
-                            f"(id={current_task2_id}) — reusing"
+                            f"Resuming: Task 2 current status in WebODM: {task2_status!r}"
                         )
-
-                    elif task2_status in ("queued", "running"):
-                        current_task2_id = existing_task2_id
+    
+                        if task2_status == "completed":
+                            current_task2_id = existing_task2_id
+                            t2_success = True
+                            t2_runtime = 0.0
+                            logger.info(
+                                f"Resuming: Task 2 already completed in WebODM "
+                                f"(id={current_task2_id}) — reusing"
+                            )
+    
+                        elif task2_status in ("queued", "running"):
+                            current_task2_id = existing_task2_id
+                            logger.info(
+                                f"Resuming: Task 2 still {task2_status} in WebODM "
+                                f"(id={current_task2_id}) — waiting for completion"
+                            )
+                            t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
+                                project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                            )
+    
+                        else:
+                            logger.warning(
+                                f"Resuming: Task 2 is '{task2_status}' in WebODM "
+                                f"(id={existing_task2_id}) — deleting and re-uploading"
+                            )
+                            try:
+                                processor.delete_task(project_id, existing_task2_id)
+                            except Exception as del_err:
+                                logger.warning(
+                                    f"Could not delete failed Task 2 "
+                                    f"{existing_task2_id}: {del_err} — continuing anyway"
+                                )
+    
+                            current_task2_id = processor.create_task_with_images(
+                                project_id=project_id,
+                                name=task2_name,
+                                image_folder=str(upload_folder),
+                                options=task2_options,
+                                processing_node=webodm_cfg.get("node_id"),
+                            )
+                            t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
+                                project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                            )
+    
+                    elif prev_task2.get("id") and prev_project_id:
+                        current_task2_id = str(prev_task2["id"])
                         logger.info(
-                            f"Resuming: Task 2 still {task2_status} in WebODM "
-                            f"(id={current_task2_id}) — waiting for completion"
+                            f"Resuming: Task 2 exists in checkpoint but incomplete "
+                            f"(id={current_task2_id}) — checking WebODM status"
                         )
                         t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
                             project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
-
+    
                     else:
-                        logger.warning(
-                            f"Resuming: Task 2 is '{task2_status}' in WebODM "
-                            f"(id={existing_task2_id}) — deleting and re-uploading"
-                        )
-                        try:
-                            processor.delete_task(project_id, existing_task2_id)
-                        except Exception as del_err:
-                            logger.warning(
-                                f"Could not delete failed Task 2 "
-                                f"{existing_task2_id}: {del_err} — continuing anyway"
-                            )
-
                         current_task2_id = processor.create_task_with_images(
                             project_id=project_id,
                             name=task2_name,
@@ -1119,204 +1148,223 @@ class RGBPipeline(
                         t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
                             project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
+    
+                result["task2"] = {
+                    "id": current_task2_id,
+                    "name": task2_name,
+                    "success": t2_success,
+                    "runtime_seconds": t2_runtime,
+                }
+                result["boundary_used"] = True
+                self._save_webodm_checkpoint({
+                    "project_id": project_id,
+                    "project_name": project_name,
+                    "task1": result["task1"],
+                    "task2": result["task2"],
+                    "downloads": result["downloads"],
+                })
 
-                elif prev_task2.get("id") and prev_project_id:
-                    current_task2_id = str(prev_task2["id"])
-                    logger.info(
-                        f"Resuming: Task 2 exists in checkpoint but incomplete "
-                        f"(id={current_task2_id}) — checking WebODM status"
-                    )
-                    t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                        project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                    )
-
-                else:
-                    current_task2_id = processor.create_task_with_images(
-                        project_id=project_id,
-                        name=task2_name,
-                        image_folder=str(upload_folder),
-                        options=task2_options,
-                        processing_node=webodm_cfg.get("node_id"),
-                    )
-                    t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                        project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                    )
-
-            result["task2"] = {
-                "id": current_task2_id,
-                "name": task2_name,
-                "success": t2_success,
-                "runtime_seconds": t2_runtime,
-            }
-            result["boundary_used"] = True
-            self._save_webodm_checkpoint({
-                "project_id": project_id,
-                "project_name": project_name,
-                "task1": result["task1"],
-                "task2": result["task2"],
-                "downloads": result["downloads"],
-            })
-
-            # ---------------- Task 2 bounded orthomosaic ----------------
-            if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
-                ortho_cfg = exports_cfg["ortho"]
-
-                out_dir = task2_ortho_dir
-                epsg = int(ortho_cfg.get("reproject_epsg", 4326))
-                candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
-
-                task2_export_override = self.export_name_overrides.get("task2")
-                if task2_export_override:
-                    filename = f"{task2_export_override}.tif"
-                else:
-                    filename = self._orthomosaic_filename(
-                        task_key="task2",
-                        flag=task2_flag,
-                    )
-
-                out_path = processor.export_orthomosaic(
-                    project_id,
-                    current_task2_id,
-                    out_dir=out_dir,
-                    filename=filename,
-                    epsg=epsg,
-                    candidates=candidates,
-                    gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
-                )
-
-                if out_path:
-                    result["downloads"]["task2"]["orthomosaic"] = str(out_path)
-                    result["downloads"]["task2"]["epsg"] = epsg
-
-                    selected = self._set_selected_orthomosaic(
-                        task_key="task2",
-                        source_path=out_path,
-                        flag=task2_flag,
-                        boundary_used=True,
-                        fallback_used=False,
-                    )
-
-                    result["selected_webodm_task"] = "task2"
-                    result["selected_orthomosaic"] = selected
-                else:
-                    logger.warning("Could not download bounded orthomosaic for Task 2.")
-
-
-            # ---------------- Downloads after TASK 2 ----------------
-            if exports_cfg.get("enabled", False):
-                dem_cfg = (exports_cfg.get("dem") or {})
-                dem_do_download = False
-
-                if dem_do_download:
-                    epsg = int(dem_cfg.get("reproject_epsg", 3857))
-                    dtm_dir = task2_dem_dtm_dir
-                    dsm_dir = task2_dem_dsm_dir
-
-                    models = list(dem_cfg.get("models") or ["dtm", "dsm"])
-                    colors = list(dem_cfg.get("colors") or [])
-                    shadings = list(dem_cfg.get("shadings") or [])
-                    tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
-
-                    if not colors or not shadings:
-                        logger.warning(
-                            "DEM download enabled but colors/shadings not configured. Skipping DEM downloads."
-                        )
+                # Update state with Task 2 results
+                self.state["webodm"]["task2"] = result["task2"]
+                self.state["webodm"]["downloads"] = result["downloads"]
+    
+                # ---------------- Task 2 bounded orthomosaic ----------------
+                if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
+                    ortho_cfg = exports_cfg["ortho"]
+    
+                    out_dir = task2_ortho_dir
+                    epsg = int(ortho_cfg.get("reproject_epsg", 4326))
+                    candidates = ortho_cfg.get("asset_candidates") or ["orthophoto.tif"]
+    
+                    task2_export_override = self.export_name_overrides.get("task2")
+                    if task2_export_override:
+                        filename = f"{task2_export_override}.tif"
                     else:
-                        for model in models:
-                            if model not in ("dtm", "dsm"):
-                                logger.warning(
-                                    f"Unknown DEM model '{model}' (expected dtm/dsm). Skipping."
-                                )
-                                continue
-
-                            out_base = dtm_dir if model == "dtm" else dsm_dir
-
-                            for color in colors:
-                                for shading in shadings:
-                                    fname = tmpl.format(color=color, shading=shading)
-                                    tmp_raw = out_base / f"__tmp_raw_{fname}"
-                                    final_out = out_base / fname
-
-                                    asset_type = f"{model}/{color}/{shading}"
-                                    ok = processor.download_asset_safe(
-                                        project_id, current_task2_id, asset_type, tmp_raw
-                                    )
-                                    if ok:
-                                        processor.run_gdalwarp(tmp_raw, final_out, epsg)
-                                        try:
-                                            tmp_raw.unlink(missing_ok=True)
-                                        except Exception:
-                                            pass
-
-                        result["downloads"]["task2"]["dem_epsg"] = epsg
-                        result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
-                        result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
-
-                pc_cfg = (exports_cfg.get("pointcloud") or {})
-                pc_enabled = bool(pc_cfg.get("enabled", True))
-
-                if pc_enabled:
-                    pc_dir = task2_3d_dir
-                    laz_candidates = list(
-                        pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
-                    )
-                    pdal_path = qgis_tools_cfg.get("pdal_path") or "pdal"
-
-                    pc_out = processor.export_pointcloud(
-                        project_id,
-                        current_task2_id,
-                        out_dir=pc_dir,
-                        laz_archive_name=f"{task2_export_id}.laz",
-                        pcd_name=f"{task2_export_id}.pcd",
-                        candidates=laz_candidates,
-                        max_points=int(pc_cfg.get("max_points", 3_000_000)),
-                        viewpoint=str(pc_cfg.get("viewpoint", "0 0 0 1 0 0 0")),
-                    )
-
-                    result["downloads"]["task2"]["pointcloud_laz"] = pc_out.get("laz")
-                    result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get("ply")
-                    result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get("pcd")
-                    result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get("asset_type")
-
-                    if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
-                        raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
-
-                else:
-                    logger.info("Point cloud download skipped (pointcloud.enabled=false).")
-                    result["downloads"]["task2"]["pointcloud_skipped"] = True
-
-                if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
-                    zcfg = exports_cfg["all_assets_zip"]
-                    out_dir = task2_odm_dir
-
-                    task2_zip_override = self.export_name_overrides.get("task2")
-                    if task2_zip_override:
-                        fname = f"{task2_zip_override}-all.zip"
-                    else:
-                        fname = zcfg.get(
-                            "filename_template",
-                            "{survey_id}-RGB-{flag}-all.zip"
-                        ).format(
-                            survey_id=survey_id,
+                        filename = self._orthomosaic_filename(
+                            task_key="task2",
                             flag=task2_flag,
                         )
-
-                    zip_path = out_dir / fname
-
-                    ok = processor.download_all_assets_safe(
-                        project_id, current_task2_id, zip_path
+    
+                    out_path = processor.export_orthomosaic(
+                        project_id,
+                        current_task2_id,
+                        out_dir=out_dir,
+                        filename=filename,
+                        epsg=epsg,
+                        candidates=candidates,
+                        gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                     )
-                    if ok:
-                        result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
-                    else:
-                        logger.warning(
-                            "All-assets zip was not downloaded (endpoint missing or failed)."
+    
+                    if out_path:
+                        result["downloads"]["task2"]["orthomosaic"] = str(out_path)
+                        result["downloads"]["task2"]["epsg"] = epsg
+    
+                        selected = self._set_selected_orthomosaic(
+                            task_key="task2",
+                            source_path=out_path,
+                            flag=task2_flag,
+                            boundary_used=True,
+                            fallback_used=False,
                         )
+    
+                        result["selected_webodm_task"] = "task2"
+                        result["selected_orthomosaic"] = selected
+                    else:
+                        logger.warning("Could not download bounded orthomosaic for Task 2.")
+    
+    
+                # ---------------- Downloads after TASK 2 ----------------
+                if exports_cfg.get("enabled", False):
+                    dem_cfg = (exports_cfg.get("dem") or {})
+                    dem_do_download = False
+    
+                    if dem_do_download:
+                        epsg = int(dem_cfg.get("reproject_epsg", 3857))
+                        dtm_dir = task2_dem_dtm_dir
+                        dsm_dir = task2_dem_dsm_dir
+    
+                        models = list(dem_cfg.get("models") or ["dtm", "dsm"])
+                        colors = list(dem_cfg.get("colors") or [])
+                        shadings = list(dem_cfg.get("shadings") or [])
+                        tmpl = dem_cfg.get("filename_template", "{color}-{shading}.tif")
+    
+                        if not colors or not shadings:
+                            logger.warning(
+                                "DEM download enabled but colors/shadings not configured. Skipping DEM downloads."
+                            )
+                        else:
+                            for model in models:
+                                if model not in ("dtm", "dsm"):
+                                    logger.warning(
+                                        f"Unknown DEM model '{model}' (expected dtm/dsm). Skipping."
+                                    )
+                                    continue
+    
+                                out_base = dtm_dir if model == "dtm" else dsm_dir
+    
+                                for color in colors:
+                                    for shading in shadings:
+                                        fname = tmpl.format(color=color, shading=shading)
+                                        tmp_raw = out_base / f"__tmp_raw_{fname}"
+                                        final_out = out_base / fname
+    
+                                        asset_type = f"{model}/{color}/{shading}"
+                                        ok = processor.download_asset_safe(
+                                            project_id, current_task2_id, asset_type, tmp_raw
+                                        )
+                                        if ok:
+                                            processor.run_gdalwarp(tmp_raw, final_out, epsg)
+                                            try:
+                                                tmp_raw.unlink(missing_ok=True)
+                                            except Exception:
+                                                pass
+    
+                            result["downloads"]["task2"]["dem_epsg"] = epsg
+                            result["downloads"]["task2"]["dtm_dir"] = str(dtm_dir)
+                            result["downloads"]["task2"]["dsm_dir"] = str(dsm_dir)
+    
+                    pc_cfg = (exports_cfg.get("pointcloud") or {})
+                    pc_enabled = bool(pc_cfg.get("enabled", True))
+    
+                    if pc_enabled:
+                        pc_dir = task2_3d_dir
+                        laz_candidates = list(
+                            pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
+                        )
+                        pdal_path = qgis_tools_cfg.get("pdal_path") or "pdal"
+    
+                        pc_out = processor.export_pointcloud(
+                            project_id,
+                            current_task2_id,
+                            out_dir=pc_dir,
+                            laz_archive_name=f"{task2_export_id}.laz",
+                            pcd_name=f"{task2_export_id}.pcd",
+                            candidates=laz_candidates,
+                            max_points=int(pc_cfg.get("max_points", 3_000_000)),
+                            viewpoint=str(pc_cfg.get("viewpoint", "0 0 0 1 0 0 0")),
+                        )
+    
+                        result["downloads"]["task2"]["pointcloud_laz"] = pc_out.get("laz")
+                        result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get("ply")
+                        result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get("pcd")
+                        result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get("asset_type")
+    
+                        if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
+                            raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
+    
+                    else:
+                        logger.info("Point cloud download skipped (pointcloud.enabled=false).")
+                        result["downloads"]["task2"]["pointcloud_skipped"] = True
+    
+                    if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
+                        zcfg = exports_cfg["all_assets_zip"]
+                        out_dir = task2_odm_dir
+    
+                        task2_zip_override = self.export_name_overrides.get("task2")
+                        if task2_zip_override:
+                            fname = f"{task2_zip_override}-all.zip"
+                        else:
+                            fname = zcfg.get(
+                                "filename_template",
+                                "{survey_id}-RGB-{flag}-all.zip"
+                            ).format(
+                                survey_id=survey_id,
+                                flag=task2_flag,
+                            )
+    
+                        zip_path = out_dir / fname
+    
+                        ok = processor.download_all_assets_safe(
+                            project_id, current_task2_id, zip_path
+                        )
+                        if ok:
+                            result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+                        else:
+                            logger.warning(
+                                "All-assets zip was not downloaded (endpoint missing or failed)."
+                            )
+
+            # ---------------- Quality Gate after Task 2 (when both tasks run) ----------------
+            # If both Task 2 and Task 4 are enabled, run a quality gate after Task 2
+            # to allow user to review before continuing to Task 4
+            if not skip_task2 and not skip_task4:
+                logger.info("Running intermediate quality gate after Task 2 (before Task 4)...")
+                # Call the quality gate stage method directly
+                try:
+                    qg_result = self.stage_quality_gate()
+                    if not qg_result.get("passed"):
+                        logger.warning(
+                            "Intermediate quality gate failed. Skipping Task 4 and returning."
+                        )
+                        result["quality_gate_intermediate"] = qg_result
+                        result["task4_skip_reason"] = "Quality gate failed after Task 2"
+                        self._clear_webodm_checkpoint()
+                        return result
+                    else:
+                        logger.info("Intermediate quality gate passed. Continuing to Task 4...")
+                        result["quality_gate_intermediate"] = qg_result
+                except Exception as e:
+                    logger.exception("Intermediate quality gate failed with exception.")
+                    result["quality_gate_intermediate"] = {"passed": False, "error": str(e)}
+                    result["task4_skip_reason"] = f"Quality gate exception: {e}"
+                    self._clear_webodm_checkpoint()
+                    return result
 
             # ---------------- TASK 4 (primary, not fallback) ----------------
             skip_task4 = bool(getattr(self, "skip_task4_webodm", True))
 
-            if not skip_task4:
+            if skip_task4:
+                logger.info("Skipping WebODM Task 4 by request.")
+            elif not boundary_available:
+                msg = "Boundary not available. Skipping Task 4 (requires bounded model)."
+                logger.warning(msg)
+                result["task4_skip_reason"] = msg
+            elif not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+                msg = "Boundary GeoJSON path is missing. Skipping Task 4."
+                logger.warning(msg)
+                result["task4_skip_reason"] = msg
+            else:
+                # Task 4 can run - boundary is available and not skipped
                 logger.info(
                     "Running Task 4 as primary task "
                     f"(webodm_mode={getattr(self, 'webodm_mode', 'both')})."
@@ -1336,6 +1384,15 @@ class RGBPipeline(
                     logger.exception("Task 4 primary run failed.")
                     result["task4_failed"] = True
                     result["task4_error"] = str(e)
+
+                    # If Task 4 is the only task running and it failed, fail the entire stage
+                    if skip_task1 and skip_task2:
+                        logger.error(
+                            "Task 4 was the only WebODM task enabled and it failed. "
+                            "Failing the WebODM stage."
+                        )
+                        self._clear_webodm_checkpoint()
+                        raise
 
             self._clear_webodm_checkpoint()
             return result
@@ -1795,7 +1852,8 @@ class RGBPipeline(
         survey_id = self._require_survey_id()
         rgb_path = self._require_rgb_path()
 
-        web = self.state.get("webodm") or {}
+        # Use setdefault to ensure we're modifying the state dict, not a temporary copy
+        web = self.state.setdefault("webodm", {})
         project_id = web.get("project_id")
         project_name = web.get("project_name") or survey_id
 
@@ -2120,6 +2178,9 @@ class RGBPipeline(
                 else:
                     logger.info("Quality gate PASSED by user.")
 
+                # Select the best available orthomosaic for QGIS
+                # Priority: fallback (if reviewed) > task4 > task2
+                selected = None
                 try:
                     if _fallback_reviewed:
                         fallback_flag = self._webodm_task_flag(
@@ -2132,7 +2193,18 @@ class RGBPipeline(
                             boundary_used=True,
                             fallback_used=True,
                         )
-                    else:
+                    elif task4.get("id"):
+                        task4_flag = self._webodm_task_flag(
+                            "task4",
+                            default_boundary_mode="b",
+                        )
+                        selected = self._select_existing_task_orthomosaic(
+                            task_key="task4",
+                            flag=task4_flag,
+                            boundary_used=True,
+                            fallback_used=False,
+                        )
+                    elif task2.get("id"):
                         task2_flag = self._webodm_task_flag(
                             "task2",
                             default_boundary_mode="b",
@@ -2170,136 +2242,69 @@ class RGBPipeline(
                     "project_id": project_id,
                 }
 
-            # ── Interactive loop ─────────────────────────────────────────
-            while True:
-                web = self.state.get("webodm") or {}
-                task1 = web.get("task1") or {}
-                task2 = web.get("task2") or {}
-                task4 = web.get("task4") or {}
+            if raw == "restart":
+                # Pick the best task to restart — task4 first, else task2
+                if task4.get("id"):
+                    default_task_id   = str(task4["id"])
+                    default_task_name = str(task4.get("name") or "task4")
+                elif task2.get("id"):
+                    default_task_id   = str(task2["id"])
+                    default_task_name = str(task2.get("name") or "task2")
+                else:
+                    default_task_id   = str(task1["id"])
+                    default_task_name = str(task1.get("name") or "task1")
 
-                raw = quality_gate_prompt(
-                    logger=logger,
-                    survey_id=survey_id,
-                    project_id=int(project_id),
-                    task1=task1,
-                    task2=task2 if task2.get("id") else {},
-                    task4=task4 if task4.get("id") else None,
-                    webodm_url=self.config.get("webodm", {}).get("url", ""),
-                )
+                res = restart_and_wait(default_task_id, default_task_name, "dataset")
+                if res.get("passed") is False:
+                    return res
+                continue
 
-                if raw in ("yes", "y"):
-                    logger.info("Quality gate PASSED by user.")
+            if raw.startswith("restart "):
+                parts = raw.split()
 
-                    # Select the best available orthomosaic for QGIS.
-                    # Priority: task4 > task2 (task4 is always the bounded+denser run).
-                    selected = None
-                    try:
-                        if task4.get("id"):
-                            task4_flag = self._webodm_task_flag(
-                                "task4", default_boundary_mode="b",
-                            )
-                            selected = self._select_existing_task_orthomosaic(
-                                task_key="task4",
-                                flag=task4_flag,
-                                boundary_used=True,
-                                fallback_used=False,
-                            )
-                        elif task2.get("id"):
-                            task2_flag = self._webodm_task_flag(
-                                "task2", default_boundary_mode="b",
-                            )
-                            selected = self._select_existing_task_orthomosaic(
-                                task_key="task2",
-                                flag=task2_flag,
-                                boundary_used=True,
-                                fallback_used=False,
-                            )
-                    except Exception as e:
-                        logger.warning(f"Could not select orthomosaic after quality pass: {e}")
-                        selected = None
-
-                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-
-                    return {
-                        "passed": True,
-                        "restarts": restarts,
-                        "project_id": project_id,
-                        "selected_webodm_task": self.state.get("selected_webodm_task"),
-                        "selected_orthomosaic": selected,
-                    }
-
-                if raw in ("fail", "f"):
-                    logger.warning("Quality gate FAILED by user.")
-                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-                    return {
-                        "passed": False,
-                        "restarts": restarts,
-                        "project_id": project_id,
-                    }
-
-                if raw == "restart":
-                    # Pick the best task to restart — task4 first, else task2
-                    if task4.get("id"):
-                        default_task_id   = str(task4["id"])
-                        default_task_name = str(task4.get("name") or "task4")
-                    elif task2.get("id"):
-                        default_task_id   = str(task2["id"])
-                        default_task_name = str(task2.get("name") or "task2")
-                    else:
-                        default_task_id   = str(task1["id"])
-                        default_task_name = str(task1.get("name") or "task1")
-
-                    res = restart_and_wait(default_task_id, default_task_name, "dataset")
-                    if res.get("passed") is False:
-                        return res
-                    continue
-
-                if raw.startswith("restart "):
-                    parts = raw.split()
-
-                    if len(parts) not in (2, 3):
-                        logger.warning(
-                            "Invalid format. Use: restart | restart t1|t2|t4 | restart t1|t2|t4 <stage>"
-                        )
-                        continue
-
-                    target     = parts[1]
-                    stage_alias = parts[2] if len(parts) == 3 else "load_dataset"
-
-                    target_map = {
-                        "t1": task1, "task1": task1,
-                        "t2": task2, "task2": task2,
-                        "t4": task4, "task4": task4,
-                    }
-
-                    chosen = target_map.get(target)
-                    if chosen is None:
-                        logger.warning("Invalid target. Use t1, t2, or t4.")
-                        continue
-
-                    if not chosen or not chosen.get("id"):
-                        logger.warning(f"{target} does not exist for this run.")
-                        continue
-
-                    if stage_alias not in allowed_stages:
-                        logger.warning(
-                            f"Invalid stage '{stage_alias}'. "
-                            f"Valid stages: {', '.join(sorted(WEBODM_RESTART_STAGE_NAMES))}"
-                        )
-                        continue
-
-                    res = restart_and_wait(
-                        str(chosen["id"]),
-                        str(chosen.get("name") or target),
-                        allowed_stages[stage_alias],
+                if len(parts) not in (2, 3):
+                    logger.warning(
+                        "Invalid format. Use: restart | restart t1|t2|t4 | restart t1|t2|t4 <stage>"
                     )
-                    if res.get("passed") is False:
-                        return res
                     continue
 
-                logger.warning(
-                    "Unrecognised input. "
-                    "Use: yes | fail | restart | restart t1|t2|t4 [stage]"
+                target     = parts[1]
+                stage_alias = parts[2] if len(parts) == 3 else "load_dataset"
+
+                target_map = {
+                    "t1": task1, "task1": task1,
+                    "t2": task2, "task2": task2,
+                    "t4": task4, "task4": task4,
+                }
+
+                chosen = target_map.get(target)
+                if chosen is None:
+                    logger.warning("Invalid target. Use t1, t2, or t4.")
+                    continue
+
+                if not chosen or not chosen.get("id"):
+                    logger.warning(f"{target} does not exist for this run.")
+                    continue
+
+                if stage_alias not in allowed_stages:
+                    logger.warning(
+                        f"Invalid stage '{stage_alias}'. "
+                        f"Valid stages: {', '.join(sorted(WEBODM_RESTART_STAGE_NAMES))}"
+                    )
+                    continue
+
+                res = restart_and_wait(
+                    str(chosen["id"]),
+                    str(chosen.get("name") or target),
+                    allowed_stages[stage_alias],
+                )
+                if res.get("passed") is False:
+                    return res
+                continue
+
+            logger.warning(
+                "Unrecognised input. "
+                "Use: yes | fail | restart | restart t1|t2|t4 [stage]"
                 )
             
     # RUN

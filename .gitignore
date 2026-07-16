@@ -46,3 +46,6 @@ symbology-style.db-*
 data/*.db
 data/*.db-shm
 data/*.db-wal
+
+address this issues.txt
+codes.txt

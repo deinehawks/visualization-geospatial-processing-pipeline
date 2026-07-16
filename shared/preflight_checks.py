@@ -68,6 +68,7 @@ class PipelinePreflight:
         rgb_path: Optional[Path] = None,
         skip_task1_webodm: bool = False,
         skip_task2_webodm: bool = False,
+        skip_task4_webodm: bool = False,
     ) -> Dict[str, Any]:
         stage = str(stage).strip()
 
@@ -87,6 +88,7 @@ class PipelinePreflight:
                 rgb_path,
                 skip_task1_webodm=skip_task1_webodm,
                 skip_task2_webodm=skip_task2_webodm,
+                skip_task4_webodm=skip_task4_webodm,
             )
 
         if stage == "quality_gate":
@@ -291,11 +293,12 @@ class PipelinePreflight:
         *,
         skip_task1_webodm: bool,
         skip_task2_webodm: bool,
+        skip_task4_webodm: bool,
     ) -> Dict[str, Any]:
-        if skip_task1_webodm and skip_task2_webodm:
+        if skip_task1_webodm and skip_task2_webodm and skip_task4_webodm:
             self._fail(
                 stage,
-                "both WebODM Task 1 and Task 2 are disabled",
+                "all WebODM tasks are disabled",
                 suggestions=[
                     "Enable at least one WebODM task before running the WebODM stage."
                 ],
@@ -334,16 +337,24 @@ class PipelinePreflight:
                 ],
             )
 
-        if not skip_task2_webodm:
+        # Task 2 and Task 4 both require boundary GeoJSON
+        if not skip_task2_webodm or not skip_task4_webodm:
             boundary_geojson = self._path_from_state(
                 state,
                 "boundary_geojson_path",
             )
 
             if not boundary_geojson or not boundary_geojson.exists():
+                tasks_needing_boundary = []
+                if not skip_task2_webodm:
+                    tasks_needing_boundary.append("Task 2")
+                if not skip_task4_webodm:
+                    tasks_needing_boundary.append("Task 4")
+
+                task_list = " and ".join(tasks_needing_boundary)
                 self._fail(
                     stage,
-                    "boundary GeoJSON is missing for bounded WebODM Task 2",
+                    f"boundary GeoJSON is missing for bounded WebODM {task_list}",
                     details=[f"Boundary GeoJSON: {boundary_geojson}"],
                     suggestions=[
                        "Run the kml_boundary stage first.",
