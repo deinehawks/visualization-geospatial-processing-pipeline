@@ -67,6 +67,7 @@ class RGBPipeline(
         task1_bounded: bool = False,
         force_segregation: bool = False,
         webodm_mode: str = "task4",   # "task2" | "task4" | "both"
+        use_year_subdir_override: Optional[bool] = None,
     ):
         self.base_dir = Path(base_dir)
         self.config = config

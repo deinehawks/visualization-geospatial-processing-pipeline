@@ -172,7 +172,7 @@ def get_logger(
             _LOG_FORMAT_CONSOLE, datefmt=DATE_FORMAT))
         logger.addHandler(ch)
 
-    logger._configured = True
+    setattr(logger, "_configured", True)
     return logger
 
 
