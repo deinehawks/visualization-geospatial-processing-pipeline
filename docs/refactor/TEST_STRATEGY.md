@@ -14,87 +14,50 @@ Normal test discovery must never:
 
 ## Current test baseline
 
-### Current frameworks
+### Canonical framework and command
 
-No active test framework is confirmed:
+pytest 8.4.2 is the accepted default framework and is pinned in `requirements.txt`. Configuration in `pytest.ini`:
 
-- `requirements.txt` does not declare `pytest`, and no repository test dependency file was found.
-- No `pytest.ini`, `pyproject.toml`, `setup.cfg`, `tox.ini`, `noxfile.py`, Makefile test target, or CI workflow was found.
-- No use of `unittest` or pytest APIs was found in the test files.
-- File names such as `test_rgb_pipeline.py`, `test_experiment_naming.py`, and `query_test.py` resemble common discovery patterns, but their contents are top-level scripts rather than isolated test functions.
+- restricts discovery to `tests/`;
+- registers the `external` marker; and
+- applies `-m "not external"` by default.
 
-The actual historical execution command is therefore **unknown and requires confirmation**. The files appear runnable directly with Python, but this must not be treated as the desired test workflow.
+The canonical normal command is:
 
-### Existing directories and naming conventions
+```text
+python -m pytest -q
+```
 
-All current test-related scripts are under `tests/`:
+External tests require explicit marker selection and are never part of the default command.
 
-| File | Current form | Discovery/safety concern |
-|---|---|---|
-| `tests/test_rgb_pipeline.py` | Top-level end-to-end script | Common test name; starts a real pipeline during import |
-| `tests/test_experiment_naming.py` | Top-level print loop | Common test name; no assertions; current import appears invalid |
-| `tests/query_test.py` | Top-level database query script | Matches some `*_test.py` discovery patterns; hard-coded external DB path |
-| `tests/reset_environment.py` | Top-level cleanup script | Not a normal default test name, but deletes repository data when run |
-| `tests/__init__.py` | Empty package marker | Allows test files to be imported as modules |
+### Current layout and operator tools
 
-There is no separation between unit, integration, external integration, smoke, or operational maintenance scripts.
+Default-discovered tests contain definitions and assertions only:
 
-### How tests are currently executed
+| File | Coverage |
+|---|---|
+| `tests/test_experiment_naming.py` | Parameterized filter and DJIFP naming behavior |
+| `tests/test_query_pipeline_db.py` | Temporary read-only SQLite query behavior |
+| `tests/test_reset_environment.py` | Temporary-root cleanup guards and allowed deletion set |
+| `tests/test_import_safety.py` | Import traps for runtime, external, interactive, deletion, and write side effects |
 
-No canonical command is documented. `README.md` is empty, and no test-runner configuration or automation was found. Do not run broad discovery until Phase 1 isolates import-time effects.
+The former executable scripts now live outside discovery:
 
-### Import-time real pipeline and external effects
+| Tool | Safety boundary |
+|---|---|
+| `tools/run_rgb_pipeline.py` | Lazy production imports, explicit paths, main guard, and `--allow-external-run` |
+| `tools/query_pipeline_db.py` | Explicit database path and run ID, existing-file requirement, SQLite `mode=ro`, reliable close |
+| `tools/reset_environment.py` | Explicit root, sentinel, containment checks, main guard, and `--allow-destructive-reset` |
 
-#### `tests/test_rgb_pipeline.py`
+### Validated baseline
 
-At import time it:
+On 2026-07-16, syntax checks passed, default collection found 13 tests, and the full default suite passed 13 tests. All database and deletion tests used pytest temporary directories. No external tests were run.
 
-1. Calls `load_pipeline_config()`, which loads `.env` and validates configured production-like paths.
-2. Selects a hard-coded survey folder under `FIELD_DATA_ROOT`.
-3. Constructs `RGBPipeline`; construction creates `data/logs`, initializes/migrates `data/pipeline.db`, and creates a run record.
-4. Calls `pipeline.run(resume=False)`, which can copy data, submit WebODM tasks, invoke QGIS/GDAL, write survey outputs, and update state.
-
-This file must not be imported by normal discovery in its current form.
-
-#### `tests/query_test.py`
-
-At import time it opens a hard-coded database at `E:\dev\projects\automation-pipeline-viz\data\pipeline.db` and queries a hard-coded run ID. The selects are read-only, but the default SQLite connect mode can create a missing database file and the path is outside this repository.
-
-#### `tests/reset_environment.py`
-
-When executed, it recursively deletes `data/logs` and unlinks `data/pipeline.db` relative to the current working directory. It has no temporary-root requirement, confirmation guard, or main guard.
-
-#### `tests/test_experiment_naming.py`
-
-At import time it prints sample naming results and makes no assertions. It imports `resolve_rgb_exp01_names` from `shared`, but current `shared/__init__.py` deliberately exports no utilities, so the import appears to fail. This is a static finding; the file was not executed.
-
-### Database-testing behavior
-
-- No test creates a temporary SQLite database.
-- The pipeline script uses the default `data/pipeline.db` through `RGBPipeline` and `shared.paths.db_path`.
-- The query script uses a hard-coded database outside the repository.
-- The reset script deletes the default repository database.
-- No tests cover transactions, concurrent writers, busy timeouts, migrations, attempt ordering, stale attempts, or recovery.
-
-### Filesystem-testing behavior
-
-- No test uses a temporary directory fixture.
-- The pipeline script derives real source and survey roots from `.env`.
-- The reset script deletes fixed relative paths.
-- No sentinel/allowlist guard verifies that writes and deletes remain inside a test-owned root.
-- No tests cover concurrent output ownership, atomic publication, copy interruption, disk exhaustion, or network-share behavior.
-
-### WebODM and other external-service behavior
-
-- The pipeline script can authenticate to and submit work to configured WebODM.
-- Pipeline preflight performs real HTTP requests when the relevant stage runs.
-- WebODM is not faked or mocked in current tests.
-- QGIS/GDAL/PDAL subprocesses are not faked or mocked.
-- No explicit opt-in marker, separate environment, credential gate, or external-test command is defined.
+The baseline is safer but Phase 1 remains in progress. Suite-wide network/subprocess denial, credential clearing, production-path guards, broader temporary configuration fixtures, and platform-specific symlink/junction checks remain to be implemented.
 
 ## Desired test architecture
 
-Adopt one approved framework and a layout that makes test level and external effects explicit. The framework choice remains pending in `DECISIONS.md`; examples below describe capabilities rather than approving a dependency.
+Use the approved pytest framework with a layout that makes test level and external effects explicit.
 
 Suggested logical layout:
 

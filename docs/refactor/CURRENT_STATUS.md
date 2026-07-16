@@ -2,77 +2,77 @@
 
 ## Summary
 
-- **Refactor status:** Planning
-- **Current phase:** Phase 0 — Baseline and test safety
-- **Completed work:** Initial repository scalability audit and creation of AGENTS.md
-- **Current task:** Repository inspection and refactor-document initialization
+- **Refactor status:** In progress
+- **Current phase:** Phase 1 - Test isolation and safety baseline
+- **Completed work:** Canonical pytest configuration and isolation of the audited import-time test scripts
+- **Current task:** Safe default discovery, operator-tool hardening, and baseline regression coverage
 - **Production code changed:** No
-- **Next recommended task:** Investigate and isolate test-import side effects
+- **Next recommended task:** Add suite-wide network, subprocess, credential, and production-path denial fixtures without changing production behavior
 
 ## Completed tasks
 
-- Read the repository-level `AGENTS.md` and confirmed that it does not contradict this documentation-only task.
-- Inspected pipeline orchestration, stage execution, state persistence, checkpoints, logging, pause/abort controls, WebODM upload behavior, QGIS/GDAL processing, filesystem operations, entry points, and existing tests.
-- Recorded evidence and confirmation status for all 13 known scalability and concurrency risks.
-- Initialized the phased refactor plan, architectural decision log, current status, and test strategy.
-- Preserved all pre-existing working-tree changes.
+- Accepted pytest as the canonical default runner in `DECISIONS.md`.
+- Added `pytest.ini` with `tests/` as the test path, an `external` marker, and external-test exclusion by default.
+- Added pinned pytest 8.4.2 using the existing `requirements.txt` convention.
+- Converted experiment naming samples into four parameterized tests covering both original inputs, filter enabled/disabled, and `-DJIFP` normalization.
+- Moved the real RGB workflow from `tests/test_rgb_pipeline.py` to `tools/run_rgb_pipeline.py`; imports are lazy and execution requires `--allow-external-run`.
+- Moved `tests/query_test.py` to `tools/query_pipeline_db.py`; the database is an explicit argument, missing files are rejected, SQLite opens in read-only URI mode, and connections close in `finally`.
+- Moved `tests/reset_environment.py` to `tools/reset_environment.py`; an explicit root, sentinel, and destructive flag are required, containment is checked, and only `logs/`, `pipeline.db`, `pipeline.db-wal`, and `pipeline.db-shm` are removed.
+- Added temporary SQLite and filesystem tests plus import traps for pipeline construction, dotenv, WebODM/network access, subprocesses, SQLite, keyboard hooks, input, deletion, and writes.
+- No real pipeline, WebODM, QGIS/GDAL, production SQLite, production survey directory, or real runtime cleanup was used.
 
-## Current task
+## Files moved or created
 
-Repository inspection and refactor-document initialization. This task changes planning documentation only and does not authorize fixes, migrations, dependency installation, or pipeline execution.
+Moved and hardened:
 
-## Blockers
+- `tests/test_rgb_pipeline.py` -> `tools/run_rgb_pipeline.py`
+- `tests/query_test.py` -> `tools/query_pipeline_db.py`
+- `tests/reset_environment.py` -> `tools/reset_environment.py`
 
-- Safe normal test discovery is not yet established.
-- No test framework or canonical safe test command is declared in the repository.
-- External-service and production-path boundaries are not injectable throughout the current code.
-- Several architectural decisions in `DECISIONS.md` must be resolved before persistent-state or concurrency implementation.
+Created:
 
-## Known test failures
+- `pytest.ini`
+- `tests/test_import_safety.py`
+- `tests/test_query_pipeline_db.py`
+- `tests/test_reset_environment.py`
 
-No test command was run because current discovery can execute real side effects.
+Modified:
 
-Static inspection found these likely or definite problems:
+- `requirements.txt`
+- `tests/test_experiment_naming.py`
+- `docs/refactor/CURRENT_STATUS.md`
+- `docs/refactor/TEST_STRATEGY.md`
 
-- `tests/test_rgb_pipeline.py` executes a real pipeline at module import using `.env` paths.
-- `tests/query_test.py` opens a hard-coded database outside this repository at module import.
-- `tests/reset_environment.py` deletes `data/logs` and `data/pipeline.db` when manually executed.
-- `tests/test_experiment_naming.py` contains no assertions and imports `resolve_rgb_exp01_names` from `shared`; the current `shared/__init__.py` does not export that symbol, so the import appears invalid.
-- No `pytest`, `unittest`, `tox`, `nox`, or CI test configuration was found, and no test framework is declared in `requirements.txt`.
+## Validation performed
 
-These observations are not reported as test-run results.
+Date: 2026-07-16.
 
-## Remaining risks
+- `python -m py_compile tests/test_experiment_naming.py tests/test_query_pipeline_db.py tests/test_reset_environment.py tests/test_import_safety.py tools/run_rgb_pipeline.py tools/query_pipeline_db.py tools/reset_environment.py` - passed.
+- `python -m pytest -q tests/test_experiment_naming.py` - 4 passed.
+- `python -m pytest -q tests/test_query_pipeline_db.py` - 2 passed.
+- `python -m pytest -q tests/test_reset_environment.py` - 6 passed.
+- First `python -m pytest -q tests/test_import_safety.py` - collection error because the test imported an unavailable optional `keyboard` package. The test was corrected to use synthetic trap modules.
+- Corrected `python -m py_compile tests/test_import_safety.py` - passed.
+- Corrected `python -m pytest -q tests/test_import_safety.py` - 1 passed.
+- `python -m pytest --collect-only -q` - 13 tests collected.
+- `python -m pytest -q` - 13 passed in 0.07 seconds.
+- External tests run: none.
+- External services contacted: none.
+- Production pipeline commands run: none.
+- Destructive operator scripts run: none.
 
-All audited risks remain open:
+## Remaining Phase 1 risks
 
-1. Single-threaded orchestration.
-2. Unsafe shared output ownership.
-3. Survey ID allocation race.
-4. SQLite write contention.
-5. Process-global mutable logger context.
-6. Broad retries that may repeat non-idempotent operations.
-7. Non-atomic checkpoint and state updates.
-8. Coarse pause and abort handling.
-9. Large-memory and file-descriptor pressure during WebODM uploads.
-10. Unbounded filesystem scanning, copying, and tile generation.
-11. Stale-stage ambiguity after forced reruns.
-12. Interactive quality gate blocking unattended execution.
-13. Test modules with external side effects during import.
+Phase 1 is not complete.
 
-See `SCALABILITY_AUDIT.md` for evidence, severity, relationships, and investigation status.
+- The default suite does not yet install a suite-wide network-deny or subprocess-deny fixture; current regression coverage proves the moved tools are import-safe.
+- Production configuration and service boundaries are not generally injectable, so broader pipeline component tests may require production-code seams. Those seams were not implemented in this task.
+- Credential isolation and production-path overlap checks are not yet enforced globally.
+- No external integration tests exist yet; the marker and default exclusion policy are configured but not exercised against a marked test.
+- Safe temporary database coverage is currently limited to the query operator tool, not repository migrations or `PipelineRepo`.
+- The cleanup tool's containment logic is tested without platform-dependent symlink creation; actual symlink/junction behavior remains an untested path.
+- The real pipeline operator script was intentionally not executed.
 
-## Next approved task
+## Next recommended task
 
-None yet. The next recommended task is a narrowly scoped Phase 1 investigation and plan to isolate test-import side effects. Production or persistent-data edits still require explicit approval under `AGENTS.md`.
-
-## Last validation performed
-
-- **Date:** 2026-07-16
-- **Validation type:** Static repository inspection and documentation scope validation.
-- **Commands:** Read-only file listing, targeted text searches, focused source reads, and Git status/diff inspection.
-- **Tests run:** None.
-- **External services contacted:** None.
-- **Production pipeline commands run:** None.
-- **Destructive commands run:** None.
-- **Validation limitation:** Runtime concurrency limits, WebODM API capabilities, network-share semantics, and production workload thresholds were not measured.
+Add a narrowly scoped pytest safety layer that denies unexpected network and subprocess access, clears credentials, and supplies temporary configuration roots by default. If that requires a production-code injection seam, document and request separate approval before changing production code.
