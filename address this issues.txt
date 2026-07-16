@@ -1,4 +1,4 @@
-- Alternative Workflow (to be implemented)
+- Alternative Workflow (to be implemented) - DONE
   before October 2026
 
   If ortho, T4 nadir

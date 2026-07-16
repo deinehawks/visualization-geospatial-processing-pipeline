@@ -420,10 +420,13 @@ def quality_gate_prompt(
         f"  {YELLOW}restart {restart_hint}{RESET}                   → Restart specific task",
         f"  {YELLOW}restart {restart_hint} <stage>{RESET}           → Restart from a stage",
         f"{MAGENTA}{_qg_line()}{RESET}",
-        f"  {GREY}Stages: dataset · opensfm (sfm) · openmvs (mvs){RESET}",
-        f"  {GREY}        odm_filterpoints · odm_meshing{RESET}",
-        f"  {GREY}        mvs_texturing (texturing) · odm_georeferencing{RESET}",
-        f"  {GREY}        odm_dem · odm_orthophoto{RESET}",
+        f"  {GREY}Stages (restart-from):{RESET}",
+        f"  {GREY}  dataset · opensfm (sfm) · openmvs (mvs){RESET}",
+        f"  {GREY}  odm_filterpoints (filterpoints/point_filtering){RESET}",
+        f"  {GREY}  odm_meshing (meshing) · mvs_texturing (texturing){RESET}",
+        f"  {GREY}  odm_georeferencing (georeferencing) · odm_dem (dem){RESET}",
+        f"  {GREY}  odm_orthophoto (orthophoto) · odm_report (report){RESET}",
+        f"  {GREY}  odm_postprocess (postprocess){RESET}",
         f"{MAGENTA}{_qg_line('═')}{RESET}",
     ]
 

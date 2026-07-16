@@ -669,18 +669,18 @@ class WebODMProcessor:
         self,
         project_id: int,
         task_id: str,
-        restart_from: str = "load_dataset",
+        restart_from: str = "dataset",
     ) -> dict:
         """
-        Restart an existing WebODM task from a processing stage WITHOUT re-uploading images.
+        Restart a WebODM task from *restart_from* without re-uploading images.
 
-        Common restart_from values (depends on WebODM version/build):
-        - "load_dataset"
-        - "structure_from_motion"
-        - "multi_view_stereo"
-        - "texturing"
+        Valid restart_from values: see shared.constants.WEBODM_RESTART_STAGES
+        for the full alias → internal name mapping.
 
-        Returns JSON response (if any).
+        Common values:
+            dataset | opensfm | openmvs | odm_filterpoints | odm_meshing
+            mvs_texturing | odm_georeferencing | odm_dem | odm_orthophoto
+            odm_report | odm_postprocess
         """
         self.logger.warning(
             f"Restarting WebODM task {task_id} from '{restart_from}'")

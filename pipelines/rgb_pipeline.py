@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List, Tuple
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
-
+from shared.constants import WEBODM_RESTART_STAGES, WEBODM_RESTART_STAGE_NAMES
 from shared.logging import get_logger
 from shared.db.repo import PipelineRepo
 from shared.stage_runner import StageRunner
@@ -2025,28 +2025,7 @@ class RGBPipeline(
                 "project_id": project_id,
             }
 
-        allowed_stages = {
-            # alias          : webodm internal name
-            "dataset": "dataset",
-            "load_dataset": "load_dataset",
-            "sfm": "opensfm",
-            "opensfm": "opensfm",
-            "structure_from_motion": "opensfm",
-            "openmvs": "openmvs",
-            "multi_view_stereo": "openmvs",
-            "filterpoints": "odm_filterpoints",
-            "odm_filterpoints": "odm_filterpoints",
-            "meshing": "odm_meshing",
-            "odm_meshing": "odm_meshing",
-            "texturing": "mvs_texturing",
-            "mvs_texturing": "mvs_texturing",
-            "georeferencing": "odm_georeferencing",
-            "odm_georeferencing": "odm_georeferencing",
-            "dem": "odm_dem",
-            "odm_dem": "odm_dem",
-            "orthophoto": "odm_orthophoto",
-            "odm_orthophoto": "odm_orthophoto",
-        }
+        allowed_stages = WEBODM_RESTART_STAGES
 
         def restart_and_wait(
             task_id_to_restart: str,
@@ -2305,7 +2284,7 @@ class RGBPipeline(
                     if stage_alias not in allowed_stages:
                         logger.warning(
                             f"Invalid stage '{stage_alias}'. "
-                            f"Valid stages: {', '.join(sorted(set(allowed_stages.values())))}"
+                            f"Valid stages: {', '.join(sorted(WEBODM_RESTART_STAGE_NAMES))}"
                         )
                         continue
 
