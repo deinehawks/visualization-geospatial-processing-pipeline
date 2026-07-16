@@ -28,12 +28,16 @@ class TrapModule(types.ModuleType):
     def __init__(self, name, action):
         super().__init__(name)
         self.action = action
+        self.__file__ = f"<synthetic-trap:{name}>"
+        self.__path__ = []
 
     def __getattr__(self, name):
         pytest.fail(f"Import attempted unsafe action: {self.action}")
 
 
 def test_tool_imports_have_no_runtime_or_external_side_effects(monkeypatch, tmp_path):
+    import_observation_dir = tmp_path / "import-observation"
+    import_observation_dir.mkdir()
     monkeypatch.setattr(sqlite3, "connect", fail("access SQLite"))
     monkeypatch.setattr(socket, "create_connection", fail("contact network"))
     monkeypatch.setattr(subprocess, "run", fail("call subprocess"))
@@ -61,4 +65,4 @@ def test_tool_imports_have_no_runtime_or_external_side_effects(monkeypatch, tmp_
     after = {path: path.stat().st_mtime_ns for path in TOOL_PATHS}
 
     assert after == before
-    assert list(tmp_path.iterdir()) == []
+    assert list(import_observation_dir.iterdir()) == []

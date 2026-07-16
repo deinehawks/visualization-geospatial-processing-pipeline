@@ -40,6 +40,10 @@ Default-discovered tests contain definitions and assertions only:
 | `tests/test_query_pipeline_db.py` | Temporary read-only SQLite query behavior |
 | `tests/test_reset_environment.py` | Temporary-root cleanup guards and allowed deletion set |
 | `tests/test_import_safety.py` | Import traps for runtime, external, interactive, deletion, and write side effects |
+| `tests/test_fixture_infrastructure.py` | Temporary path ownership, composability, small placeholders, and directory isolation |
+| `tests/test_temporary_database.py` | Current schema, independent records, handle releasability, and production database denial |
+| `tests/test_fake_webodm.py` | Deterministic IDs, ordered calls, failure injection, and network independence |
+| `tests/test_suite_safety_guards.py` | Network, subprocess, input, dotenv, keyboard, sensitive paths, and safe temporary operations |
 
 The former executable scripts now live outside discovery:
 
@@ -53,7 +57,21 @@ The former executable scripts now live outside discovery:
 
 On 2026-07-16, syntax checks passed, default collection found 13 tests, and the full default suite passed 13 tests. All database and deletion tests used pytest temporary directories. No external tests were run.
 
-The baseline is safer but Phase 1 remains in progress. Suite-wide network/subprocess denial, credential clearing, production-path guards, broader temporary configuration fixtures, and platform-specific symlink/junction checks remain to be implemented.
+The default suite now includes reusable temporary path/current-schema SQLite fixtures, a deterministic recording fake WebODM, credential/path isolation, and autouse denial of network, subprocess, input, keyboard, dotenv, production database, and common production-path access. Phase 1 remains in progress because production WebODM/configuration injection and explicit database connection ownership are still missing, and platform-specific symlink/junction checks remain unimplemented.
+
+### Shared test infrastructure
+
+`tests/conftest.py` provides:
+
+- pytest-owned application, data, logs, surveys, field-data, upload-cache, and checkpoint directories;
+- a structured `TemporaryPathLayout`;
+- sample survey and dataset directories with tiny placeholder image files;
+- a current-schema SQLite path, explicit-close connection fixture, and isolated database factory; and
+- suite-wide safety guards restored after every test by pytest's monkeypatch fixture.
+
+`tests/fakes/webodm.py` provides deterministic authentication/preflight, project and task creation, task lookup/status/wait behavior, download request recording, ordered call inspection, and configurable transient or permanent failures. It imports no network client and does not read image contents.
+
+The fake is currently independent: `RGBPipeline.stage_webodm()`, `run_webodm_fallback_task()`, and `stage_quality_gate()` construct `WebODMProcessor` directly. A production injection seam is intentionally deferred.
 
 ## Desired test architecture
 
@@ -174,6 +192,12 @@ Phase 1 should establish these controls before broad test execution:
 8. **Small-data budget:** fixtures and generated outputs have enforced size/file-count limits.
 9. **Explicit external markers:** external tests require both selection and environment approval.
 10. **Sentinel validation:** safety tests place sentinels in representative non-test paths and verify they remain unchanged.
+
+Implemented controls are deliberately narrow. Common `Path`, `open`, and cleanup access to captured production roots is rejected, while normal reads outside those data roots and all pytest-owned temporary operations remain available. Direct patching of every `os` filesystem primitive is avoided to preserve Python imports and pytest internals.
+
+## Latest validation
+
+On 2026-07-16, the pre-change default suite passed 13 tests. Final focused validation passed 3 fixture, 5 database, 5 fake WebODM, 8 safety-guard, and 1 import-safety tests. Default collection found 34 tests, the full suite passed 34 tests in 0.23 seconds, changed Python files compiled, and `git diff --check` passed with line-ending conversion warnings only. No external marker, network service, subprocess, production database, production survey directory, or operator tool was used.
 
 ## Missing coverage inventory
 
