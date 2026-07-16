@@ -375,64 +375,50 @@ def quality_gate_prompt(
     task2: dict,
     webodm_url: str = "",
     task4: dict | None = None,
-    fallback_review: bool = False,
+    fallback_review: bool = False,   # kept for compat, no longer used
 ) -> str:
-    """
-    Display the quality gate prompt and return the operator's input.
+    """Display the quality gate prompt and return the operator's input."""
 
-    When fallback_review=True, the prompt shows a banner indicating that
-    the fallback task (task4) has completed and needs review before the
-    pipeline proceeds to QGIS. The operator must explicitly approve or
-    reject the fallback output — the pipeline never auto-approves it.
-    """
-    t1_label = f"{task1.get('name', '—')}  (id={task1.get('id', '—')})"
-    t2_label = (
-        f"{task2.get('name', '—')}  (id={task2.get('id', '—')})"
-        if task2
-        else "—"
-    )
-    t4_label = (
-        f"{task4.get('name', '—')}  (id={task4.get('id', '—')})"
-        if task4
-        else None
-    )
+    def task_label(t: dict) -> str:
+        name = t.get("name") or "—"
+        tid  = t.get("id")   or "—"
+        return f"{name}  (id={tid})"
+
     dashboard = f"{webodm_url}/dashboard/{project_id}" if webodm_url else "—"
 
     panel = [
         f"{MAGENTA}{BOLD}{_qg_line('═')}{RESET}",
-    ]
-
-    if fallback_review:
-        panel += [
-            f"{YELLOW}{BOLD}  FALLBACK QUALITY GATE  —  Review task4 output before proceeding{RESET}",
-            f"{YELLOW}  Check the WebODM dashboard for distortions before typing 'yes'.{RESET}",
-        ]
-    else:
-        panel.append(f"{MAGENTA}{BOLD}  QUALITY GATE{RESET}")
-
-    panel += [
+        f"{MAGENTA}{BOLD}  QUALITY GATE{RESET}",
         f"{MAGENTA}{_qg_line()}{RESET}",
         f"  Survey     : {CYAN}{survey_id}{RESET}",
         f"  Project ID : {CYAN}{project_id}{RESET}",
-        f"  Task 1     : {WHITE}{t1_label}{RESET}",
-        f"  Task 2     : {WHITE}{t2_label}{RESET}",
     ]
 
-    if t4_label:
-        panel.append(
-            f"  Task 4     : {YELLOW}{t4_label}{RESET}"
-            + (f"  {BOLD}← review this{RESET}" if fallback_review else "")
-        )
+    # Only show tasks that actually ran
+    if task1 and task1.get("id"):
+        panel.append(f"  Task 1     : {WHITE}{task_label(task1)}{RESET}")
+    if task2 and task2.get("id"):
+        panel.append(f"  Task 2     : {WHITE}{task_label(task2)}{RESET}")
+    if task4 and task4.get("id"):
+        panel.append(f"  Task 4     : {YELLOW}{task_label(task4)}{RESET}")
+
+    # Show restart target hint based on what ran
+    if task4 and task4.get("id"):
+        restart_hint = "t4"
+    elif task2 and task2.get("id"):
+        restart_hint = "t2"
+    else:
+        restart_hint = "t1"
 
     panel += [
         f"  Dashboard  : {GREY}{dashboard}{RESET}",
         f"{MAGENTA}{_qg_line()}{RESET}",
         f"  {BOLD}Commands{RESET}",
-        f"  {YELLOW}yes / y{RESET}                → Approve and proceed to QGIS",
-        f"  {YELLOW}fail / f{RESET}               → Fail the pipeline",
-        f"  {YELLOW}restart{RESET}                → Restart QA task (dataset)",
-        f"  {YELLOW}restart t1|t2{RESET}          → Restart specific task",
-        f"  {YELLOW}restart t1|t2 <stage>{RESET}  → Restart from a stage",
+        f"  {YELLOW}yes / y{RESET}                       → Approve and proceed to QGIS",
+        f"  {YELLOW}fail / f{RESET}                      → Fail the pipeline",
+        f"  {YELLOW}restart{RESET}                       → Restart primary task from dataset",
+        f"  {YELLOW}restart {restart_hint}{RESET}                   → Restart specific task",
+        f"  {YELLOW}restart {restart_hint} <stage>{RESET}           → Restart from a stage",
         f"{MAGENTA}{_qg_line()}{RESET}",
         f"  {GREY}Stages: dataset · opensfm (sfm) · openmvs (mvs){RESET}",
         f"  {GREY}        odm_filterpoints · odm_meshing{RESET}",
@@ -447,43 +433,3 @@ def quality_gate_prompt(
     sys.stdout.write(f"\n{BOLD}  Your decision:{RESET} ")
     sys.stdout.flush()
     return input().strip().lower()
-
-
-def _apply_layout_variables(ctx: ExportContext) -> None:
-    """
-    Populate all QGIS Layout Labels using Layout Item IDs.
-
-    Example:
-        map_title -> "BARBCO Boundary Map"
-        map_location -> "Davao City"
-    """
-
-    from qgis.core import QgsLayoutItemLabel
-
-    if not ctx.layout_variables:
-        return
-
-    print("\n===== APPLYING LAYOUT VARIABLES =====")
-
-    for item_id, value in ctx.layout_variables.items():
-
-        item = ctx.layout.itemById(item_id)
-
-        if item is None:
-            print(f"[WARN] '{item_id}' not found in template.")
-            continue
-
-        if not isinstance(item, QgsLayoutItemLabel):
-            print(f"[WARN] '{item_id}' is not a label.")
-            continue
-
-        old = item.text()
-
-        item.setText(str(value))
-        item.refresh()
-
-        print(f"{item_id}")
-        print(f"    OLD: {old}")
-        print(f"    NEW: {value}")
-
-    print("====================================\n")

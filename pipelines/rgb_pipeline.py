@@ -63,11 +63,10 @@ class RGBPipeline(
         task_name_overrides: Optional[Dict[str, str]] = None,
         export_name_overrides: Optional[Dict[str, str]] = None,
         crossrun_enabled_override: Optional[bool] = None,
-        use_year_subdir_override: Optional[bool] = None,
-        skip_task1_webodm: bool = False, # TEMPORARY
-        skip_task2_webodm: bool = False, # TEMPORARY
-        task1_bounded: bool = False, # TEMPORARY
-        force_segregation: bool = False, # TEMPORARY
+        skip_task1_webodm: bool = False,
+        task1_bounded: bool = False,
+        force_segregation: bool = False,
+        webodm_mode: str = "task4",   # "task2" | "task4" | "both"
     ):
         self.base_dir = Path(base_dir)
         self.config = config
@@ -85,10 +84,14 @@ class RGBPipeline(
         self.crossrun_enabled_override = crossrun_enabled_override
         self.use_year_subdir_override = use_year_subdir_override
 
-        self.skip_task1_webodm = skip_task1_webodm # TEMPORARY
-        self.skip_task2_webodm = skip_task2_webodm # TEMPORARY
-        self.task1_bounded = task1_bounded # TEMPORARY
-        self.force_segregation = force_segregation # TEMPORARY
+        self.skip_task1_webodm = skip_task1_webodm
+        self.task1_bounded     = task1_bounded
+        self.force_segregation = force_segregation
+        self.webodm_mode       = webodm_mode.strip().lower()
+
+        # Derive task skip flags from webodm_mode
+        self.skip_task2_webodm = self.webodm_mode == "task4"
+        self.skip_task4_webodm = self.webodm_mode == "task2"
         self.control = PipelineControl(
             self.base_dir,
             self.run_id,
@@ -1309,6 +1312,30 @@ class RGBPipeline(
                             "All-assets zip was not downloaded (endpoint missing or failed)."
                         )
 
+            # ---------------- TASK 4 (primary, not fallback) ----------------
+            skip_task4 = bool(getattr(self, "skip_task4_webodm", True))
+
+            if not skip_task4:
+                logger.info(
+                    "Running Task 4 as primary task "
+                    f"(webodm_mode={getattr(self, 'webodm_mode', 'both')})."
+                )
+                try:
+                    t4_result = self.run_webodm_fallback_task(
+                        task_key="task4",
+                        fallback_reason="primary_task4",
+                    )
+                    result["task4"] = t4_result.get("task4")
+                    result["downloads"]["task4"] = t4_result.get("downloads") or {}
+                    result["selected_webodm_task"] = t4_result.get("selected_webodm_task")
+                    result["selected_orthomosaic"] = t4_result.get("selected_orthomosaic")
+                except RuntimeError as e:
+                    if str(e) in ("__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"):
+                        raise
+                    logger.exception("Task 4 primary run failed.")
+                    result["task4_failed"] = True
+                    result["task4_error"] = str(e)
+
             self._clear_webodm_checkpoint()
             return result
 
@@ -2020,11 +2047,6 @@ class RGBPipeline(
             "odm_orthophoto": "odm_orthophoto",
         }
 
-        def _pick_default_task() -> tuple[str, str]:
-            if task2.get("id"):
-                return str(task2["id"]), str(task2.get("name") or "task2")
-            return str(task1["id"]), str(task1.get("name") or "task1")
-
         def restart_and_wait(
             task_id_to_restart: str,
             task_name_to_restart: str,
@@ -2074,7 +2096,10 @@ class RGBPipeline(
                 "status": task_info.get("status"),
             }
 
-            if task2.get("id") and str(task2.get("id")) == str(task_id_to_restart):
+            if task4.get("id") and str(task4.get("id")) == str(task_id_to_restart):
+                task4.update(updated_task_state)
+                web["task4"] = task4
+            elif task2.get("id") and str(task2.get("id")) == str(task_id_to_restart):
                 task2.update(updated_task_state)
                 web["task2"] = task2
             elif task1.get("id") and str(task1.get("id")) == str(task_id_to_restart):
@@ -2094,8 +2119,6 @@ class RGBPipeline(
             task1 = web.get("task1") or {}
             task2 = web.get("task2") or {}
             task4 = web.get("task4") or {}
-
-            default_task_id, default_task_name = _pick_default_task()
 
             raw = quality_gate_prompt(
                 logger=logger,
@@ -2167,114 +2190,137 @@ class RGBPipeline(
                     "project_id": project_id,
                 }
 
-            if raw in ("fallback", "task4", "fallback_task"):
-                fallback_task = self._webodm_fallback_task_key()
+            # ── Interactive loop ─────────────────────────────────────────
+            while True:
+                web = self.state.get("webodm") or {}
+                task1 = web.get("task1") or {}
+                task2 = web.get("task2") or {}
+                task4 = web.get("task4") or {}
+
+                raw = quality_gate_prompt(
+                    logger=logger,
+                    survey_id=survey_id,
+                    project_id=int(project_id),
+                    task1=task1,
+                    task2=task2 if task2.get("id") else {},
+                    task4=task4 if task4.get("id") else None,
+                    webodm_url=self.config.get("webodm", {}).get("url", ""),
+                )
+
+                if raw in ("yes", "y"):
+                    logger.info("Quality gate PASSED by user.")
+
+                    # Select the best available orthomosaic for QGIS.
+                    # Priority: task4 > task2 (task4 is always the bounded+denser run).
+                    selected = None
+                    try:
+                        if task4.get("id"):
+                            task4_flag = self._webodm_task_flag(
+                                "task4", default_boundary_mode="b",
+                            )
+                            selected = self._select_existing_task_orthomosaic(
+                                task_key="task4",
+                                flag=task4_flag,
+                                boundary_used=True,
+                                fallback_used=False,
+                            )
+                        elif task2.get("id"):
+                            task2_flag = self._webodm_task_flag(
+                                "task2", default_boundary_mode="b",
+                            )
+                            selected = self._select_existing_task_orthomosaic(
+                                task_key="task2",
+                                flag=task2_flag,
+                                boundary_used=True,
+                                fallback_used=False,
+                            )
+                    except Exception as e:
+                        logger.warning(f"Could not select orthomosaic after quality pass: {e}")
+                        selected = None
+
+                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+
+                    return {
+                        "passed": True,
+                        "restarts": restarts,
+                        "project_id": project_id,
+                        "selected_webodm_task": self.state.get("selected_webodm_task"),
+                        "selected_orthomosaic": selected,
+                    }
+
+                if raw in ("fail", "f"):
+                    logger.warning("Quality gate FAILED by user.")
+                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
+                    return {
+                        "passed": False,
+                        "restarts": restarts,
+                        "project_id": project_id,
+                    }
+
+                if raw == "restart":
+                    # Pick the best task to restart — task4 first, else task2
+                    if task4.get("id"):
+                        default_task_id   = str(task4["id"])
+                        default_task_name = str(task4.get("name") or "task4")
+                    elif task2.get("id"):
+                        default_task_id   = str(task2["id"])
+                        default_task_name = str(task2.get("name") or "task2")
+                    else:
+                        default_task_id   = str(task1["id"])
+                        default_task_name = str(task1.get("name") or "task1")
+
+                    res = restart_and_wait(default_task_id, default_task_name, "dataset")
+                    if res.get("passed") is False:
+                        return res
+                    continue
+
+                if raw.startswith("restart "):
+                    parts = raw.split()
+
+                    if len(parts) not in (2, 3):
+                        logger.warning(
+                            "Invalid format. Use: restart | restart t1|t2|t4 | restart t1|t2|t4 <stage>"
+                        )
+                        continue
+
+                    target     = parts[1]
+                    stage_alias = parts[2] if len(parts) == 3 else "load_dataset"
+
+                    target_map = {
+                        "t1": task1, "task1": task1,
+                        "t2": task2, "task2": task2,
+                        "t4": task4, "task4": task4,
+                    }
+
+                    chosen = target_map.get(target)
+                    if chosen is None:
+                        logger.warning("Invalid target. Use t1, t2, or t4.")
+                        continue
+
+                    if not chosen or not chosen.get("id"):
+                        logger.warning(f"{target} does not exist for this run.")
+                        continue
+
+                    if stage_alias not in allowed_stages:
+                        logger.warning(
+                            f"Invalid stage '{stage_alias}'. "
+                            f"Valid stages: {', '.join(sorted(set(allowed_stages.values())))}"
+                        )
+                        continue
+
+                    res = restart_and_wait(
+                        str(chosen["id"]),
+                        str(chosen.get("name") or target),
+                        allowed_stages[stage_alias],
+                    )
+                    if res.get("passed") is False:
+                        return res
+                    continue
 
                 logger.warning(
-                    f"User requested fallback WebODM workflow: {fallback_task}"
+                    "Unrecognised input. "
+                    "Use: yes | fail | restart | restart t1|t2|t4 [stage]"
                 )
-
-                try:
-                    fallback_result = self.run_webodm_fallback_task(
-                        task_key=fallback_task,
-                        fallback_reason=f"quality_gate_requested_{fallback_task}_fallback",
-                    )
-                except RuntimeError as e:
-                    if str(e) in ("__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"):
-                        raise  # let run() handle pause/abort properly, don't treat as failure
-                    logger.exception(f"{fallback_task} fallback failed.")
-                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-                    return {
-                        "passed": False,
-                        "restarts": restarts,
-                        "project_id": project_id,
-                        "fallback_task": fallback_task,
-                        "fallback_failed": True,
-                    }
-                except Exception:
-                    logger.exception(f"{fallback_task} fallback failed.")
-                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-                    return {
-                        "passed": False,
-                        "restarts": restarts,
-                        "project_id": project_id,
-                        "fallback_task": fallback_task,
-                        "fallback_failed": True,
-                    }
-
-                fallback_state = fallback_result.get(fallback_task) or {}
-
-                if not fallback_state.get("success"):
-                    logger.warning(f"{fallback_task} fallback ran but did not succeed.")
-                    self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
-                    return {
-                        "passed": False,
-                        "restarts": restarts,
-                        "project_id": project_id,
-                        "fallback_task": fallback_task,
-                        fallback_task: fallback_state,
-                    }
-
-                # Fallback completed — but don't auto-approve. Loop back into
-                # the quality gate prompt so the operator can review the
-                # fallback output in WebODM for distortions before proceeding.
-                logger.info(
-                    f"{fallback_task} fallback completed. "
-                    f"Returning to quality gate for review — "
-                    f"check the WebODM dashboard before approving."
-                )
-                _fallback_reviewed = True
-                _fallback_task_state = fallback_state
-
-            if raw == "restart":
-                res = restart_and_wait(
-                    default_task_id, default_task_name, "dataset")
-                if res.get("passed") is False:
-                    return res
-                continue
-
-            if raw.startswith("restart "):
-                parts = raw.split()
-
-                if len(parts) not in (2, 3):
-                    logger.warning(
-                        "Invalid format. Use: restart | restart t1|t2 | restart t1|t2 <stage>")
-                    continue
-
-                target = parts[1]
-                stage = parts[2] if len(parts) == 3 else "load_dataset"
-
-                if target not in ("t1", "t2"):
-                    logger.warning("Invalid target. Use t1 or t2.")
-                    continue
-
-                if stage not in allowed_stages:
-                    logger.warning(
-                        f"Invalid stage '{stage}'. "
-                        f"Valid stages: {', '.join(sorted(set(allowed_stages.values())))}"
-                    )
-                    continue
-
-                chosen = task1 if target == "t1" else task2
-                if not chosen or not chosen.get("id"):
-                    logger.warning(f"{target} does not exist for this run.")
-                    continue
-
-                webodm_stage = allowed_stages[stage]
-
-                res = restart_and_wait(
-                    str(chosen["id"]),
-                    str(chosen.get("name") or target),
-                    webodm_stage,
-                )
-
-                if res.get("passed") is False:
-                    return res
-                continue
-
-            logger.warning(
-                "Unrecognised input. Use: yes | fail | fallback | restart | restart t1|t2 [stage]"
-            )
             
     # RUN
     def run(
