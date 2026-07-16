@@ -12,5 +12,7 @@
   problem: 
    When processing data in separate terminals, the Pause and Abort functions affect all terminals simultaneously
 
+- please fix the abort and pause
+
 
 tile generation should be 11-25

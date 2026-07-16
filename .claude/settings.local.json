@@ -1,0 +1,8 @@
+{
+  "spinnerTipsEnabled": true,
+  "permissions": {
+    "allow": [
+      "Bash(sqlite3:*)"
+    ]
+  }
+}

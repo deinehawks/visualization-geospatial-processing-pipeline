@@ -1,12 +1,14 @@
 
 
 Queue:
-python main.py --survey "BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30" --year 2026 
+
 
 Running: 
 
-Run Later:
+ 
 
+Run Later:
+python main.py --survey "TLW-001_6.3Ha_A2S_80m_85f75s_5mps" --year 2026 --task4 --resume --run-id 25dc5134-1631-464b-ab47-8efc2b7c574a --force-stage qgis
 
 Done:
 python main.py --survey "BCO-107_5Ha_M3C_60m_85f75s_5mps" --year 2026 --resume --run-id 6827b4ea-1649-4bc2-8a6e-c6b45ff19ae5
