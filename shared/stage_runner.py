@@ -115,7 +115,9 @@ class StageRunner:
                     self.run_id, stage_name)
                 if output is not None:
                     state[output_key] = output
+                    set_stage_context(self.logger, stage_name)
                     log_output_loaded(self.logger, output_key)
+                    set_stage_context(self.logger, "")
 
             return self.repo.get_latest_stage_output(self.run_id, stage_name)
 

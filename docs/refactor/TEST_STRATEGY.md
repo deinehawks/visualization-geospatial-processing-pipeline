@@ -402,4 +402,30 @@ Coverage now proves:
 - two default `RGBPipeline` constructions in one process own separate `rgb.pipeline` handlers while preserving the logical `rgb.pipeline` record name and existing log parser column shape;
 - generated isolated `rgb.pipeline` output remains readable by `query_survey_stats.parse_log_events()` when filtering by run ID.
 
-The tests use temporary log paths, temporary RGBPipeline construction, fake WebODM, and explicit logger cleanup. They do not run pipeline stages or external tools. Explicit threaded/interleaved logging coverage is intentionally deferred until concurrency becomes part of the production execution design; adding it now would duplicate isolation guarantees already covered without matching a current runtime path.
+The tests use temporary log paths, temporary RGBPipeline construction, fake WebODM, and explicit logger cleanup. They do not run pipeline stages or external tools. Explicit threaded/interleaved logging coverage is intentionally deferred until concurrency becomes part of the production execution design; adding it now would duplicate isolation guarantees already covered without matching a current runtime path. Direct `rgb.*` logger bypasses have been inventoried: `rgb.source_resolver` and `rgb.map_export` are outside the six owned RGBPipeline run loggers and do not currently need isolation fixes, but they remain candidates for future run-context observability coverage. ADR-013 defines the next logging test target: parseable `event=<name> key=value ...` lifecycle records inside the existing text log format.
+## Phase 2 observability contract test target
+
+ADR-013 keeps the existing `time | level | logger | run_id | stage | message` log format and standardizes parseable lifecycle messages as `event=<name> key=value ...` records.
+
+Future Phase 2 implementation tests should verify:
+
+- generated parseable events retain the logical logger name, run ID column, and stage column;
+- required fields are present for run, stage, retry, failure, and external-boundary events;
+- failure records bound error messages and preserve exception type information;
+- human-readable banners can coexist with parseable lifecycle events; and
+- `query_survey_stats.py` can read new explicit events while retaining compatibility with historical free-form logs.
+
+These tests must continue to use pytest-owned temporary log files and fake external boundaries. No database schema or persistent event journal is expected during Phase 2.
+## StageRunner lifecycle event coverage
+
+Added on 2026-07-17, StageRunner orchestration coverage now verifies the first ADR-013 parseable lifecycle events. The focused test uses a temporary owned log file and a real `StageRunner` over temporary SQLite to exercise retry, success, skip, and saved-output loading.
+
+Coverage proves that generated StageRunner lifecycle events:
+
+- preserve the existing log columns and logical logger name;
+- carry the run ID in the existing `run_id` column;
+- carry the stage name in the existing `stage` column;
+- emit parseable `event=stage_started`, `event=stage_retrying`, `event=stage_completed`, `event=stage_skipped`, and `event=stage_output_loaded` messages; and
+- quote error messages containing spaces while preserving `error_type`, attempt count, max attempts, and retry delay.
+
+This remains file-log based and does not introduce JSON logs, database events, migrations, external services, or threaded/concurrent execution tests.

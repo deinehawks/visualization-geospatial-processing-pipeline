@@ -45,6 +45,7 @@ These entries identify required decisions without selecting final architectures.
 | ADR-010 | 2026-07-16 | Pending | WebODM uploads currently open all files and use one multipart request. | Pending. | API-supported chunk/resume; bounded descriptor streaming; staged archive; admission-limited current protocol. | Constrained by WebODM API compatibility and task semantics. | R09; `create_task_with_images` |
 | ADR-011 | 2026-07-16 | Pending | Job scheduling topology determines state-store and lock requirements. | Pending. | Single-host multi-process; single-host service with workers; multi-host durable queue; retain manual independent CLI runs. | Affects dependencies, SQLite viability, deployment, and operations. | R01, R04; Phase 12 |
 | ADR-012 | 2026-07-16 | Pending | Quality approval must support unattended execution without losing manual oversight. | Pending. | Persisted manual approval; rules-based automatic gate; external API/UI; hybrid shadow mode. | Affects authorization, auditability, worker capacity, and output quality risk. | R12; `stage_quality_gate`; Phase 13 |
+| ADR-013 | 2026-07-17 | Accepted | Phase 2 needs consistent machine-readable run/stage observability without a schema change. | Keep existing text log columns and standardize lifecycle messages as key=value event records. | JSON logs; database event journal; free-form human-only logs. | Preserves parser compatibility and avoids persistent migration; future DB refactor can promote the same event model into state tables. | Phase 2; `shared/logging.py`; `shared/stage_runner.py`; `pipelines/rgb_pipeline.py`; `query_survey_stats.py` |
 
 ## Accepted decisions
 
@@ -71,7 +72,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001 and ADR-002 are accepted. ADR-003 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, and ADR-013 are accepted. ADR-003 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 
 ### ADR-002 - Isolate logger context and handler ownership per run
@@ -100,3 +101,36 @@ ADR-001 and ADR-002 are accepted. ADR-003 through ADR-012 remain unresolved and 
   - Tests that create owned loggers should close and remove their handlers explicitly to avoid process-global logging registry residue.
   - Rollback is straightforward: revert `shared/logging.py` and `tests/test_logging_context_ownership.py`; no schema or data migration is involved.
 - **Related files or issues:** R05; `shared/logging.py`; `query_survey_stats.py`; `tests/test_logging_context_ownership.py`; Phase 2.
+
+### ADR-013 - Standardize Phase 2 run/stage observability events
+
+- **Decision ID:** ADR-013
+- **Date:** 2026-07-17
+- **Status:** Accepted
+- **Context:**
+  - ADR-002 fixed logger ownership and context isolation, but Phase 2 still needs a stable observability contract before adding more log lines or helpers.
+  - `query_survey_stats.py` and operators currently rely on human-readable text logs using `time | level | logger | run_id | stage | message`.
+  - Later phases will need richer state and database semantics, but Phase 2 must avoid schema changes and persistent migrations.
+- **Decision:**
+  - Preserve the existing text log columns and logical logger names.
+  - Lifecycle and diagnostic messages that are intended for parsing should use a predictable `event=<name> key=value ...` message convention inside the existing message field.
+  - Required common fields for parseable events are `event`, `run_id` in the existing column, and `stage` in the existing column when the event is stage-scoped.
+  - Include `survey_id` when known, `attempt` when retry or attempt semantics are involved, `elapsed_seconds` for completed or failed work, and `error_type` plus a bounded `error_message` for failures.
+  - External-effect events should include stable identifiers without secrets: WebODM project/task IDs and labels, subprocess/tool names, return codes, selected task labels, and bounded artifact counts where available.
+  - Human banners and progress lines may remain free-form, but they must not be the only source for required lifecycle/failure facts once this contract is implemented.
+  - Do not log credentials, tokens, private URLs, unbounded paths, or large payloads.
+- **Event vocabulary for Phase 2 implementation:**
+  - Run lifecycle: `run_started`, `run_completed`, `run_failed`, `run_paused`, `run_aborted`, `run_canceled`.
+  - Stage lifecycle: `stage_started`, `stage_skipped`, `stage_completed`, `stage_failed`, `stage_retrying`, `stage_canceled`, `stage_stale`.
+  - State/artifact diagnostics: `stage_output_loaded`, `checkpoint_saved`, `checkpoint_loaded`, `artifact_selected`, `artifact_published` where those actions are already present and safe to observe.
+  - External boundaries: `webodm_project_created`, `webodm_task_created`, `webodm_task_status`, `webodm_download_started`, `webodm_download_completed`, `qgis_command_started`, `qgis_command_completed`, `qgis_command_failed`.
+- **Alternatives considered:**
+  - JSON logs: stronger structure, but a larger compatibility shift for existing operators and parser tooling.
+  - Database event journal: likely valuable in a future DB/state phase, but it requires schema design, migration, rollback, and historical compatibility work outside Phase 2.
+  - Free-form human logs only: lowest implementation cost, but insufficient for diagnostics, parser stability, and later concurrency/recovery phases.
+- **Consequences:**
+  - Phase 2 can add small logging helpers and tests against a stable vocabulary without changing the log-file format or database schema.
+  - `query_survey_stats.py` can evolve incrementally to prefer explicit `event=` records while retaining fallback regexes for historical logs.
+  - The future database/state refactor can promote this event vocabulary into durable attempt/state tables instead of inventing a second model.
+  - Rollback is documentation-only until implementation begins; future implementation rollback should remove added helper calls without data migration.
+- **Related files or issues:** Phase 2; `shared/logging.py`; `shared/stage_runner.py`; `pipelines/rgb_pipeline.py`; `query_survey_stats.py`; future ADRs for database/state phases.

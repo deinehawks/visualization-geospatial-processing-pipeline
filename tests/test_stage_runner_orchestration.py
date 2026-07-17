@@ -4,6 +4,7 @@ import sqlite3
 import pytest
 
 from shared.db.repo import PipelineRepo
+from shared.logging import get_logger
 from shared.stage_runner import StageRunner
 from tests.fakes import FakeWebODM, PermanentWebODMError
 
@@ -32,6 +33,16 @@ def build_runner(database_path):
     repo = PipelineRepo(database_path)
     logger = logging.getLogger("tests.stage_runner_orchestration")
     return repo, StageRunner(repo, RUN_ID, logger)
+
+
+
+def cleanup_logger(logger):
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    logger.filters.clear()
+    if hasattr(logger, "_configured"):
+        delattr(logger, "_configured")
 
 
 def test_stage_runner_records_successful_fake_webodm_orchestration(
@@ -237,3 +248,61 @@ def test_stage_runner_preserves_webodm_ui_cancellation_translation(
     stage = read_stage(temporary_path_layout.database_path)
     assert stage["status"] == "failed"
     assert stage["error_message"] == "Canceled in WebODM UI"
+
+def test_stage_runner_emits_parseable_lifecycle_events(
+    temporary_path_layout,
+):
+    log_path = temporary_path_layout.logs_dir / "stage-runner-events.log"
+    logger = get_logger(
+        "tests.stage_runner_events",
+        log_path,
+        to_console=False,
+        run_id=RUN_ID,
+    )
+    repo = PipelineRepo(temporary_path_layout.database_path)
+    runner = StageRunner(repo, RUN_ID, logger)
+    attempts = {"count": 0}
+    state = {}
+
+    def flaky_stage():
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise ValueError("first failure with spaces")
+        return {"ok": True}
+
+    try:
+        assert runner.run(
+            STAGE_NAME,
+            flaky_stage,
+            output_key="probe_output",
+            state=state,
+            retry_attempts=2,
+            retry_delay_seconds=0,
+        ) == {"ok": True}
+
+        skipped_state = {}
+        assert runner.run(
+            STAGE_NAME,
+            lambda: pytest.fail("completed stage should be skipped"),
+            output_key="probe_output",
+            state=skipped_state,
+            retry_attempts=1,
+            retry_delay_seconds=0,
+        ) == {"ok": True}
+
+        content = log_path.read_text(encoding="utf-8")
+        assert (
+            f"tests.stage_runner_events | {RUN_ID} | {STAGE_NAME} "
+            "| event=stage_started"
+        ) in content
+        assert (
+            "event=stage_retrying attempt=1 max_attempts=2 "
+            "retry_delay_seconds=0 error_type=ValueError "
+            'error_message="first failure with spaces"'
+        ) in content
+        assert "event=stage_completed elapsed_seconds=" in content
+        assert "event=stage_skipped reason=already_completed" in content
+        assert "event=stage_output_loaded output_key=probe_output" in content
+        assert skipped_state["probe_output"] == {"ok": True}
+    finally:
+        cleanup_logger(logger)

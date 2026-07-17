@@ -5,9 +5,9 @@
 - **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
 - **Current phase:** Phase 2 - Logging and observability
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** ADR-002 parser compatibility coverage after logger isolation
+- **Current task:** ADR-013 StageRunner lifecycle event implementation
 - **Production code changed:** Yes - shared/logging.py for ADR-002 logger isolation
-- **Next recommended task:** Inventory direct logging.getLogger("rgb.*") callers and define the next observability contract without adding redundant concurrency tests
+- **Next recommended task:** Extend parseable lifecycle coverage to RGBPipeline run-level start/completion/failure logs
 
 ## Completed tasks
 
@@ -558,12 +558,147 @@ No production code, database schema, migration, pipeline stage behavior, retry b
 ### Validation
 
 - `python -m py_compile tests\test_logging_context_ownership.py` - passed.
-- `python -m pytest -q tests\test_logging_context_ownership.py` - 4 passed in 0.16 seconds.`r`n- `python -m pytest --collect-only -q` - 52 tests collected in 0.06 seconds.`r`n- `python -m pytest -q` - 52 passed in 0.87 seconds.`r`n- `git diff --check` - passed; Git reported an LF-to-CRLF working-tree warning for `docs/refactor/CURRENT_STATUS.md`.
+- python -m pytest -q tests\test_logging_context_ownership.py - 4 passed in 0.16 seconds.
+- python -m pytest --collect-only -q - 52 tests collected in 0.06 seconds.
+- python -m pytest -q - 52 passed in 0.87 seconds.
+- git diff --check - passed; Git reported an LF-to-CRLF working-tree warning for docs/refactor/CURRENT_STATUS.md.
 
 No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
 
 ### Remaining Phase 2 risks
 
 - Explicit threaded/interleaved logging behavior remains untested and should be added only when concurrency becomes part of the production design.
-- Direct users of `logging.getLogger("rgb.*")` still bypass `get_logger()` ownership and should be inventoried before broadening observability work.
+- Direct users of `logging.getLogger("rgb.*")` have been inventoried. They are outside the owned RGBPipeline run logger set, but they do not carry run context or owned file destinations.
 - Handler lifecycle in long-running worker processes still needs a later ownership/cleanup policy beyond test cleanup helpers.
+
+## Logging ownership bypass inventory
+
+Date: 2026-07-17.
+
+Inventoried direct `logging.getLogger()` usage after ADR-002 to check whether any current `rgb.*` callers bypass the new owned logger path used by `RGBPipeline` run loggers.
+
+### Findings
+
+- `pipelines/rgb_pipeline.py` uses `shared.logging.get_logger()` for the six owned run loggers: `rgb.pipeline`, `rgb.data_segregation`, `rgb.cross_run_filter`, `rgb.kml`, `rgb.webodm`, and `rgb.qgis`.
+- `main.py` uses `logging.getLogger("rgb.source_resolver")` before `RGBPipeline` construction and passes it to source dataset resolution. This logger is not one of the six owned per-run file loggers and does not currently carry run context.
+- `modules/map_export/orthomosaic_finder.py` and `modules/map_export/survey_manifest.py` use module-level `logging.getLogger("rgb.map_export")`. These utilities are outside RGBPipeline run orchestration and do not currently write parser-compatible per-run logs.
+- `shared/logging.py` uses `logging.getLogger(logger_name)` internally to create the concrete owned logger name; this is intended ADR-002 behavior.
+- Non-`rgb.*` utility scripts (`check_perms.py`, `cleanup_task4.py`, `pause_run.py`) use conventional loggers and remain outside this per-run logger ownership contract. Some of these scripts perform external or operational actions and must remain outside default test/import paths.
+
+### Assessment
+
+No immediate production logging change is required from this inventory. The direct `rgb.*` bypasses are not sharing the six RGBPipeline run logger names, so they do not reintroduce the handler/run ID/stage leakage fixed by ADR-002. Their remaining limitation is observability completeness: source resolution and map export logs are not yet tied to a pipeline run ID, stage name, or parser-owned log file.
+
+Threaded/interleaved logger coverage remains intentionally deferred until concurrency becomes part of the production execution design.
+
+### Files modified
+
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No production code, tests, database schema, migration, pipeline stage behavior, retry behavior, checkpoint behavior, dependency list, external-service behavior, or operator workflow changed.
+
+### Validation
+
+- `rg -n "logging\.getLogger|getLogger\(|get_logger\(" .` - completed for inventory.
+- `git diff --check` - passed; Git reported an LF-to-CRLF working-tree warning for `docs/refactor/CURRENT_STATUS.md`.
+
+### Recommended next Phase 2 task
+
+Define the next observability contract before adding more implementation: decide which run/stage lifecycle events must be machine-readable in logs, which identifiers are mandatory (`run_id`, `survey_id`, `stage`, attempt, task/project IDs), and whether the contract stays log-line based or introduces structured event helpers around the existing logger.
+
+## ADR-013 run/stage observability contract
+
+Date: 2026-07-17.
+
+Accepted ADR-013 to define the Phase 2 observability contract before adding more logging implementation.
+
+### Contract summary
+
+- Preserve the existing log file shape: `time | level | logger | run_id | stage | message`.
+- Keep human-readable logs and banners, but make lifecycle/failure facts parseable through `event=<name> key=value ...` messages inside the existing message field.
+- Treat the existing `run_id` column as mandatory for run-scoped parseable events.
+- Treat the existing `stage` column as mandatory for stage-scoped parseable events.
+- Include `survey_id` when known, `attempt` when retries or attempt semantics are involved, `elapsed_seconds` for completion/failure, and `error_type` plus bounded `error_message` for failures.
+- Include external identifiers without secrets for WebODM/QGIS boundaries, such as project ID, task ID, selected task label, tool name, return code, and bounded artifact counts.
+- Do not log credentials, tokens, private URLs, unbounded paths, or large payloads.
+
+### Initial event vocabulary
+
+- Run lifecycle: `run_started`, `run_completed`, `run_failed`, `run_paused`, `run_aborted`, `run_canceled`.
+- Stage lifecycle: `stage_started`, `stage_skipped`, `stage_completed`, `stage_failed`, `stage_retrying`, `stage_canceled`, `stage_stale`.
+- State/artifact diagnostics: `stage_output_loaded`, `checkpoint_saved`, `checkpoint_loaded`, `artifact_selected`, `artifact_published` where those actions are already present and safe to observe.
+- External boundaries: `webodm_project_created`, `webodm_task_created`, `webodm_task_status`, `webodm_download_started`, `webodm_download_completed`, `qgis_command_started`, `qgis_command_completed`, `qgis_command_failed`.
+
+### Scope decision
+
+No database schema, migration, event journal, JSON log format, or persistent state model is introduced in Phase 2. The future database/state refactor should reuse this event vocabulary when attempts, transitions, and durable diagnostics are redesigned.
+
+### Files modified
+
+- Modified: `docs/refactor/DECISIONS.md`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No production code, tests, database schema, migration, pipeline stage behavior, retry behavior, checkpoint behavior, dependency list, external-service behavior, or operator workflow changed.
+
+### Validation
+
+- Documentation-only change; no pytest run was required.
+- `git diff --check` - passed; Git reported LF-to-CRLF working-tree warnings for the edited refactor docs.
+
+### Recommended next Phase 2 task
+
+Implement a minimal parseable lifecycle helper around the existing logger and apply it first to `StageRunner` start, skip, retry, completion, failure, cancellation, and stale-stage logs. Keep the existing human-readable messages during the transition and add focused parser/format tests using temporary log files.
+
+## ADR-013 StageRunner lifecycle event implementation
+
+Date: 2026-07-17.
+
+Implemented the first ADR-013 production slice by adding `shared.logging.log_event()` and applying it to the StageRunner-owned lifecycle helpers while preserving the existing human-readable log lines.
+
+### Implemented behavior
+
+- `log_event()` emits `event=<name> key=value ...` messages through the existing logger and existing log-file format.
+- Values containing whitespace or `=` are quoted and ANSI color codes are stripped before formatting.
+- Stage lifecycle helpers now emit parseable events for `stage_started`, `stage_completed`, `stage_skipped`, `stage_failed`, `stage_retrying`, `stage_canceled`, `stage_stale`, and `stage_output_loaded`.
+- Stage context is set while emitting skipped-stage and output-loaded events so the existing `stage` log column remains populated.
+- Existing banners, progress lines, retry messages, and failure messages remain in place for operator readability.
+
+No database schema, migration, retry policy, state model, JSON log format, event journal, external-service behavior, QGIS/WebODM behavior, or operator workflow changed.
+
+### Tests changed
+
+`tests/test_stage_runner_orchestration.py` now includes one focused lifecycle-event test that writes to a pytest-owned temporary log file through `get_logger()`, runs a stage that retries once and succeeds, then runs the same stage again to exercise skip/output loading. It verifies parseable `stage_started`, `stage_retrying`, `stage_completed`, `stage_skipped`, and `stage_output_loaded` messages while preserving the logical logger name, run ID, and stage columns.
+
+### Files modified
+
+- Modified: `shared/logging.py`
+- Modified: `shared/stage_runner.py`
+- Modified: `tests/test_stage_runner_orchestration.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+### Validation
+
+- `python -m py_compile shared\logging.py shared\stage_runner.py tests\test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 9 passed in 0.40 seconds.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 4 passed in 0.15 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 2 passed in 0.17 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 4 passed in 0.14 seconds.
+- `python -m pytest --collect-only -q` - 53 tests collected in 0.06 seconds.
+- `python -m pytest -q` - 53 passed in 1.10 seconds.
+- `git diff --check` - passed; Git reported LF-to-CRLF working-tree warnings for edited files.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- Run-level `run_started`, `run_completed`, and `run_failed` events are not implemented yet.
+- WebODM/QGIS external-boundary events are still free-form or absent.
+- `query_survey_stats.py` does not yet prefer explicit `event=` records for analytics; it remains compatible with the existing text log parser.
+- Threaded/interleaved logging behavior remains deferred until production concurrency is introduced.
+
+### Recommended next Phase 2 task
+
+Add parseable run-level lifecycle events in `RGBPipeline.run()` for run start, completion, failure, pause, abort, and cancellation while preserving current operator-facing output and without changing database schema.

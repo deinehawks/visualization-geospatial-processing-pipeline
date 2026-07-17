@@ -6,7 +6,7 @@ import logging
 import re
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 # ================================
@@ -226,6 +226,28 @@ def get_logger(
 # Pretty dividers / banners
 # ================================
 
+
+def _format_event_value(value: Any) -> str:
+    text = str(value)
+    text = strip_ansi(text).replace("\\", "\\\\").replace('"', '\\"')
+    if not text or any(ch.isspace() for ch in text) or "=" in text:
+        return f'"{text}"'
+    return text
+
+
+def log_event(
+    logger: logging.Logger,
+    event: str,
+    *,
+    level: int = logging.INFO,
+    **fields: Any,
+) -> None:
+    parts = [f"event={_format_event_value(event)}"]
+    for key, value in fields.items():
+        if value is None:
+            continue
+        parts.append(f"{key}={_format_event_value(value)}")
+    logger.log(level, " ".join(parts))
 def line(width: int = 70) -> str:
     return "─" * width
 
@@ -351,27 +373,45 @@ def log_progress_done(logger: logging.Logger, message: str, total: int, elapsed:
 
 def log_stage_start(logger: logging.Logger, stage_name: str) -> None:
     set_stage_context(logger, stage_name)
+    log_event(logger, "stage_started")
     logger.info(f"{BLUE}{line()}{RESET}")
     logger.info(f"{BLUE}{BOLD} START   | {stage_name}{RESET}")
     logger.info(f"{BLUE}{line()}{RESET}")
 
 
 def log_stage_done(logger: logging.Logger, stage_name: str, runtime: float) -> None:
+    log_event(logger, "stage_completed", elapsed_seconds=f"{runtime:.2f}")
     logger.info(
         f"{GREEN}{BOLD}DONE    | {stage_name} | {runtime:.2f}s{RESET}")
     set_stage_context(logger, "")
 
 
 def log_stage_skip(logger: logging.Logger, stage_name: str) -> None:
+    set_stage_context(logger, stage_name)
+    log_event(logger, "stage_skipped", reason="already_completed")
     logger.info(f"{YELLOW}SKIP    | {stage_name} (already completed){RESET}")
+    set_stage_context(logger, "")
 
 
 def log_stage_fail(logger: logging.Logger, stage_name: str, runtime: float) -> None:
+    log_event(
+        logger,
+        "stage_failed",
+        level=logging.ERROR,
+        elapsed_seconds=f"{runtime:.2f}",
+    )
     logger.error(f"{RED}{BOLD}FAILED  | {stage_name} | {runtime:.2f}s{RESET}")
     set_stage_context(logger, "")
 
 
 def log_stage_canceled(logger: logging.Logger, stage_name: str, runtime: float) -> None:
+    log_event(
+        logger,
+        "stage_canceled",
+        level=logging.WARNING,
+        elapsed_seconds=f"{runtime:.2f}",
+        reason="webodm_ui",
+    )
     logger.warning(f"{YELLOW}CANCELED | {stage_name} | {runtime:.2f}s{RESET}")
     set_stage_context(logger, "")
 
@@ -385,6 +425,16 @@ def log_stage_retry(
     error: Exception,
 ) -> None:
 
+    log_event(
+        logger,
+        "stage_retrying",
+        level=logging.WARNING,
+        attempt=attempt,
+        max_attempts=max_attempts,
+        retry_delay_seconds=delay,
+        error_type=type(error).__name__,
+        error_message=str(error)[:240],
+    )
     logger.warning(
         f"{YELLOW}RETRY   | {stage_name} | attempt {attempt}/{max_attempts} "
         f"— retrying in {delay}s | {error}{RESET}"
@@ -393,14 +443,18 @@ def log_stage_retry(
 
 def log_stale_stage(logger: logging.Logger, stage_name: str) -> None:
 
+    set_stage_context(logger, stage_name)
+    log_event(logger, "stage_stale", level=logging.WARNING)
     logger.warning(
         f"{YELLOW}STALE   | {stage_name} "
         f"— previous run did not finish cleanly; marking failed and rerunning.{RESET}"
     )
+    set_stage_context(logger, "")
 
 
 def log_output_loaded(logger: logging.Logger, output_key: str) -> None:
 
+    log_event(logger, "stage_output_loaded", output_key=output_key)
     logger.info(
         f"{GREY} ↳ Loaded saved output → state['{output_key}']{RESET}")
 
