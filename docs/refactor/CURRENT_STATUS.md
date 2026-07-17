@@ -7,7 +7,7 @@
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, and suite-wide default safety guards
 - **Current task:** Temporary filesystem/SQLite fixtures, fake WebODM, and default-suite external-effect denial
 - **Production code changed:** No
-- **Next recommended task:** Introduce minimal production configuration, database-connection lifecycle, and WebODM dependency-injection seams before a hermetic orchestration test
+- **Next recommended task:** Correct StageRunner failure recording for non-cancellation RuntimeError exceptions, then evaluate minimal RGBPipeline construction seams
 
 ## Completed tasks
 
@@ -101,4 +101,49 @@ Phase 1 is not complete.
 
 ## Next recommended task
 
-Introduce minimal, backward-compatible production seams for explicit configuration, WebODM construction, and reliable database connection ownership. After separate approval, use those seams to build a hermetic small orchestration test with the existing fixtures and fake.
+Correct the narrowly confirmed StageRunner non-cancellation `RuntimeError` failure-recording defect with regression coverage and without redesigning retries. Then investigate minimal, backward-compatible configuration, repository, and WebODM injection needed for hermetic `RGBPipeline` construction without running stages.
+
+## Hermetic StageRunner orchestration milestone
+
+Date: 2026-07-17.
+
+### Orchestration unit and production seams
+
+- Tested `StageRunner.run()` with a real `PipelineRepo` over pytest-owned SQLite and a stage callable using `FakeWebODM` plus pytest-owned image paths.
+- The existing repository, logger, and callable parameters were sufficient injection boundaries. No production seam or production file was changed.
+- Success records the run/stage start, fake authentication/preflight, deterministic project `100` and task `task-0001`, state/output persistence, and completed stage status.
+- Controlled failure authenticates and preflights the fake, surfaces a `ValueError`, records failed status/error, and proves project, task, and wait calls do not run.
+- Full `RGBPipeline` construction is not yet hermetic and was not attempted.
+
+### Files created
+
+- `tests/test_stage_runner_orchestration.py`
+
+### Exact validation and results
+
+- `python -m py_compile tests/test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q --ignore=tests/test_stage_runner_orchestration.py` - committed baseline: 34 passed in 1.21 seconds.
+- `python -m pytest -q tests/test_stage_runner_orchestration.py -k successful` - 1 passed, 1 deselected.
+- The first `python -m pytest -q tests/test_stage_runner_orchestration.py -k failed` failed because `PermanentWebODMError` derives from `RuntimeError`; `StageRunner` re-raised it without recording failed status, leaving the row `running`.
+- Corrected `python -m py_compile tests/test_stage_runner_orchestration.py` - passed.
+- Corrected `python -m pytest -q tests/test_stage_runner_orchestration.py -k successful` - 1 passed, 1 deselected.
+- Corrected `python -m pytest -q tests/test_stage_runner_orchestration.py -k failed` - 1 passed, 1 deselected.
+- `python -m pytest -q tests/test_fake_webodm.py` - 5 passed.
+- `python -m pytest -q tests/test_suite_safety_guards.py` - 8 passed.
+- `python -m pytest --collect-only -q` - 36 tests collected.
+- `python -m pytest -q` - 36 passed in 0.31 seconds.
+- `git diff --check` - passed.
+- External tests and services, operator tools, real pipeline execution, WebODM, QGIS/GDAL, keyboard hooks, interactive input, production data, and production SQLite were not used.
+
+### Remaining Phase 1 acceptance criteria and risks
+
+Phase 1 remains in progress.
+
+- `RGBPipeline.stage_webodm()`, `run_webodm_fallback_task()`, and `stage_quality_gate()` still construct `WebODMProcessor` directly.
+- Full pipeline construction still depends on configuration/environment, logger/global context, pipeline control paths, and database ownership that are not all explicitly injectable.
+- `StageRunner.run()` re-raises non-cancellation `RuntimeError` exceptions before its general failure handler, which can leave stage rows `running`. This confirmed defect was not changed because retry/cancellation redesign was outside this task.
+- Production `PipelineRepo` connection close behavior, platform-specific symlink/junction checks, and external-marker exercise remain unresolved.
+
+### Recommended next task
+
+Correct the narrowly confirmed StageRunner non-cancellation `RuntimeError` failure-recording defect with regression coverage and without redesigning retries. Then investigate the smallest backward-compatible seams needed for hermetic `RGBPipeline` construction without running stages.

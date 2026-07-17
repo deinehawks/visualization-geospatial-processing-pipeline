@@ -234,3 +234,34 @@ Once Phase 1 is approved and implemented, validation should progress from safest
 6. Explicit opt-in external compatibility tests only when separately authorized.
 
 Never claim a phase validated when its required level could not be run. Record skipped external paths and remaining uncertainty in `CURRENT_STATUS.md`.
+
+## Hermetic StageRunner orchestration baseline
+
+Added on 2026-07-17, `tests/test_stage_runner_orchestration.py` exercises the smallest real orchestration unit without constructing the full RGB pipeline.
+
+The test wires real `StageRunner` and `PipelineRepo` logic to pytest-owned SQLite, a temporary image directory, and `FakeWebODM`. Existing constructor/callable parameters provide the injection boundary, so no production seam was introduced.
+
+The success path verifies:
+
+- run and stage creation;
+- fake authentication and preflight;
+- deterministic project `100` and task `task-0001`;
+- state and SQLite output persistence;
+- completed stage status; and
+- containment of all data paths beneath the temporary application root.
+
+The controlled failure path verifies:
+
+- the fake is called only through authentication and preflight;
+- a stage `ValueError` is surfaced;
+- failed status and the error message are persisted;
+- no project, task, or wait side effect occurs; and
+- all resources remain temporary.
+
+This milestone does not make `RGBPipeline` construction hermetic. Direct WebODM construction, configuration/environment loading, logger/global context, pipeline control paths, and production database connection ownership remain untestable at that level without further seams.
+
+Investigation also confirmed that non-cancellation `RuntimeError` exceptions bypass `StageRunner`'s general failure-recording branch and can leave a stage `running`. Retry/cancellation behavior was not changed in this task.
+
+Validation: the committed suite remained 34/34; focused success and failure tests passed; fake WebODM passed 5/5; safety guards passed 8/8; collection found 36 tests; the full default suite passed 36/36 in 0.31 seconds; compile and `git diff --check` passed. No external operation occurred.
+
+The recommended next task is a focused correction for StageRunner non-cancellation `RuntimeError` failure recording, followed by investigation of minimal backward-compatible seams for hermetic `RGBPipeline` construction.
