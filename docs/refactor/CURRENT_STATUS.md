@@ -7,7 +7,7 @@
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, and suite-wide default safety guards
 - **Current task:** Temporary filesystem/SQLite fixtures, fake WebODM, and default-suite external-effect denial
 - **Production code changed:** No
-- **Next recommended task:** Correct StageRunner failure recording for non-cancellation RuntimeError exceptions, then evaluate minimal RGBPipeline construction seams
+- **Next recommended task:** Evaluate minimal configuration, repository, and WebODM injection seams for hermetic RGBPipeline construction
 
 ## Completed tasks
 
@@ -101,7 +101,7 @@ Phase 1 is not complete.
 
 ## Next recommended task
 
-Correct the narrowly confirmed StageRunner non-cancellation `RuntimeError` failure-recording defect with regression coverage and without redesigning retries. Then investigate minimal, backward-compatible configuration, repository, and WebODM injection needed for hermetic `RGBPipeline` construction without running stages.
+The StageRunner non-cancellation `RuntimeError` defect was corrected in the following milestone. Next investigate minimal, backward-compatible configuration, repository, and WebODM injection needed for hermetic `RGBPipeline` construction without running stages.
 
 ## Hermetic StageRunner orchestration milestone
 
@@ -147,3 +147,58 @@ Phase 1 remains in progress.
 ### Recommended next task
 
 Correct the narrowly confirmed StageRunner non-cancellation `RuntimeError` failure-recording defect with regression coverage and without redesigning retries. Then investigate the smallest backward-compatible seams needed for hermetic `RGBPipeline` construction without running stages.
+
+## StageRunner RuntimeError classification correction
+
+Date: 2026-07-17.
+
+### Root cause and corrected behavior
+
+`StageRunner.run()` previously caught every `RuntimeError` before its ordinary failure handler. Only `WEBODM_TASK_CANCELED` and `__PIPELINE_CANCELED__` were explicitly recognized; every other runtime error was immediately re-raised. Consequently, permanent WebODM failures and ordinary runtime failures bypassed retry/final-failure recording and left the stage row `running`.
+
+The runner now classifies only the existing explicit control messages:
+
+- `WEBODM_TASK_CANCELED` retains its current translation to `__PIPELINE_CANCELED__` after recording the stage as failed/canceled.
+- `__PIPELINE_CANCELED__`, `__PIPELINE_PAUSED__`, and `__PIPELINE_ABORTED__` retain direct propagation for the outer pipeline control flow.
+- Every other exception, including `RuntimeError` subclasses such as `PermanentWebODMError`, uses the existing retry and terminal-failure path. On exhaustion, the stage is marked failed, its message is stored, and the original exception is propagated.
+
+No database schema, retry count/delay, pause/abort architecture, checkpoint behavior, or logging architecture changed.
+
+### Files modified
+
+- `shared/stage_runner.py`
+- `tests/test_stage_runner_orchestration.py`
+- `docs/refactor/CURRENT_STATUS.md`
+- `docs/refactor/TEST_STRATEGY.md`
+
+### Tests and exact validation
+
+- Pre-change `python -m pytest -q tests/test_stage_runner_orchestration.py` - 2 passed.
+- `python -m py_compile shared/stage_runner.py tests/test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q tests/test_stage_runner_orchestration.py -k successful` - 1 passed, 7 deselected.
+- `python -m pytest -q tests/test_stage_runner_orchestration.py -k failed_fake_webodm` - 1 passed, 7 deselected.
+- `python -m pytest -q tests/test_stage_runner_orchestration.py -k permanent_webodm` - 1 passed, 7 deselected.
+- `python -m pytest -q tests/test_stage_runner_orchestration.py -k generic_non_cancellation` - 1 passed, 7 deselected.
+- `python -m pytest -q tests/test_stage_runner_orchestration.py -k "explicit_pipeline_control_signal or webodm_ui_cancellation"` - 4 passed, 4 deselected.
+- `python -m pytest -q tests/test_fake_webodm.py` - 5 passed.
+- `python -m pytest -q tests/test_suite_safety_guards.py` - 8 passed.
+- `python -m pytest --collect-only -q` - 42 tests collected.
+- `python -m pytest -q` - 42 passed in 0.49 seconds.
+- Task-scoped `git diff --check -- shared/stage_runner.py tests/test_stage_runner_orchestration.py docs/refactor/CURRENT_STATUS.md docs/refactor/TEST_STRATEGY.md` - passed.
+- Repository-wide `git diff --check` - passed after an unrelated `codes.txt` edit was updated externally; that file remains outside this task and was not modified by this work.
+
+No external test, real pipeline, WebODM request, QGIS/GDAL command, keyboard hook, interactive input, production path, or production SQLite database was used.
+
+### Remaining ambiguity and risks
+
+Phase 1 remains in progress.
+
+- Control flow still uses exact string-backed `RuntimeError` messages because no typed pause/abort/cancel exceptions exist. Classification is isolated to the four existing documented messages.
+- Explicit pause, abort, and already-translated cancellation signals retain the existing behavior of propagating without finalizing the current stage row. Whether abort should instead terminally fail an active stage requires a separate control-state decision.
+- Non-control runtime failures now participate in the existing broad retry policy. Retry count and delay were not redesigned; non-idempotent retry risk remains.
+- The `stages.error_message` column stores the message but has no separate exception-type field.
+- Full `RGBPipeline` construction is still not hermetic.
+
+### Recommended next Phase 1 task
+
+Investigate the smallest backward-compatible configuration, repository, and WebODM injection seams needed for hermetic `RGBPipeline` construction without executing stages. Treat typed pipeline-control exceptions as a separate design task rather than expanding this fix.

@@ -19,6 +19,12 @@ from shared.logging import (
 )
 
 
+_WEBODM_TASK_CANCELED = "WEBODM_TASK_CANCELED"
+_PIPELINE_CONTROL_SIGNALS = frozenset(
+    {"__PIPELINE_CANCELED__", "__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"}
+)
+
+
 class StageRunner:
     """
     Wraps stage execution with DB tracking, structured logging, and
@@ -144,10 +150,15 @@ class StageRunner:
                 return result
 
             # ── WebODM UI cancel — clean propagation ─────────────────────
-            except RuntimeError as exc:
-                msg = str(exc)
-
-                if msg == "WEBODM_TASK_CANCELED":
+            except Exception as exc:
+                # Pipeline control currently uses explicit RuntimeError
+                # messages rather than typed exceptions. Preserve only those
+                # documented signals; every other RuntimeError is a failure.
+                message = str(exc)
+                if (
+                    isinstance(exc, RuntimeError)
+                    and message == _WEBODM_TASK_CANCELED
+                ):
                     runtime = time.perf_counter() - wall_start
                     self.repo.finish_stage(
                         stage_id=stage_id,
@@ -161,13 +172,12 @@ class StageRunner:
                         set_stage_context(_lg, "")
                     raise RuntimeError("__PIPELINE_CANCELED__") from exc
 
-                if msg == "__PIPELINE_CANCELED__":
+                if (
+                    isinstance(exc, RuntimeError)
+                    and message in _PIPELINE_CONTROL_SIGNALS
+                ):
                     raise
 
-                raise
-
-            # ── Retry on transient errors ─────────────────────────────────
-            except Exception as exc:
                 attempt += 1
 
                 if attempt < retry_attempts:

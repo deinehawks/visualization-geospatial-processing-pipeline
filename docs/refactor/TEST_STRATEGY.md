@@ -260,8 +260,28 @@ The controlled failure path verifies:
 
 This milestone does not make `RGBPipeline` construction hermetic. Direct WebODM construction, configuration/environment loading, logger/global context, pipeline control paths, and production database connection ownership remain untestable at that level without further seams.
 
-Investigation also confirmed that non-cancellation `RuntimeError` exceptions bypass `StageRunner`'s general failure-recording branch and can leave a stage `running`. Retry/cancellation behavior was not changed in this task.
+That investigation confirmed the non-cancellation `RuntimeError` defect; the following milestone corrects it while preserving explicit control signals.
 
 Validation: the committed suite remained 34/34; focused success and failure tests passed; fake WebODM passed 5/5; safety guards passed 8/8; collection found 36 tests; the full default suite passed 36/36 in 0.31 seconds; compile and `git diff --check` passed. No external operation occurred.
 
-The recommended next task is a focused correction for StageRunner non-cancellation `RuntimeError` failure recording, followed by investigation of minimal backward-compatible seams for hermetic `RGBPipeline` construction.
+The StageRunner correction is recorded in the following milestone. The next testability task is investigation of minimal backward-compatible seams for hermetic `RGBPipeline` construction.
+
+## StageRunner failure classification coverage
+
+Added on 2026-07-17, StageRunner orchestration coverage now distinguishes terminal failures from explicit pipeline-control signals.
+
+Production classification in `shared/stage_runner.py` recognizes only the existing exact messages `WEBODM_TASK_CANCELED`, `__PIPELINE_CANCELED__`, `__PIPELINE_PAUSED__`, and `__PIPELINE_ABORTED__`. Non-control exceptions, including `RuntimeError` subclasses, enter the existing retry/failure path and are terminally recorded as failed before propagation when attempts are exhausted.
+
+The focused test module now covers:
+
+- unchanged successful completion;
+- ordinary `ValueError` failure recording and propagation;
+- permanent fake WebODM runtime failure recording and propagation;
+- generic non-cancellation `RuntimeError` failure recording and propagation;
+- unchanged pause, abort, and translated cancellation propagation;
+- unchanged WebODM UI cancellation translation and canceled-stage recording; and
+- prevention of later fake WebODM calls after failure.
+
+Validation collected 42 tests and passed 42/42. Focused StageRunner, fake WebODM, and safety-guard tests all passed. No external operation occurred.
+
+Remaining test-architecture risks are the legacy message-backed control signals, intentional non-terminal active-stage behavior for propagated pause/abort/cancel signals, the unchanged broad retry policy, and the lack of hermetic full-pipeline construction.
