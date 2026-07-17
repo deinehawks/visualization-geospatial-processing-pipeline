@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List, Tuple, Mapping
-from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
+from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context, log_event
 from shared.constants import WEBODM_RESTART_STAGES, WEBODM_RESTART_STAGE_NAMES
 from shared.logging import get_logger
 from shared.db.repo import PipelineRepo
@@ -2360,6 +2360,16 @@ class RGBPipeline(
     ) -> Dict[str, Any]:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
+        log_event(
+            pipeline_logger,
+            "run_started",
+            resume=resume,
+            selected_stages=(
+                ",".join(sorted(selected_stages))
+                if selected_stages is not None
+                else "all"
+            ),
+        )
 
         if not resume:
             self.control.cleanup_flags()
@@ -2479,6 +2489,12 @@ class RGBPipeline(
                 )
 
             self.control.cleanup_flags()
+            log_event(
+                pipeline_logger,
+                "run_completed",
+                elapsed_seconds=f"{total_runtime:.2f}",
+                survey_id=self.survey_id,
+            )
             pipeline_footer(pipeline_logger, total_runtime, success=True)
             return self.state
 
@@ -2518,6 +2534,16 @@ class RGBPipeline(
                     )
 
             self.control.cleanup_flags()
+            log_event(
+                pipeline_logger,
+                "run_failed",
+                level=logging.ERROR,
+                elapsed_seconds=f"{total_runtime:.2f}",
+                survey_id=self.survey_id,
+                error_type=type(e).__name__,
+                error_message=str(e)[:240],
+                preflight_failed=True,
+            )
             pipeline_footer(pipeline_logger, total_runtime, success=False)
 
             pipeline_logger.error("")
@@ -2539,6 +2565,13 @@ class RGBPipeline(
                     }
                 )
 
+                log_event(
+                    pipeline_logger,
+                    "run_paused",
+                    level=logging.WARNING,
+                    reason="paused_by_flag",
+                    after_stage=self.state.get("paused_after_stage", "?"),
+                )
                 pipeline_paused(
                     pipeline_logger,
                     self.run_id,
@@ -2560,6 +2593,13 @@ class RGBPipeline(
                     }
                 )
 
+                log_event(
+                    pipeline_logger,
+                    "run_canceled",
+                    level=logging.WARNING,
+                    reason="webodm_ui_cancel",
+                    after_stage="webodm",
+                )
                 pipeline_canceled(pipeline_logger, self.run_id)
 
                 try:
@@ -2611,6 +2651,14 @@ class RGBPipeline(
                         )
 
                 self.control.cleanup_flags()
+                log_event(
+                    pipeline_logger,
+                    "run_aborted",
+                    level=logging.ERROR,
+                    elapsed_seconds=f"{total_runtime:.2f}",
+                    survey_id=self.survey_id,
+                    reason="aborted_by_hotkey",
+                )
                 pipeline_footer(pipeline_logger, total_runtime, success=False)
                 return self.state
 
@@ -2644,6 +2692,15 @@ class RGBPipeline(
                     pipeline_logger.exception("Failed to mark survey as failed")
 
             self.control.cleanup_flags()
+            log_event(
+                pipeline_logger,
+                "run_failed",
+                level=logging.ERROR,
+                elapsed_seconds=f"{total_runtime:.2f}",
+                survey_id=self.survey_id,
+                error_type=type(e).__name__,
+                error_message=str(e)[:240],
+            )
             pipeline_footer(pipeline_logger, total_runtime, success=False)
             pipeline_logger.error(str(e))
             if raise_on_error:
@@ -2681,6 +2738,15 @@ class RGBPipeline(
                     pipeline_logger.exception("Failed to mark survey as failed")
 
             self.control.cleanup_flags()
+            log_event(
+                pipeline_logger,
+                "run_failed",
+                level=logging.ERROR,
+                elapsed_seconds=f"{total_runtime:.2f}",
+                survey_id=self.survey_id,
+                error_type=type(e).__name__,
+                error_message=str(e)[:240],
+            )
             pipeline_footer(pipeline_logger, total_runtime, success=False)
             pipeline_logger.error(str(e))
             if raise_on_error:

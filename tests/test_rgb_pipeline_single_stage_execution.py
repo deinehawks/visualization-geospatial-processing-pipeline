@@ -22,6 +22,7 @@ if "exifread" not in sys.modules and importlib.util.find_spec("exifread") is Non
 from pipelines import rgb_pipeline as rgb_module
 from pipelines.rgb_pipeline import RGBPipeline
 from shared.db.repo import PipelineRepo
+from shared.logging import get_logger
 from tests.fakes import FakeWebODM
 
 
@@ -64,8 +65,26 @@ def explicit_config(temporary_path_layout):
     }
 
 
-def isolated_loggers(prefix):
-    return {key: logging.Logger(f"{prefix}.{key}") for key in LOGGER_KEYS}
+def isolated_loggers(prefix, pipeline_log_path=None):
+    loggers = {key: logging.Logger(f"{prefix}.{key}") for key in LOGGER_KEYS}
+    if pipeline_log_path is not None:
+        loggers["pipeline"] = get_logger(
+            f"{prefix}.pipeline",
+            pipeline_log_path,
+            to_console=False,
+            run_id=RUN_ID,
+        )
+    return loggers
+
+
+
+def cleanup_logger(logger):
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    logger.filters.clear()
+    if hasattr(logger, "_configured"):
+        delattr(logger, "_configured")
 
 
 def assert_within(path, root):
@@ -104,7 +123,13 @@ def all_stage_names(database_path, run_id=RUN_ID):
     return [row[0] for row in rows]
 
 
-def build_pipeline(temporary_path_layout, sample_dataset_dir, repository, fake_webodm):
+def build_pipeline(
+    temporary_path_layout,
+    sample_dataset_dir,
+    repository,
+    fake_webodm,
+    pipeline_log_path=None,
+):
     return RGBPipeline(
         temporary_path_layout.application_root,
         explicit_config(temporary_path_layout),
@@ -113,7 +138,10 @@ def build_pipeline(temporary_path_layout, sample_dataset_dir, repository, fake_w
         year=2026,
         run_id=RUN_ID,
         repository=repository,
-        loggers=isolated_loggers("tests.rgb_pipeline.single_stage"),
+        loggers=isolated_loggers(
+            "tests.rgb_pipeline.single_stage",
+            pipeline_log_path=pipeline_log_path,
+        ),
         logs_dir=temporary_path_layout.logs_dir,
         checkpoint_dir=temporary_path_layout.checkpoint_dir,
         webodm_processor=fake_webodm,
@@ -142,11 +170,13 @@ def test_rgb_pipeline_executes_one_selected_stage_successfully(
 ):
     repository = PipelineRepo(temporary_path_layout.database_path)
     fake_webodm = FakeWebODM()
+    pipeline_log_path = temporary_path_layout.logs_dir / "pipeline-run-events.log"
     pipeline = build_pipeline(
         temporary_path_layout,
         sample_dataset_dir,
         repository,
         fake_webodm,
+        pipeline_log_path=pipeline_log_path,
     )
     later_stage_calls = []
     preflight_calls = []
@@ -227,6 +257,15 @@ def test_rgb_pipeline_executes_one_selected_stage_successfully(
         pipeline.control.abort_flag,
     ):
         assert_within(path, temporary_path_layout.application_root)
+    content = pipeline_log_path.read_text(encoding="utf-8")
+    assert (
+        f"tests.rgb_pipeline.single_stage.pipeline | {RUN_ID} |  "
+        "| event=run_started"
+    ) in content
+    assert "event=run_completed elapsed_seconds=" in content
+    assert "survey_id=TEST-SURVEY-001" in content
+    cleanup_logger(pipeline.loggers["pipeline"])
+
     assert list(temporary_path_layout.checkpoint_dir.iterdir()) == []
 
 
@@ -237,11 +276,13 @@ def test_rgb_pipeline_selected_stage_failure_is_recorded_and_propagated(
 ):
     repository = PipelineRepo(temporary_path_layout.database_path)
     fake_webodm = FakeWebODM()
+    pipeline_log_path = temporary_path_layout.logs_dir / "pipeline-run-events.log"
     pipeline = build_pipeline(
         temporary_path_layout,
         sample_dataset_dir,
         repository,
         fake_webodm,
+        pipeline_log_path=pipeline_log_path,
     )
     later_stage_calls = []
     preflight_calls = []
@@ -293,4 +334,13 @@ def test_rgb_pipeline_selected_stage_failure_is_recorded_and_propagated(
         pipeline.control.abort_flag,
     ):
         assert_within(path, temporary_path_layout.application_root)
+    content = pipeline_log_path.read_text(encoding="utf-8")
+    assert (
+        f"tests.rgb_pipeline.single_stage.pipeline | {RUN_ID} |  "
+        "| event=run_started"
+    ) in content
+    assert "event=run_failed" in content
+    assert "error_type=ControlledSegregationFailure" in content
+    assert 'error_message="controlled segregation failure"' in content
+    cleanup_logger(pipeline.loggers["pipeline"])
     assert list(temporary_path_layout.checkpoint_dir.iterdir()) == []

@@ -5,9 +5,9 @@
 - **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
 - **Current phase:** Phase 2 - Logging and observability
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** ADR-013 StageRunner lifecycle event implementation
-- **Production code changed:** Yes - shared/logging.py for ADR-002 logger isolation
-- **Next recommended task:** Extend parseable lifecycle coverage to RGBPipeline run-level start/completion/failure logs
+- **Current task:** ADR-013 RGBPipeline run lifecycle event implementation
+- **Production code changed:** Yes - logging observability changes in shared/logging.py, shared/stage_runner.py, and pipelines/rgb_pipeline.py
+- **Next recommended task:** Extend parseable observability to WebODM and QGIS external-boundary events
 
 ## Completed tasks
 
@@ -702,3 +702,54 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 ### Recommended next Phase 2 task
 
 Add parseable run-level lifecycle events in `RGBPipeline.run()` for run start, completion, failure, pause, abort, and cancellation while preserving current operator-facing output and without changing database schema.
+## ADR-013 RGBPipeline run lifecycle event implementation
+
+Date: 2026-07-17.
+
+Implemented the next ADR-013 production slice by adding parseable run-level lifecycle events to `RGBPipeline.run()` while preserving the existing operator-facing pipeline header/footer messages.
+
+### Implemented behavior
+
+- `run_started` is emitted after the pipeline header with `resume` and `selected_stages` fields.
+- `run_completed` is emitted before the success footer with `elapsed_seconds` and `survey_id` when known.
+- `run_failed` is emitted for preflight failures, ordinary runtime failures, and unexpected exceptions with `elapsed_seconds`, `survey_id` when known, `error_type`, and bounded `error_message`.
+- `run_paused`, `run_canceled`, and `run_aborted` are emitted for the existing explicit control signals with reason/after-stage fields where available.
+- The existing log-file shape, human-readable logs, database state updates, retry policy, pause/abort/cancel behavior, and operator workflow are unchanged.
+
+No database schema, migration, event journal, JSON log format, retry behavior, checkpoint behavior, WebODM behavior, QGIS/GDAL behavior, dependency list, or operator workflow changed.
+
+### Tests changed
+
+The existing hermetic RGBPipeline single-stage success and failure tests now use a pytest-owned temporary pipeline log file for the pipeline logger. They verify `run_started` plus `run_completed` on the successful selected-stage path, and `run_started` plus `run_failed` with exception type/message on the controlled failure path.
+
+### Files modified
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 2 passed in 0.20 seconds.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 4 passed in 0.14 seconds.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 9 passed in 0.32 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 4 passed in 0.14 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 2 passed in 0.19 seconds.
+- `python -m pytest --collect-only -q` - 53 tests collected in 0.06 seconds.
+- `python -m pytest -q` - 53 passed in 1.15 seconds.
+- `git diff --check` - passed; Git reported LF-to-CRLF working-tree warnings for edited files.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- WebODM/QGIS external-boundary events are still free-form or absent.
+- `query_survey_stats.py` does not yet prefer explicit `event=` records for analytics; it remains compatible with the existing text log parser.
+- Pause, abort, and WebODM cancellation run-level events are implemented but not yet directly exercised by RGBPipeline tests.
+- Threaded/interleaved logging behavior remains deferred until production concurrency is introduced.
+
+### Recommended next Phase 2 task
+
+Add parseable external-boundary events at the WebODM and QGIS seams where task/project IDs, selected task labels, tool names, return codes, and artifact counts are already known, using fake-backed tests only.

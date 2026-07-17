@@ -429,3 +429,16 @@ Coverage proves that generated StageRunner lifecycle events:
 - quote error messages containing spaces while preserving `error_type`, attempt count, max attempts, and retry delay.
 
 This remains file-log based and does not introduce JSON logs, database events, migrations, external services, or threaded/concurrent execution tests.
+## RGBPipeline run lifecycle event coverage
+
+Added on 2026-07-17, the hermetic RGBPipeline single-stage tests now verify ADR-013 run-level parseable lifecycle events in a pytest-owned temporary pipeline log file.
+
+Coverage proves that generated RGBPipeline run events:
+
+- preserve the existing log columns and logical pipeline logger name;
+- carry the run ID in the existing `run_id` column and leave the stage column empty for run-scoped events;
+- emit `event=run_started` on both success and failure paths;
+- emit `event=run_completed` with elapsed time and survey ID on the successful selected-stage path; and
+- emit `event=run_failed` with exception type and quoted error message on the controlled failure path.
+
+This remains file-log based and does not introduce JSON logs, database events, migrations, external services, or threaded/concurrent execution tests.
