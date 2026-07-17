@@ -2,12 +2,12 @@
 
 ## Summary
 
-- **Refactor status:** In progress
-- **Current phase:** Phase 1 - Test isolation and safety baseline
-- **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, and hermetic RGBPipeline construction
-- **Current task:** Hermetic single-stage RGBPipeline execution through an explicit selected-stage seam
-- **Production code changed:** Yes - pipelines/rgb_pipeline.py only
-- **Next recommended task:** Add another high-value hermetic stage test or assess remaining Phase 1 injection/config gaps
+- **Refactor status:** In progress; Phase 1 phase-gate assessment complete
+- **Current phase:** Phase 1 - Test isolation and safety baseline; complete enough to move to Phase 2, which has not started yet
+- **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
+- **Current task:** Phase 1 completion assessment against Phase 1 acceptance criteria
+- **Production code changed:** No for the Phase 1 completion assessment
+- **Next recommended task:** Move to Phase 2 - Logging and observability; begin with logger context isolation and handler ownership characterization
 
 ## Completed tasks
 
@@ -368,3 +368,61 @@ Phase 1 remains in progress.
 ### Recommended next task
 
 Add one more high-value hermetic stage test only if it can be isolated without broad production changes; otherwise perform a Phase 1 completion assessment focused on remaining configuration-loader, repository connection-lifecycle, and external-boundary gaps.
+
+
+## Phase 1 completion assessment
+
+Date: 2026-07-17.
+
+### Recommendation
+
+Phase 1 is complete enough to move to Phase 2 - Logging and observability.
+
+The Phase 1 objective was to make normal test discovery deterministic and incapable of touching real pipelines, services, survey roots, output trees, or the production database. The current default suite provides direct safety guards, self-tests for those guards, temporary filesystem and SQLite fixtures, fake WebODM coverage, import-time side-effect checks, safe operator-tool boundaries, hermetic StageRunner coverage, hermetic RGBPipeline construction, and one hermetic single-stage RGBPipeline execution test.
+
+No blocking Phase 1 risks remain for starting Phase 2. Remaining gaps are real integration breadth and deeper persistence/platform edge cases, not blockers for logging/observability work. Those gaps should remain tracked and must be addressed before later phases that introduce ownership changes, recovery semantics, external integration, or concurrency.
+
+### Criteria assessment
+
+| # | Criterion | Status | Evidence | Remaining risk | Blocks Phase 2? |
+|---|---|---|---|---|---|
+| 1 | Normal test discovery performs no external I/O. | Pass | `pytest.ini` restricts discovery to `tests/`; `python -m pytest --collect-only -q` collected 48 tests; `tests/test_import_safety.py` traps network, subprocess, input, keyboard, deletion, and write side effects during tool imports. | Guards cover normal Python boundaries, not every possible OS primitive. | No. |
+| 2 | Default tests do not use production `.env`. | Pass | `tests/conftest.py` patches `dotenv.load_dotenv`; `tests/test_suite_safety_guards.py::test_dotenv_loading_is_blocked` asserts denial; tests construct explicit config dictionaries. | Full configuration-loader behavior without dotenv is not comprehensively tested. | No. |
+| 3 | Default tests do not contact WebODM. | Pass | Autouse guards block sockets and `requests.sessions.Session.request`; `FakeWebODM` is used in StageRunner/RGBPipeline tests; `tests/test_fake_webodm.py` proves fake behavior without network. | Real WebODM compatibility remains external-only and untested by default. | No. |
+| 4 | Default tests do not run QGIS/GDAL. | Pass | Autouse guards block `subprocess.Popen`, `run`, `call`, `check_call`, and `check_output`; `tests/test_suite_safety_guards.py::test_external_subprocess_is_blocked` asserts denial; RGBPipeline construction/stage tests avoid QGIS. | QGIS/GDAL command construction and external compatibility remain untested. | No. |
+| 5 | Default tests do not use production SQLite. | Pass | Autouse SQLite guard rejects `data/pipeline.db`; `tests/test_temporary_database.py::test_production_database_path_is_rejected_without_opening_or_creating_it`; all repo tests use pytest-owned DB paths. | Production `PipelineRepo` connection-close semantics remain a later operational concern. | No. |
+| 6 | Default tests do not access production survey roots. | Pass | Autouse env redirection sets `SURVEYS_ROOT`, `FIELD_DATA_ROOT`, and `UPLOAD_CACHE_ROOT` to pytest-owned dirs; common `Path`, `open`, and cleanup boundaries reject captured production roots; safety tests assert path redirection and known production path denial. | Guard is deliberately narrow and not a global monkeypatch of every filesystem primitive. | No. |
+| 7 | Destructive helpers require explicit paths and opt-in execution. | Pass | `tools/reset_environment.py` requires an explicit root, sentinel, and `--allow-destructive-reset`; `tests/test_reset_environment.py` covers opt-in, missing sentinel, repository root, filesystem root, containment escape, and allowed deletion set. | Platform-specific symlink/junction behavior remains untested. | No. |
+| 8 | Temporary filesystem fixtures are available. | Pass | `tests/conftest.py` provides application/data/logs/surveys/field-data/upload-cache/checkpoint fixtures; `tests/test_fixture_infrastructure.py` proves ownership, composability, and isolation. | Fixture set is enough for Phase 1; later phases will need richer artifact/workspace fixtures. | No. |
+| 9 | Temporary SQLite fixtures are available. | Pass | `temporary_sqlite_db_path`, `temporary_sqlite_connection`, and `temporary_pipeline_db_factory` initialize current schema under pytest temp roots; `tests/test_temporary_database.py` proves isolation, schema, releasability, and production DB denial. | SQLite concurrency, busy behavior, and broad repository API coverage remain incomplete. | No. |
+| 10 | Fake external services are available. | Pass | `tests/fakes/webodm.py` provides deterministic `FakeWebODM`; fake tests cover deterministic IDs, call recording, transient/permanent failures, and network independence. | No fake QGIS/GDAL runner exists yet; not required to start logging work. | No. |
+| 11 | Import-time side effects are guarded. | Pass | `tests/test_import_safety.py` imports operator tools under traps for runtime, external, interactive, deletion, and write effects; collection remains safe at 48 tests. | Import traps target known risky modules/tools, not every repository module. | No. |
+| 12 | A safe default test command is documented. | Pass | `pytest.ini` defines `python -m pytest -q` behavior through default marker exclusion; `docs/refactor/TEST_STRATEGY.md` documents the canonical command. | None blocking. | No. |
+| 13 | Remaining external/integration tests are explicitly excluded. | Pass | `pytest.ini` registers `external` and sets `addopts = -m "not external"`; `tools/run_rgb_pipeline.py` requires `--allow-external-run`; no external tests are collected by default. | No marked external test exists to exercise the marker path; future external tests need environment gates. | No. |
+| 14 | Current suite validates the most important safety guarantees. | Pass | Safety guards, fixture infrastructure, temporary DB, fake WebODM, import safety, safe tools, StageRunner, RGBPipeline construction, and one selected RGBPipeline stage are covered; full suite is 48 passing tests. | Later RGBPipeline stages, real data segregation, quality gate, WebODM/QGIS integration, and concurrency/recovery are not covered by default. | No. |
+
+### Validation for this assessment
+
+- `python -m pytest --collect-only -q` - 48 tests collected in 0.12 seconds.
+- `python -m pytest -q` - 48 passed in 0.79 seconds.
+- `git diff --check` - passed.
+
+No production code was modified. No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining non-blocking risks
+
+- The real data segregation implementation is not exercised in the hermetic RGBPipeline stage test; the heavy dependency is faked to preserve safety.
+- Later RGBPipeline stages are not yet executed through full RGBPipeline orchestration in the default suite.
+- The quality gate remains interactive in production full runs and is intentionally not automated in Phase 1.
+- QGIS/GDAL command behavior and WebODM compatibility require future fake-backed or explicitly external tests.
+- Production `PipelineRepo` connection lifecycle, SQLite lock behavior, and broader repository API coverage remain incomplete.
+- Filesystem safety guards cover common Python boundaries and captured production roots, not every OS-level primitive or platform-specific symlink/junction behavior.
+- The external marker is configured and excluded by default, but no external test currently exercises the opt-in marker/environment-gate workflow.
+
+### Blocking risks
+
+None for moving to Phase 2.
+
+### Recommended first Phase 2 task
+
+Characterize and test current logger context and handler ownership before changing it: build focused tests that demonstrate whether two `RGBPipeline` or logger instances in one process can exchange `run_id`, `stage_name`, handlers, or log destinations. Use injected temporary log paths and no pipeline stages. This should directly inform ADR-002 without starting broad logging rewrites.

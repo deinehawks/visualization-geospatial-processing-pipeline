@@ -57,7 +57,7 @@ The former executable scripts now live outside discovery:
 
 On 2026-07-16, syntax checks passed, default collection found 13 tests, and the full default suite passed 13 tests. All database and deletion tests used pytest temporary directories. No external tests were run.
 
-The default suite now includes reusable temporary path/current-schema SQLite fixtures, a deterministic recording fake WebODM, credential/path isolation, autouse denial of network, subprocess, input, keyboard, dotenv, production database, and common production-path access, plus hermetic RGBPipeline construction. Phase 1 remains in progress because explicit production database connection ownership, platform-specific symlink/junction checks, and configuration-loader coverage remain incomplete.
+The default suite now includes reusable temporary path/current-schema SQLite fixtures, a deterministic recording fake WebODM, credential/path isolation, autouse denial of network, subprocess, input, keyboard, dotenv, production database, and common production-path access, plus hermetic StageRunner coverage, hermetic RGBPipeline construction, and one hermetic RGBPipeline single-stage execution test. Phase 1 is complete enough to move to Phase 2; remaining gaps are tracked as non-blocking risks for later phases.
 
 ### Shared test infrastructure
 
@@ -197,7 +197,9 @@ Implemented controls are deliberately narrow. Common `Path`, `open`, and cleanup
 
 ## Latest validation
 
-On 2026-07-16, the pre-change default suite passed 13 tests. Final focused validation passed 3 fixture, 5 database, 5 fake WebODM, 8 safety-guard, and 1 import-safety tests. Default collection found 34 tests, the full suite passed 34 tests in 0.23 seconds, changed Python files compiled, and `git diff --check` passed with line-ending conversion warnings only. No external marker, network service, subprocess, production database, production survey directory, or operator tool was used.
+On 2026-07-17, the Phase 1 completion assessment ran the requested safe validations: `python -m pytest --collect-only -q` collected 48 tests in 0.12 seconds, `python -m pytest -q` passed 48 tests in 0.79 seconds, and `git diff --check` passed. No external marker, network service, subprocess, production database, production survey directory, operator tool, real pipeline run, WebODM request, QGIS/GDAL command, keyboard hook, interactive input, or destructive cleanup operation was used.
+
+Recommendation: Phase 1 is complete enough to move to Phase 2 - Logging and observability. The default suite now validates the most important safety guarantees for discovery, dotenv denial, network/WebODM denial, subprocess/QGIS/GDAL denial, production SQLite denial, production-root denial, destructive-helper opt-in, temporary filesystem/SQLite fixtures, fake WebODM, and import-time side-effect guards. Remaining gaps are non-blocking for Phase 2 and should be carried forward explicitly.
 
 ## Missing coverage inventory
 
@@ -363,3 +365,25 @@ Coverage proves:
 Validation compiled the changed files, passed the focused success and failure tests, passed existing RGBPipeline construction, StageRunner, FakeWebODM, and safety-guard suites, collected 48 tests, passed `git diff --check`, and passed the final full default suite 48/48. No external operation occurred.
 
 Remaining default-suite integration gaps are every later RGBPipeline stage, the real data segregation implementation, full-run quality-gate behavior, real WebODM/QGIS/GDAL compatibility, configuration-loader coverage without dotenv, and repository connection-lifecycle semantics.
+
+
+## Phase 1 completion assessment summary
+
+Phase 1 acceptance criteria from `REFACTOR_PLAN.md` are satisfied well enough to start Phase 2. The assessment status is:
+
+| Area | Status | Evidence |
+|---|---|---|
+| Safe collection/imports | Pass | 48-test collection succeeds; import-safety tests trap runtime, external, interactive, deletion, and write side effects. |
+| No production `.env` | Pass | Autouse dotenv denial plus safety-guard self-test. |
+| No WebODM/network | Pass | Socket and requests guards plus FakeWebODM tests and fake-backed orchestration tests. |
+| No QGIS/GDAL/subprocess | Pass | Subprocess guard plus safety-guard self-test; no default QGIS/GDAL execution. |
+| No production SQLite | Pass | SQLite guard, temporary DB fixtures, production DB denial test. |
+| No production survey roots | Pass | Environment redirection and captured production-root guards. |
+| Destructive helper opt-in | Pass | Reset tool requires explicit root, sentinel, containment, and `--allow-destructive-reset`. |
+| Temporary resources | Pass | Temporary filesystem and current-schema SQLite fixtures are tested. |
+| Fake services | Pass | FakeWebODM supports deterministic calls and failure injection. |
+| External exclusion | Pass | `pytest.ini` excludes `external` by default; real RGB runner requires `--allow-external-run`. |
+
+Non-blocking risks remain: later RGBPipeline stages, real data segregation, quality gate, WebODM/QGIS/GDAL compatibility, SQLite concurrency/connection lifecycle, symlink/junction containment, and explicit external marker exercise. These do not block Phase 2 because Phase 2 can proceed with temporary log paths, injected collaborators, and the established safety guards.
+
+The recommended first Phase 2 test task is to characterize existing logger context and handler ownership under two simultaneous logger/pipeline constructions, using temporary log paths and no pipeline stage execution. This should provide evidence for ADR-002 before changing logging internals.
