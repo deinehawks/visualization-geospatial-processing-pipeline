@@ -5,9 +5,9 @@
 - **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
 - **Current phase:** Phase 2 - Logging and observability
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** ADR-013 WebODM boundary event implementation
+- **Current task:** ADR-013 QGIS command-boundary event implementation
 - **Production code changed:** Yes - logging observability changes in shared/logging.py, shared/stage_runner.py, and pipelines/rgb_pipeline.py
-- **Next recommended task:** Extend parseable observability to remaining WebODM branches or QGIS command boundaries
+- **Next recommended task:** Extend WebODM boundary events to remaining branches or add parser/reporting support for explicit event records
 
 ## Completed tasks
 
@@ -804,3 +804,56 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 ### Recommended next Phase 2 task
 
 Either extend WebODM boundary events to Task 1/Task 4/download branches, or move to QGIS command-boundary events if command start/completion/failure attribution is more valuable for operators right now.
+## ADR-013 QGIS command-boundary event implementation
+
+Date: 2026-07-17.
+
+Implemented the first QGIS/GDAL external-boundary observability slice inside `modules/qgis/qgis_tools.py`.
+
+### Implemented behavior
+
+- `QGISTools` now routes its GDAL/QGIS subprocess calls through a small internal `_run_command()` helper.
+- The helper emits `qgis_command_started` with `tool`, executable basename, and argument count before command execution.
+- The helper emits `qgis_command_completed` with `tool`, executable basename, elapsed seconds, and return code after successful command execution.
+- The helper emits `qgis_command_failed` with `tool`, executable basename, elapsed seconds, exception type, return code when available, and a bounded sanitized error message when command execution fails.
+- Full command lines, credentials, private URLs, and input/output paths are not included in the parseable command-boundary event fields.
+- Existing `gdalwarp`, optional `gdalinfo`, and `gdal2tiles` behavior, exception wrapping, output verification, tile generation, cleanup, and operator-facing logs are preserved.
+
+This is intentionally a command-boundary slice. It does not execute `stage_qgis()` in tests, does not run real QGIS/GDAL, and does not introduce a JSON log format, database event journal, migration, retry redesign, checkpoint change, or operator workflow change.
+
+### Tests changed
+
+Added `tests/test_qgis_tools_observability.py` with fake-backed QGIS tool coverage. The tests patch the module subprocess boundary, use pytest-owned paths and temporary log files, and verify parseable `qgis_command_started`, `qgis_command_completed`, and `qgis_command_failed` events. The failure test also verifies that full input/output paths are not logged in the parseable failure event.
+
+### Files modified
+
+- Modified: `modules/qgis/qgis_tools.py`
+- Created: `tests/test_qgis_tools_observability.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, event journal, JSON log format, retry behavior, checkpoint behavior, WebODM behavior, dependency list, real QGIS/GDAL execution, or operator workflow changed.
+
+### Validation
+
+- `python -m py_compile modules\qgis\qgis_tools.py tests\test_qgis_tools_observability.py` - passed.
+- First `python -m pytest -q tests\test_qgis_tools_observability.py` - 1 failed, 1 passed because the test expected 12 generated `gdal2tiles` arguments; the current non-Windows command path has 11. The test expectation was corrected.
+- Corrected `python -m pytest -q tests\test_qgis_tools_observability.py` - 2 passed in 0.05 seconds.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 4 passed in 0.23 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 3 passed in 0.22 seconds.
+- `python -m pytest -q tests\test_suite_safety_guards.py` - 8 passed in 0.06 seconds.
+- `python -m pytest --collect-only -q` - 56 tests collected in 0.07 seconds.
+- `python -m pytest -q` - 56 passed in 1.20 seconds.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- QGIS `stage_qgis()` branch-level attribution is still limited to command events; disabled/skipped clip or tile branches do not yet emit explicit parseable artifact/branch events.
+- WebODM Task 1, Task 4/fallback, resume/reattach, quality-gate restart, and download/export branches do not yet emit or test parseable boundary events.
+- `query_survey_stats.py` does not yet prefer explicit `event=` records for analytics; it remains compatible with the existing text log parser.
+- Threaded/interleaved logging behavior remains deferred until production concurrency is introduced.
+
+### Recommended next Phase 2 task
+
+Either extend WebODM boundary events to Task 1/Task 4/download branches, or add parser/reporting support that recognizes explicit `event=` records so the lifecycle and external-boundary events become easier to query.

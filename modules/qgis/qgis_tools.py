@@ -8,7 +8,7 @@ import time
 from pathlib import Path
 from typing import Optional
 
-from shared.logging import log_ok, log_section, log_step, log_warn
+from shared.logging import log_event, log_ok, log_section, log_step, log_warn
 
 
 class QGISTools:
@@ -33,6 +33,48 @@ class QGISTools:
         self.gdal2tiles_path = gdal2tiles_path
         self.gdalinfo_path = gdalinfo_path
 
+    def _run_command(self, tool: str, cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
+        argv0 = Path(str(cmd[0])).name if cmd else ""
+        log_event(
+            self.logger,
+            "qgis_command_started",
+            tool=tool,
+            argv0=argv0,
+            arg_count=len(cmd),
+        )
+
+        t0 = time.perf_counter()
+        try:
+            result = subprocess.run(cmd, **kwargs)
+        except Exception as e:
+            returncode = getattr(e, "returncode", "")
+            if isinstance(e, subprocess.CalledProcessError):
+                error_message = f"command returned non-zero exit status {e.returncode}"
+            elif isinstance(e, FileNotFoundError):
+                error_message = f"command not found: {argv0}"
+            else:
+                error_message = str(e)[:300]
+            log_event(
+                self.logger,
+                "qgis_command_failed",
+                tool=tool,
+                argv0=argv0,
+                elapsed_seconds=f"{time.perf_counter() - t0:.2f}",
+                error_type=type(e).__name__,
+                error_message=error_message,
+                returncode=returncode,
+            )
+            raise
+
+        log_event(
+            self.logger,
+            "qgis_command_completed",
+            tool=tool,
+            argv0=argv0,
+            elapsed_seconds=f"{time.perf_counter() - t0:.2f}",
+            returncode=getattr(result, "returncode", 0),
+        )
+        return result
 
     # STAGE FILE TO LOCAL DISK
     def stage_local_copy(self, src: Path, local_dir: Path) -> Path:
@@ -169,7 +211,13 @@ class QGISTools:
 
         t0 = time.perf_counter()
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            self._run_command(
+                "gdalwarp",
+                cmd,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
         except FileNotFoundError:
             raise RuntimeError(f"gdalwarp not found: {self.gdalwarp_path}")
         except subprocess.CalledProcessError as e:
@@ -233,7 +281,8 @@ class QGISTools:
         last_err = ""
         for attempt in range(1, retries + 1):
             try:
-                subprocess.run(
+                self._run_command(
+                    "gdalinfo",
                     [str(self.gdalinfo_path), "-checksum", str(tif_path)],
                     check=True,
                     capture_output=True,
@@ -425,7 +474,8 @@ class QGISTools:
         self.logger.info("  Tiling in progress… (this may take several minutes)")
 
         try:
-            subprocess.run(
+            self._run_command(
+                "gdal2tiles",
                 cmd,
                 check=True,
                 capture_output=True,

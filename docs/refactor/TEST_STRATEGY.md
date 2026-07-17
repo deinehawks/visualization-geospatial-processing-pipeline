@@ -455,3 +455,17 @@ Coverage proves that generated WebODM boundary events:
 - emit `event=webodm_task_status` with project ID, task key, task ID, status, success flag, and elapsed seconds after waiting for primary Task 2.
 
 The test uses `FakeWebODM`, fake upload-cache behavior, pytest-owned paths, and a temporary log file. It does not contact WebODM, upload images, download assets, run QGIS/GDAL, or execute the full pipeline.
+## QGIS command-boundary event coverage
+
+Added on 2026-07-17, `tests/test_qgis_tools_observability.py` verifies ADR-013 parseable external-boundary events for QGIS/GDAL command execution.
+
+Coverage proves that generated QGIS command-boundary events:
+
+- preserve the existing log columns and logical QGIS logger name;
+- carry the run ID in the existing `run_id` column;
+- emit `event=qgis_command_started` with tool name, executable basename, and argument count before command execution;
+- emit `event=qgis_command_completed` with tool name, executable basename, elapsed seconds, and return code after successful command execution;
+- emit `event=qgis_command_failed` with tool name, executable basename, elapsed seconds, exception type, sanitized error message, and return code when a command fails; and
+- avoid logging full input/output paths in the parseable failure event.
+
+The tests patch the `modules.qgis.qgis_tools.subprocess.run` boundary with fakes, use pytest-owned temporary inputs, outputs, and log files, and do not run real QGIS, GDAL, shell commands, or `stage_qgis()`.
