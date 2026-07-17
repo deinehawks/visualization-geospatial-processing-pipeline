@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import contextvars
+import hashlib
 import logging
 import re
 import sys
@@ -34,16 +36,33 @@ def strip_ansi(s: str) -> str:
 # Context Filter
 # ================================
 
+_STAGE_CONTEXT_BY_LOGGER: contextvars.ContextVar[dict[str, str]] = (
+    contextvars.ContextVar("stage_context_by_logger", default={})
+)
+
+
 class ContextFilter(logging.Filter):
 
-    def __init__(self, run_id: str = "", stage_name: str = "") -> None:
+    def __init__(
+        self,
+        run_id: str = "",
+        stage_name: str = "",
+        *,
+        logical_name: str = "",
+        logger_key: str = "",
+    ) -> None:
         super().__init__()
         self.run_id:     str = run_id
         self.stage_name: str = stage_name
+        self.logical_name = logical_name
+        self.logger_key = logger_key
 
     def filter(self, record: logging.LogRecord) -> bool:
         record.run_id = self.run_id
-        record.stage_name = self.stage_name
+        context = _STAGE_CONTEXT_BY_LOGGER.get()
+        record.stage_name = context.get(self.logger_key, self.stage_name)
+        if self.logical_name:
+            record.name = self.logical_name
         return True
 
 
@@ -57,7 +76,12 @@ def get_context_filter(logger: logging.Logger) -> Optional[ContextFilter]:
 def set_stage_context(logger: logging.Logger, stage_name: str) -> None:
     ctx = get_context_filter(logger)
     if ctx is not None:
-        ctx.stage_name = stage_name
+        stage_context = dict(_STAGE_CONTEXT_BY_LOGGER.get())
+        if stage_name:
+            stage_context[ctx.logger_key] = stage_name
+        else:
+            stage_context.pop(ctx.logger_key, None)
+        _STAGE_CONTEXT_BY_LOGGER.set(stage_context)
 
 
 # ================================
@@ -131,6 +155,25 @@ DATE_FORMAT = "%H:%M:%S"
 # Logger factory
 # ================================
 
+def _logger_instance_name(
+    name: str,
+    *,
+    log_file: Optional[Path | str],
+    run_id: str,
+) -> str:
+    if log_file is None and not run_id:
+        return name
+
+    log_identity = ""
+    if log_file is not None:
+        log_identity = str(Path(log_file).resolve())
+
+    digest = hashlib.sha1(
+        f"{name}|{run_id}|{log_identity}".encode("utf-8")
+    ).hexdigest()[:12]
+    return f"{name}.__owned__.{digest}"
+
+
 def get_logger(
     name: str,
     log_file: Optional[Path | str] = None,
@@ -140,19 +183,22 @@ def get_logger(
     run_id: str = "",
 ) -> logging.Logger:
 
-    logger = logging.getLogger(name)
+    logger_name = _logger_instance_name(name, log_file=log_file, run_id=run_id)
+    logger = logging.getLogger(logger_name)
     logger.setLevel(level)
     logger.propagate = False
 
     if getattr(logger, "_configured", False):
-        if run_id:
-            ctx = get_context_filter(logger)
-            if ctx is not None:
-                ctx.run_id = run_id
         return logger
 
     # ---- Context filter (run_id / stage_name) ----
-    logger.addFilter(ContextFilter(run_id=run_id))
+    logger.addFilter(
+        ContextFilter(
+            run_id=run_id,
+            logical_name=name,
+            logger_key=logger_name,
+        )
+    )
 
     if log_file is not None:
         log_path = Path(log_file)

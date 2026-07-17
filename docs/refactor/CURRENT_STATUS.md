@@ -2,12 +2,12 @@
 
 ## Summary
 
-- **Refactor status:** In progress; Phase 1 phase-gate assessment complete
-- **Current phase:** Phase 1 - Test isolation and safety baseline; complete enough to move to Phase 2, which has not started yet
+- **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
+- **Current phase:** Phase 2 - Logging and observability
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** Phase 1 completion assessment against Phase 1 acceptance criteria
-- **Production code changed:** No for the Phase 1 completion assessment
-- **Next recommended task:** Move to Phase 2 - Logging and observability; begin with logger context isolation and handler ownership characterization
+- **Current task:** ADR-002 parser compatibility coverage after logger isolation
+- **Production code changed:** Yes - shared/logging.py for ADR-002 logger isolation
+- **Next recommended task:** Inventory direct logging.getLogger("rgb.*") callers and define the next observability contract without adding redundant concurrency tests
 
 ## Completed tasks
 
@@ -426,3 +426,144 @@ None for moving to Phase 2.
 ### Recommended first Phase 2 task
 
 Characterize and test current logger context and handler ownership before changing it: build focused tests that demonstrate whether two `RGBPipeline` or logger instances in one process can exchange `run_id`, `stage_name`, handlers, or log destinations. Use injected temporary log paths and no pipeline stages. This should directly inform ADR-002 without starting broad logging rewrites.
+
+
+## Phase 2 logging context characterization milestone
+
+Date: 2026-07-17.
+
+### Scope
+
+Started Phase 2 without changing production logging code. The goal was to characterize the current logger context and handler ownership behavior so ADR-002 can be decided from evidence rather than assumption.
+
+Created `tests/test_logging_context_ownership.py` with focused tests that use only pytest-owned temporary log paths and temporary RGBPipeline construction. The tests clean up the named loggers and handlers they create so process-global logging state does not leak to other tests.
+
+### Confirmed current behavior
+
+- `shared.logging.get_logger()` returns the same process-global `logging.Logger` for repeated calls with the same name.
+- The first configured file handler remains attached; a later call with the same logger name and a different `log_file` does not add or replace the file handler.
+- A later call with the same logger name and a new `run_id` mutates the existing `ContextFilter.run_id`.
+- `stage_name` is also shared mutable state on the existing `ContextFilter`; later logical users inherit and can overwrite it.
+- Two default `RGBPipeline` constructions in one process reuse the same `rgb.pipeline` logger object. The second pipeline's `run_id` is written through the first pipeline's file handler destination.
+
+This confirms the Phase 2 risk described by ADR-002 and the scalability audit: current logger context and handler ownership are not isolated across multiple logical pipeline instances in one process.
+
+### Files created or modified
+
+- Created: `tests/test_logging_context_ownership.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No production code, database schema, migration, retry behavior, checkpoint behavior, pipeline stage behavior, external-service behavior, or operator workflow changed.
+
+### Tests and validation
+
+- `python -m py_compile tests\test_logging_context_ownership.py` - passed.
+- First `python -m pytest -q tests\test_logging_context_ownership.py` - 3 passed in 0.13 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 4 passed.
+- `python -m pytest -q tests\test_suite_safety_guards.py` - 8 passed.
+- First `python -m pytest --collect-only -q` found a collection-order issue: the new test's `exifread` import stub lacked `__spec__`, causing the older RGBPipeline construction test's `find_spec("exifread")` guard to raise. The new stub was changed to include a `ModuleSpec`.
+- Corrected `python -m py_compile tests\test_logging_context_ownership.py` - passed.
+- Corrected `python -m pytest -q tests\test_logging_context_ownership.py` - 3 passed in 0.12 seconds.
+- Corrected `python -m pytest --collect-only -q` before documentation updates - 51 tests collected.
+- `python -m pytest -q` before documentation updates - 51 passed in 0.87 seconds.
+- Final `python -m pytest --collect-only -q` after documentation updates - 51 tests collected in 0.10 seconds.
+- Final `python -m pytest -q` after documentation updates - 51 passed in 0.99 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks and recommended next task
+
+ADR-002 remains pending. The next task should choose the smallest backward-compatible logging direction, likely one of:
+
+- per-run/per-instance logger names with explicit handler ownership;
+- logger adapters or structured event wrappers that carry immutable per-record context;
+- `contextvars` for run/stage context if concurrent async/thread behavior is required; or
+- another explicit design recorded in `DECISIONS.md` before production changes.
+
+Before implementing the fix, add or adjust tests so the desired behavior is expressed as isolation requirements rather than current-behavior characterization: two logical pipeline/logger instances must not exchange run IDs, stage names, handlers, or file destinations.
+
+
+## ADR-002 logger isolation implementation milestone
+
+Date: 2026-07-17.
+
+### Implemented behavior
+
+Accepted ADR-002 and implemented the first production logging isolation fix in `shared/logging.py`.
+
+`get_logger()` keeps its existing public signature, but when a run ID or log file is supplied it now creates an owned concrete logger keyed by logical logger name, run ID, and log destination. A `ContextFilter` preserves the logical logger name in emitted records, so file logs continue to use the existing `time | level | logger | run_id | stage | message` shape expected by `query_survey_stats.py`.
+
+Stage context is now stored in context-local state keyed by the owned concrete logger identity. This prevents one logger instance's stage context from leaking into another same-named logical logger instance. Existing callers that use `get_logger()` without a run ID and without a log file retain conventional `logging.getLogger(name)` behavior.
+
+### Tests changed
+
+`tests/test_logging_context_ownership.py` was converted from characterization of the old broken behavior into desired-behavior coverage. It now proves:
+
+- same logical logger names with different run IDs/log files produce distinct logger objects;
+- each owned logger writes only to its own temporary file handler destination;
+- run IDs do not cross between owned loggers;
+- stage names do not cross between owned loggers; and
+- two default `RGBPipeline` constructions in one process own separate `rgb.pipeline` handlers and write to their own log files while preserving the logical `rgb.pipeline` record name.
+
+### Files modified or created
+
+- Modified: `shared/logging.py`
+- Modified: `tests/test_logging_context_ownership.py`
+- Modified: `docs/refactor/DECISIONS.md`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, pipeline stage behavior, retry behavior, checkpoint behavior, WebODM behavior, QGIS/GDAL behavior, dependency list, or operator workflow changed.
+
+### Validation
+
+- `python -m py_compile shared\logging.py tests\test_logging_context_ownership.py` - passed.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 3 passed in 0.16 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 4 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 2 passed.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 8 passed.
+- `python -m pytest --collect-only -q` before documentation updates - 51 tests collected in 0.06 seconds.
+- `python -m pytest -q` before documentation updates - 51 passed in 0.91 seconds.
+- Final `python -m pytest --collect-only -q` after documentation updates - 51 tests collected in 0.06 seconds.
+- Final `python -m pytest -q` after documentation updates - 51 passed in 0.98 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- Stage context is isolated by context-local logger identity, but explicit concurrent/threaded interleaving tests have not yet been added. This is a tracked future risk rather than a current blocker because the pipeline has not introduced worker-thread execution.
+- `query_survey_stats.py` parser compatibility now has one parser-level generated-log test, but broader parser analytics and historical log-format compatibility remain outside this logging isolation task.
+- Direct users of `logging.getLogger("rgb.*")` bypass `get_logger()` ownership; current RGBPipeline default construction uses `get_logger()`, but this remains a boundary to inventory.
+- Handler lifecycle in long-running worker processes needs a later ownership/cleanup policy beyond test cleanup helpers.
+
+## ADR-002 parser compatibility coverage
+
+Date: 2026-07-17.
+
+Added one lightweight parser-level compatibility test for the logging isolation change. The test writes a temporary `pipeline.log` line through `get_logger("rgb.pipeline", ..., run_id="run-parser")`, sets stage context to `data_segregation`, then verifies `query_survey_stats.parse_log_events()` reads the generated line with the expected logical logger name, run ID filter, stage, message, and `pipeline.log` source.
+
+This keeps coverage focused on the contract changed by ADR-002: owned concrete logger names must not leak into the existing `time | level | logger | run_id | stage | message` parser surface. No threaded/interleaved test was added in this step; that remains a future concurrency risk to cover when worker-thread execution or concurrent pipeline orchestration is introduced.
+
+### Files modified
+
+- Modified: `tests/test_logging_context_ownership.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No production code, database schema, migration, pipeline stage behavior, retry behavior, checkpoint behavior, dependency list, external-service behavior, or operator workflow changed.
+
+### Validation
+
+- `python -m py_compile tests\test_logging_context_ownership.py` - passed.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 4 passed in 0.16 seconds.`r`n- `python -m pytest --collect-only -q` - 52 tests collected in 0.06 seconds.`r`n- `python -m pytest -q` - 52 passed in 0.87 seconds.`r`n- `git diff --check` - passed; Git reported an LF-to-CRLF working-tree warning for `docs/refactor/CURRENT_STATUS.md`.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- Explicit threaded/interleaved logging behavior remains untested and should be added only when concurrency becomes part of the production design.
+- Direct users of `logging.getLogger("rgb.*")` still bypass `get_logger()` ownership and should be inventoried before broadening observability work.
+- Handler lifecycle in long-running worker processes still needs a later ownership/cleanup policy beyond test cleanup helpers.

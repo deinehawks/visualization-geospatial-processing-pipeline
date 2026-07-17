@@ -197,7 +197,7 @@ Implemented controls are deliberately narrow. Common `Path`, `open`, and cleanup
 
 ## Latest validation
 
-On 2026-07-17, the Phase 1 completion assessment ran the requested safe validations: `python -m pytest --collect-only -q` collected 48 tests in 0.12 seconds, `python -m pytest -q` passed 48 tests in 0.79 seconds, and `git diff --check` passed. No external marker, network service, subprocess, production database, production survey directory, operator tool, real pipeline run, WebODM request, QGIS/GDAL command, keyboard hook, interactive input, or destructive cleanup operation was used.
+On 2026-07-17, ADR-002 was accepted and the first logger isolation fix was implemented. Validation compiled `shared/logging.py` and `tests/test_logging_context_ownership.py`, passed 3 focused logging tests, passed RGBPipeline construction, RGBPipeline single-stage, and StageRunner suites, collected 51 tests, and passed the full default suite 51/51 before documentation updates, then collected 51 tests and passed the final full default suite 51/51 after documentation updates. A follow-up parser compatibility test then passed the focused logging module 4/4, collection found 52 tests, the final full default suite passed 52/52, and `git diff --check` passed, proving generated isolated logger output remains readable by `query_survey_stats.parse_log_events()`. No external marker, network service, subprocess, production database, production survey directory, operator tool, real pipeline run, WebODM request, QGIS/GDAL command, keyboard hook, interactive input, or destructive cleanup operation was used.
 
 Recommendation: Phase 1 is complete enough to move to Phase 2 - Logging and observability. The default suite now validates the most important safety guarantees for discovery, dotenv denial, network/WebODM denial, subprocess/QGIS/GDAL denial, production SQLite denial, production-root denial, destructive-helper opt-in, temporary filesystem/SQLite fixtures, fake WebODM, and import-time side-effect guards. Remaining gaps are non-blocking for Phase 2 and should be carried forward explicitly.
 
@@ -387,3 +387,19 @@ Phase 1 acceptance criteria from `REFACTOR_PLAN.md` are satisfied well enough to
 Non-blocking risks remain: later RGBPipeline stages, real data segregation, quality gate, WebODM/QGIS/GDAL compatibility, SQLite concurrency/connection lifecycle, symlink/junction containment, and explicit external marker exercise. These do not block Phase 2 because Phase 2 can proceed with temporary log paths, injected collaborators, and the established safety guards.
 
 The recommended first Phase 2 test task is to characterize existing logger context and handler ownership under two simultaneous logger/pipeline constructions, using temporary log paths and no pipeline stage execution. This should provide evidence for ADR-002 before changing logging internals.
+
+
+## Phase 2 logging isolation coverage
+
+Added on 2026-07-17, `tests/test_logging_context_ownership.py` first characterized the current logging isolation problem, then was converted to desired-behavior coverage after ADR-002 was accepted.
+
+Coverage now proves:
+
+- repeated logical logger names with different run IDs/log files receive separate owned logger objects;
+- each owned logger writes only to its own file handler destination;
+- run IDs do not cross between owned loggers;
+- stage names do not cross between owned loggers; and
+- two default `RGBPipeline` constructions in one process own separate `rgb.pipeline` handlers while preserving the logical `rgb.pipeline` record name and existing log parser column shape;
+- generated isolated `rgb.pipeline` output remains readable by `query_survey_stats.parse_log_events()` when filtering by run ID.
+
+The tests use temporary log paths, temporary RGBPipeline construction, fake WebODM, and explicit logger cleanup. They do not run pipeline stages or external tools. Explicit threaded/interleaved logging coverage is intentionally deferred until concurrency becomes part of the production execution design; adding it now would duplicate isolation guarantees already covered without matching a current runtime path.

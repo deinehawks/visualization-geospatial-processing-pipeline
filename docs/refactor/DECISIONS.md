@@ -34,7 +34,7 @@ These entries identify required decisions without selecting final architectures.
 | Decision ID | Date | Status | Context | Decision | Alternatives considered | Consequences | Related files or issues |
 |---|---|---|---|---|---|---|---|
 | ADR-001 | 2026-07-16 | Accepted | Normal test discovery is currently unsafe and no framework is declared. | Use pytest as the default test framework. | Standard-library unittest; another approved runner. | pytest becomes a development/test dependency; configuration, markers, and safe handling of existing scripts are required. | R13; `tests/`; `requirements.txt` |
-| ADR-002 | 2026-07-16 | Pending | Run/stage log context must remain correct under threads and multiple pipeline instances. | Pending. | `contextvars`; per-run logger adapters; explicit structured event objects; per-run logger names. | Affects log compatibility, handler ownership, and reporting tools. | R05; `shared/logging.py`; `query_survey_stats.py` |
+| ADR-002 | 2026-07-17 | Accepted | Run/stage log context must remain correct under threads and multiple pipeline instances. | Use owned per-run logger instances keyed by logical name, run ID, and log destination, while preserving logical logger names in records and using context-local stage state. | Pure `contextvars`; per-run logger adapters; explicit structured event objects; per-run logger names only. | Fixes handler/context leakage while preserving log parser columns; requires explicit handler cleanup in tests. | R05; `shared/logging.py`; `query_survey_stats.py`; `tests/test_logging_context_ownership.py` |
 | ADR-003 | 2026-07-16 | Pending | Intermediate work and final published survey artifacts need separate ownership. | Pending. | Run-scoped workspace plus atomic publish; versioned immutable outputs plus pointer; serialized in-place writes. | Affects storage, compatibility, cleanup, recovery, and map consumers. | R02, R07; `modules/data_segregation/`; `pipelines/rgb_pipeline.py` |
 | ADR-004 | 2026-07-16 | Pending | Conflicting survey/resource use must be coordinated across the intended deployment topology. | Pending. | Database leases; OS/file locks; lock service; scheduler-enforced exclusivity. | Affects stale recovery, multi-host support, and operational complexity. | R02–R04; Phase 4 |
 | ADR-005 | 2026-07-16 | Pending | Survey IDs must be reserved atomically while preserving existing naming. | Pending. | SQLite allocation table/transaction; dedicated sequence service; atomic directory reservation; externally supplied IDs only. | Affects gaps, migration, legacy reconciliation, and database dependency. | R03; `generate_next_survey_id` |
@@ -71,4 +71,32 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001 is accepted. ADR-002 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001 and ADR-002 are accepted. ADR-003 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+
+
+### ADR-002 - Isolate logger context and handler ownership per run
+
+- **Decision ID:** ADR-002
+- **Date:** 2026-07-17
+- **Status:** Accepted
+- **Context:**
+  - Phase 2 characterization confirmed that repeated `get_logger()` calls with the same logical name reused one process-global logger, retained the first file handler destination, and mutated shared `ContextFilter.run_id` / `stage_name` values.
+  - Two default `RGBPipeline` instances in one process could therefore write the second run ID into the first pipeline's log file.
+  - `query_survey_stats.py` parses existing log columns as `time | level | logger | run_id | stage | message`, so compatibility with logical logger names and column order matters.
+- **Decision:**
+  - `get_logger()` will keep the existing public API but create owned concrete logger instances when a run ID or file destination is supplied.
+  - Concrete logger identity is keyed by logical logger name, run ID, and log file path.
+  - Log records preserve the logical logger name in the existing formatter field so parser compatibility is maintained.
+  - Stage context is stored in context-local state keyed by concrete logger identity instead of mutating one process-global stage field.
+  - Existing callers that use `logging.getLogger()` directly or call `get_logger()` with no run ID and no log file keep conventional logger-name behavior.
+- **Alternatives considered:**
+  - Pure `contextvars`: rejected because it does not by itself fix shared file-handler destinations.
+  - Per-run logger names only: insufficient because it exposes internal names in existing log formats unless additional record rewriting is added, and it does not address context-local stage state.
+  - `LoggerAdapter` at every call site: explicit but broader and more invasive than needed for this phase.
+  - Structured event objects: a likely future direction, but too broad for the current compatibility-preserving fix.
+- **Consequences:**
+  - Multiple pipeline instances in one process no longer share file handlers or mutable stage/run context through same-named loggers.
+  - Existing text log columns and logical logger names remain compatible with `query_survey_stats.py`.
+  - Tests that create owned loggers should close and remove their handlers explicitly to avoid process-global logging registry residue.
+  - Rollback is straightforward: revert `shared/logging.py` and `tests/test_logging_context_ownership.py`; no schema or data migration is involved.
+- **Related files or issues:** R05; `shared/logging.py`; `query_survey_stats.py`; `tests/test_logging_context_ownership.py`; Phase 2.
