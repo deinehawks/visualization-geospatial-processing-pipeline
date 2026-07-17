@@ -57,7 +57,7 @@ The former executable scripts now live outside discovery:
 
 On 2026-07-16, syntax checks passed, default collection found 13 tests, and the full default suite passed 13 tests. All database and deletion tests used pytest temporary directories. No external tests were run.
 
-The default suite now includes reusable temporary path/current-schema SQLite fixtures, a deterministic recording fake WebODM, credential/path isolation, and autouse denial of network, subprocess, input, keyboard, dotenv, production database, and common production-path access. Phase 1 remains in progress because production WebODM/configuration injection and explicit database connection ownership are still missing, and platform-specific symlink/junction checks remain unimplemented.
+The default suite now includes reusable temporary path/current-schema SQLite fixtures, a deterministic recording fake WebODM, credential/path isolation, autouse denial of network, subprocess, input, keyboard, dotenv, production database, and common production-path access, plus hermetic RGBPipeline construction. Phase 1 remains in progress because explicit production database connection ownership, platform-specific symlink/junction checks, and configuration-loader coverage remain incomplete.
 
 ### Shared test infrastructure
 
@@ -71,7 +71,7 @@ The default suite now includes reusable temporary path/current-schema SQLite fix
 
 `tests/fakes/webodm.py` provides deterministic authentication/preflight, project and task creation, task lookup/status/wait behavior, download request recording, ordered call inspection, and configurable transient or permanent failures. It imports no network client and does not read image contents.
 
-The fake is currently independent: `RGBPipeline.stage_webodm()`, `run_webodm_fallback_task()`, and `stage_quality_gate()` construct `WebODMProcessor` directly. A production injection seam is intentionally deferred.
+RGBPipeline now accepts an existing WebODM processor. Its primary WebODM stage, fallback task, and quality-gate restart path all resolve the processor through one helper, while the default still constructs the real WebODMProcessor only when a stage requests it. Constructor tests retain FakeWebODM without invoking authentication, preflight, or any fake call.
 
 ## Desired test architecture
 
@@ -284,4 +284,54 @@ The focused test module now covers:
 
 Validation collected 42 tests and passed 42/42. Focused StageRunner, fake WebODM, and safety-guard tests all passed. No external operation occurred.
 
-Remaining test-architecture risks are the legacy message-backed control signals, intentional non-terminal active-stage behavior for propagated pause/abort/cancel signals, the unchanged broad retry policy, and the lack of hermetic full-pipeline construction.
+Remaining test-architecture risks are the legacy message-backed control signals, intentional non-terminal active-stage behavior for propagated pause/abort/cancel signals, the unchanged broad retry policy, and the lack of a hermetic RGBPipeline stage execution test.
+
+## Hermetic RGBPipeline construction coverage
+
+Added on 2026-07-17, tests/test_rgb_pipeline_construction.py imports and
+constructs the real RGBPipeline while the default-suite safety guards deny
+dotenv, network, subprocess, input, keyboard, production database, and captured
+production-path access.
+
+The constructor now exposes only the seams required for this level:
+
+- db_file or an existing PipelineRepo;
+- an existing logger mapping and explicit log/checkpoint directories; and
+- an existing WebODM processor.
+
+Base, source, survey, year, run ID, and configuration were already explicit.
+PipelineControl and PipelinePreflight constructors are inert, so no extra seam
+was introduced for them. QGIS command execution, quality-gate input, hotkey
+registration, preflight checks, and StageRunner.run remain outside constructor
+execution.
+
+Coverage proves:
+
+- all owned paths, control flags, checkpoints, and SQLite files resolve beneath
+  the pytest application root;
+- the constructor's existing run upserts affect only temporary SQLite;
+- injected repository, logger objects, database path, and FakeWebODM are
+  retained;
+- FakeWebODM receives no calls during construction;
+- default repository, logger, checkpoint, control, and WebODM wiring remains
+  compatible through non-I/O recorder doubles;
+- invalid non-mapping configuration fails before any logger, repository,
+  directory, or WebODM side effect; and
+- no pipeline stage or preflight check executes.
+
+The environment does not contain exifread and requirements.txt does not declare
+it, although importing RGBPipeline imports the cross-run filter module. The
+construction test supplies a test-only import stub whose process_file function
+fails immediately if used. This permits import/constructor coverage without
+installing a production dependency and cannot mask stage execution in these
+tests.
+
+Validation compiled the changed Python files, passed 4 focused construction
+tests, 8 StageRunner orchestration tests, 5 FakeWebODM tests, and 8 safety-guard
+tests. Default collection found 46 tests and the full default suite passed
+46/46. No external test or operation ran.
+
+Remaining coverage does not yet execute a real RGBPipeline stage, exercise the
+configuration loader without dotenv, or resolve production PipelineRepo
+connection-close semantics. The next testability target is one hermetic
+single-stage RGBPipeline execution with every external boundary faked.

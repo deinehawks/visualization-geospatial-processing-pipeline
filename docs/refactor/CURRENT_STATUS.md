@@ -4,10 +4,10 @@
 
 - **Refactor status:** In progress
 - **Current phase:** Phase 1 - Test isolation and safety baseline
-- **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, and suite-wide default safety guards
-- **Current task:** Temporary filesystem/SQLite fixtures, fake WebODM, and default-suite external-effect denial
-- **Production code changed:** No
-- **Next recommended task:** Evaluate minimal configuration, repository, and WebODM injection seams for hermetic RGBPipeline construction
+- **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, and hermetic RGBPipeline construction
+- **Current task:** Hermetic RGBPipeline construction through explicit repository, path, logger, and WebODM seams
+- **Production code changed:** Yes - pipelines/rgb_pipeline.py only
+- **Next recommended task:** Add a hermetic single-stage RGBPipeline execution test without invoking external tools or services
 
 ## Completed tasks
 
@@ -202,3 +202,97 @@ Phase 1 remains in progress.
 ### Recommended next Phase 1 task
 
 Investigate the smallest backward-compatible configuration, repository, and WebODM injection seams needed for hermetic `RGBPipeline` construction without executing stages. Treat typed pipeline-control exceptions as a separate design task rather than expanding this fix.
+
+## Hermetic RGBPipeline construction milestone
+
+Date: 2026-07-17.
+
+### Constructor dependencies and seams
+
+RGBPipeline construction previously owned fixed data/log/database/checkpoint
+paths, six process-global named loggers, PipelineRepo creation, and later direct
+WebODMProcessor construction at three stage call sites. The constructor already
+accepted an explicit config dictionary, base/source/survey paths, year, and run
+identifier; it never loaded dotenv or contacted WebODM itself.
+
+The smallest backward-compatible optional seams are now:
+
+- db_file or an existing repository, with the pair rejected as ambiguous;
+- an existing six-entry logger mapping;
+- explicit logs_dir and checkpoint_dir paths; and
+- an existing webodm_processor used by all three processor call sites.
+
+Configuration must be a mapping and is rejected before filesystem, logger,
+database, or external collaborators are opened. Default callers still use
+base_dir/data/logs, base_dir/data/pipeline.db, checkpoint files under the log
+directory, PipelineControl under base_dir/data, the existing global logger
+factory, and the real WebODMProcessor when a WebODM stage later requests it.
+
+### Constructor-time side effects that remain
+
+- Default logger construction creates the log directory and opens the existing
+  six log files. Injected logger mappings bypass those global/path effects.
+- Default PipelineRepo construction creates/opens SQLite, applies the current
+  schema and migrations, and enables the existing WAL/PRAGMA settings.
+- RGBPipeline creates the metadata-bearing run record, then StageRunner
+  performs a second idempotent create_run(run_id) upsert. This duplicate
+  constructor-time persistence is unchanged and remains a later design concern.
+- PipelineControl, StageRunner, and PipelinePreflight objects are constructed.
+  PipelineControl creates no flags and registers no hotkeys until run() starts.
+- No preflight check, pipeline stage, input prompt, WebODM authentication,
+  network call, QGIS/GDAL command, or external subprocess occurs in the
+  constructor.
+
+### Files modified or created
+
+- Modified: pipelines/rgb_pipeline.py
+- Created: tests/test_rgb_pipeline_construction.py
+- Modified: docs/refactor/CURRENT_STATUS.md
+- Modified: docs/refactor/TEST_STRATEGY.md
+
+No database schema, migration, configuration loader, logger implementation,
+retry, checkpoint-write protocol, or operator workflow changed.
+
+### Tests and exact validation
+
+- Pre-change python -m pytest -q - 42 passed in 0.59 seconds.
+- python -m py_compile pipelines/rgb_pipeline.py
+  tests/test_rgb_pipeline_construction.py - passed.
+- The first focused collection exposed that exifread is imported by the
+  cross-run module but is neither installed nor declared in requirements.txt.
+  The construction test now supplies a narrow import-only stub that fails if
+  EXIF processing is attempted; no dependency was installed or changed.
+- First executable focused run - 3 passed and 1 failed because the compatibility
+  recorder revealed StageRunner's second existing create_run upsert.
+- Corrected python -m pytest -q tests/test_rgb_pipeline_construction.py -
+  4 passed in 0.12 seconds.
+- python -m pytest -q tests/test_stage_runner_orchestration.py -
+  8 passed in 0.27 seconds.
+- python -m pytest -q tests/test_fake_webodm.py - 5 passed in 0.04 seconds.
+- python -m pytest -q tests/test_suite_safety_guards.py -
+  8 passed in 0.05 seconds.
+- python -m pytest --collect-only -q - 46 tests collected.
+- python -m pytest -q - 46 passed in 0.63 seconds.
+
+The four construction tests prove temporary path/database ownership, temporary
+run persistence, fake WebODM retention without calls, logger/repository
+retention, explicit db_file use, unchanged default wiring through safe
+recorders, early invalid-config failure, and absence of stage/preflight
+execution. Suite-wide guards continue to fail any dotenv, network, subprocess,
+input, keyboard, or captured production-path access.
+
+No external test, pipeline run, pipeline stage, real WebODM request,
+QGIS/GDAL command, keyboard hook, interactive input, production path, or
+production SQLite database was used.
+
+### Remaining Phase 1 work and next task
+
+Phase 1 remains in progress. Production PipelineRepo connection-close
+semantics, direct configuration-loader validation without dotenv, actual
+symlink/junction containment behavior, and an explicit external-marker
+exercise remain unproven. Global logger context remains unsafe for concurrent
+pipeline instances and is reserved for Phase 2.
+
+The next scoped task should be a hermetic single-stage RGBPipeline execution
+test using the new repository/logger/WebODM seams and a stage with every
+external boundary faked. It must not run the full pipeline.

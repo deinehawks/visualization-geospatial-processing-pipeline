@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, Any, Optional, Set, List, Tuple
+from typing import Dict, Any, Optional, Set, List, Tuple, Mapping
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context
 from shared.constants import WEBODM_RESTART_STAGES, WEBODM_RESTART_STAGE_NAMES
 from shared.logging import get_logger
@@ -52,7 +52,7 @@ class RGBPipeline(
     def __init__(
         self,
         base_dir: Path,
-        config: Dict[str, Any],
+        config: Mapping[str, Any],
         *,
         source_dir: Path,
         surveys_root: Path,
@@ -68,7 +68,34 @@ class RGBPipeline(
         force_segregation: bool = False,
         webodm_mode: str = "task4",   # "task2" | "task4" | "both"
         use_year_subdir_override: Optional[bool] = None,
+        db_file: Optional[Path] = None,
+        repository: Optional[PipelineRepo] = None,
+        loggers: Optional[Mapping[str, logging.Logger]] = None,
+        logs_dir: Optional[Path] = None,
+        checkpoint_dir: Optional[Path] = None,
+        webodm_processor: Optional[Any] = None,
     ):
+        if not isinstance(config, Mapping):
+            raise TypeError("config must be a mapping")
+        if repository is not None and db_file is not None:
+            raise ValueError("repository and db_file are mutually exclusive")
+
+        logger_names = {
+            "pipeline",
+            "segregation",
+            "cross_run_filter",
+            "kml",
+            "webodm",
+            "qgis",
+        }
+        if loggers is not None:
+            missing_loggers = sorted(logger_names.difference(loggers))
+            if missing_loggers:
+                raise ValueError(
+                    "loggers is missing required entries: "
+                    + ", ".join(missing_loggers)
+                )
+
         self.base_dir = Path(base_dir)
         self.config = config
         self.source_dir = Path(source_dir)
@@ -76,8 +103,17 @@ class RGBPipeline(
         self.year = int(year)
         self.run_id = run_id or str(uuid.uuid4())
         self.survey_id: Optional[str] = None
-        self.logs_dir = self.base_dir / "data" / "logs"
-        self.logs_dir.mkdir(parents=True, exist_ok=True)
+        self.logs_dir = (
+            Path(logs_dir)
+            if logs_dir is not None
+            else self.base_dir / "data" / "logs"
+        )
+        self.checkpoint_dir = (
+            Path(checkpoint_dir)
+            if checkpoint_dir is not None
+            else self.logs_dir
+        )
+        self.webodm_processor = webodm_processor
 
         self.survey_id_override = survey_id_override
         self.task_name_overrides = task_name_overrides or {}
@@ -98,44 +134,52 @@ class RGBPipeline(
             self.run_id,
         )
 
-        self.loggers: Dict[str, logging.Logger] = {
-            "pipeline": get_logger(
-                "rgb.pipeline",
-                self.logs_dir / "pipeline.log",
-                run_id=self.run_id,
-            ),
-            "segregation": get_logger(
-                "rgb.data_segregation",
-                self.logs_dir / "data_segregation.log",
-                run_id=self.run_id,
-            ),
-            "cross_run_filter": get_logger(
-                "rgb.cross_run_filter",
-                self.logs_dir / "cross_run_filter.log",
-                run_id=self.run_id,
-            ),
-            "kml": get_logger(
-                "rgb.kml",
-                self.logs_dir / "kml.log",
-                run_id=self.run_id,
-            ),
-            "webodm": get_logger(
-                "rgb.webodm",
-                self.logs_dir / "webodm.log",
-                run_id=self.run_id,
-            ),
-            "qgis": get_logger(
-                "rgb.qgis",
-                self.logs_dir / "qgis.log",
-                run_id=self.run_id,
-            ),
-        }
+        if loggers is None:
+            self.logs_dir.mkdir(parents=True, exist_ok=True)
+            self.loggers: Mapping[str, logging.Logger] = {
+                "pipeline": get_logger(
+                    "rgb.pipeline",
+                    self.logs_dir / "pipeline.log",
+                    run_id=self.run_id,
+                ),
+                "segregation": get_logger(
+                    "rgb.data_segregation",
+                    self.logs_dir / "data_segregation.log",
+                    run_id=self.run_id,
+                ),
+                "cross_run_filter": get_logger(
+                    "rgb.cross_run_filter",
+                    self.logs_dir / "cross_run_filter.log",
+                    run_id=self.run_id,
+                ),
+                "kml": get_logger(
+                    "rgb.kml",
+                    self.logs_dir / "kml.log",
+                    run_id=self.run_id,
+                ),
+                "webodm": get_logger(
+                    "rgb.webodm",
+                    self.logs_dir / "webodm.log",
+                    run_id=self.run_id,
+                ),
+                "qgis": get_logger(
+                    "rgb.qgis",
+                    self.logs_dir / "qgis.log",
+                    run_id=self.run_id,
+                ),
+            }
+        else:
+            self.loggers = loggers
 
         self.state: Dict[str, Any] = {
             "run_id": self.run_id,
         }
 
-        self.repo = PipelineRepo(db_path(self.base_dir))
+        if repository is None:
+            repository = PipelineRepo(
+                Path(db_file) if db_file is not None else db_path(self.base_dir)
+            )
+        self.repo = repository
         self.repo.create_run(
             self.run_id,
             source_dir=str(self.source_dir),
@@ -167,6 +211,18 @@ class RGBPipeline(
         self.rgb_path: Optional[Path] = None
 
     # Helpers
+    def _create_webodm_processor(self, logger: logging.Logger) -> Any:
+        if self.webodm_processor is not None:
+            return self.webodm_processor
+
+        webodm_cfg = self.config["webodm"]
+        return WebODMProcessor(
+            url=webodm_cfg["url"],
+            username=webodm_cfg["username"],
+            password=webodm_cfg["password"],
+            logger=logger,
+        )
+
     def _require_survey_id(self) -> str:
         if not self.survey_id:
             raise RuntimeError(
@@ -254,7 +310,7 @@ class RGBPipeline(
 
     # Checkpoint helpers
     def _webodm_checkpoint_path(self) -> Path:
-        return self.base_dir / "data" / "logs" / f"webodm_checkpoint_{self.run_id}.json"
+        return self.checkpoint_dir / f"webodm_checkpoint_{self.run_id}.json"
 
     def _save_webodm_checkpoint(self, data: dict) -> None:
         import json
@@ -796,12 +852,7 @@ class RGBPipeline(
                     fallback_reason=str(e),
                 )
 
-            processor = WebODMProcessor(
-                url=webodm_cfg["url"],
-                username=webodm_cfg["username"],
-                password=webodm_cfg["password"],
-                logger=logger,
-            )
+            processor = self._create_webodm_processor(logger)
 
 
             project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
@@ -1893,12 +1944,7 @@ class RGBPipeline(
         task_ortho_dir = rgb_path / "ortho"
         task_ortho_dir.mkdir(parents=True, exist_ok=True)
 
-        processor = WebODMProcessor(
-            url=webodm_cfg["url"],
-            username=webodm_cfg["username"],
-            password=webodm_cfg["password"],
-            logger=logger,
-        )
+        processor = self._create_webodm_processor(logger)
 
         existing_task_id = processor.find_task_by_name(int(project_id), task_name)
 
@@ -2101,12 +2147,8 @@ class RGBPipeline(
                     "reason": "max_restarts_exceeded",
                 }
 
-            webodm_cfg = self.config["webodm"]
-            processor = WebODMProcessor(
-                url=webodm_cfg["url"],
-                username=webodm_cfg["username"],
-                password=webodm_cfg["password"],
-                logger=self.loggers["webodm"],
+            processor = self._create_webodm_processor(
+                self.loggers["webodm"]
             )
 
             logger.warning(
