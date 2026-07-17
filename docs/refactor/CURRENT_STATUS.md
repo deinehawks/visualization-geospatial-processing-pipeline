@@ -5,9 +5,9 @@
 - **Refactor status:** In progress
 - **Current phase:** Phase 1 - Test isolation and safety baseline
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, and hermetic RGBPipeline construction
-- **Current task:** Hermetic RGBPipeline construction through explicit repository, path, logger, and WebODM seams
+- **Current task:** Hermetic single-stage RGBPipeline execution through an explicit selected-stage seam
 - **Production code changed:** Yes - pipelines/rgb_pipeline.py only
-- **Next recommended task:** Add a hermetic single-stage RGBPipeline execution test without invoking external tools or services
+- **Next recommended task:** Add another high-value hermetic stage test or assess remaining Phase 1 injection/config gaps
 
 ## Completed tasks
 
@@ -296,3 +296,75 @@ pipeline instances and is reserved for Phase 2.
 The next scoped task should be a hermetic single-stage RGBPipeline execution
 test using the new repository/logger/WebODM seams and a stage with every
 external boundary faked. It must not run the full pipeline.
+
+
+## Hermetic single-stage RGBPipeline execution milestone
+
+Date: 2026-07-17.
+
+### Selected stage and execution seam
+
+The selected stage is `data_segregation`, reached through the real production path `RGBPipeline.run()` -> `StageRunner.run("data_segregation", self.stage_data_segregation, ...)` -> `RGBPipeline.stage_data_segregation()` -> the imported `run_data_segregation` dependency.
+
+This is the safest meaningful stage because it is first in the fixed RGB sequence and requires no prior hydrated state, WebODM calls, QGIS/GDAL subprocesses, quality-gate input, or real imagery processing. The test replaces only the `run_data_segregation` module boundary with a deterministic fake that creates a tiny temporary survey tree and KML under pytest-owned paths.
+
+`RGBPipeline.run()` now accepts two explicit, backward-compatible optional seams:
+
+- `selected_stages`, defaulting to the complete existing stage set, executes only the named stages in the existing production order.
+- `raise_on_error`, defaulting to `False`, preserves the current production behavior of returning failed state while allowing tests and future callers to request propagation after failure state has been recorded.
+
+Production defaults remain compatible: omitting both arguments still attempts the same stage sequence with the same stage names, output keys, force behavior, stale-running policy for WebODM/QGIS, quality-gate stop behavior, and failure-state recording.
+
+### Success and failure coverage
+
+Created `tests/test_rgb_pipeline_single_stage_execution.py` with two focused tests.
+
+The success path constructs `RGBPipeline` with temporary paths, temporary SQLite, injected loggers, injected `PipelineRepo`, and `FakeWebODM`; selects only `data_segregation`; observes the selected stage in `running` state from inside the fake dependency; verifies deterministic output and KML rename behavior; confirms the stage is completed in temporary SQLite; confirms the run and survey state are completed; confirms all checkpoint, database, control-flag, survey, and output paths remain under pytest's temporary application root; confirms no later stage row or fake/external operation occurs.
+
+The controlled failure path configures the fake segregation dependency to raise `ControlledSegregationFailure`; preserves current `StageRunner` retry behavior by asserting three dependency calls; verifies the selected stage is failed with the original message and no output JSON; verifies the run is failed; verifies the original exception propagates with `raise_on_error=True`; and confirms later stages, WebODM calls, checkpoint writes, and non-temporary resources are not used.
+
+### Files modified or created
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Created: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, retry policy, checkpoint protocol, logging architecture, quality-gate behavior, WebODM implementation, QGIS/GDAL boundary, dependency list, or operator workflow changed.
+
+### Tests and exact validation
+
+- Pre-change full default suite was not rerun before editing in this session; the reviewed starting baseline was 46 passing tests from the previous committed milestone.
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- First `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k successfully` failed because the new test file missed `Path` import; no production behavior changed for this fix.
+- First `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k failure` failed for the same missing `Path` import after proving the stage failure path recorded and retried.
+- Corrected `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k successfully` - 1 passed, 1 deselected.
+- Corrected `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k failure` - 1 passed, 1 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 2 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 4 passed.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 8 passed.
+- `python -m pytest -q tests\test_fake_webodm.py` - 5 passed.
+- `python -m pytest -q tests\test_suite_safety_guards.py` - 8 passed.
+- First `python -m pytest --collect-only -q` collected 46 existing tests and failed while collecting the new module because an existing `exifread` test stub had no `__spec__`; the new module's stub guard was made collection-order safe.
+- Corrected `python -m py_compile tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- Corrected `python -m pytest --collect-only -q` - 48 tests collected.
+- `python -m pytest -q` before documentation updates - 48 passed in 0.87 seconds.
+- `git diff --check` - passed.
+- Final `python -m pytest -q` after documentation updates - 48 passed in 1.00 seconds.
+
+No external tests, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, or destructive cleanup tool was used.
+
+### Remaining Phase 1 risks
+
+Phase 1 remains in progress.
+
+- Only `data_segregation` has been exercised through real `RGBPipeline.run()` orchestration; cross-run filtering, KML boundary, WebODM, quality gate, and QGIS remain unexecuted at RGBPipeline integration level.
+- The selected stage test uses a fake `run_data_segregation` dependency to avoid real filesystem scanning and copying, so the real data segregation implementation is not validated here.
+- `selected_stages` can execute later stages directly if a caller supplies them without prerequisite state; this is an explicit low-level execution seam, not a dependency resolver.
+- `raise_on_error` preserves default compatibility but introduces a second caller-visible failure mode when explicitly requested.
+- Broad `StageRunner` retries remain unchanged and can repeat non-idempotent work; the new failure test documents the current three-call behavior rather than redesigning it.
+- The quality gate still requires interactive input in normal full runs, and WebODM/QGIS boundaries remain fake-only or untested in default suite integration.
+
+### Recommended next task
+
+Add one more high-value hermetic stage test only if it can be isolated without broad production changes; otherwise perform a Phase 1 completion assessment focused on remaining configuration-loader, repository connection-lifecycle, and external-boundary gaps.

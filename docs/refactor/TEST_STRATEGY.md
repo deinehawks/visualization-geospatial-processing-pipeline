@@ -335,3 +335,31 @@ Remaining coverage does not yet execute a real RGBPipeline stage, exercise the
 configuration loader without dotenv, or resolve production PipelineRepo
 connection-close semantics. The next testability target is one hermetic
 single-stage RGBPipeline execution with every external boundary faked.
+
+
+## Hermetic RGBPipeline single-stage execution coverage
+
+Added on 2026-07-17, `tests/test_rgb_pipeline_single_stage_execution.py` executes one real `RGBPipeline.run()` stage with all external and persistent boundaries replaced by temporary or fake collaborators.
+
+The selected stage is `data_segregation`. The production orchestration path is real through `RGBPipeline.run()`, `StageRunner.run()`, repository state updates, shared pipeline state hydration, run/survey finalization, control-flag cleanup, and output persistence. The stage's heavy dependency, `run_data_segregation`, is faked at the imported module boundary so no real survey scan, real imagery copy, production root, WebODM call, QGIS/GDAL command, quality-gate prompt, or external subprocess is used.
+
+`RGBPipeline.run()` now has two explicit optional testability seams with production-compatible defaults:
+
+- `selected_stages=None` preserves the complete existing stage order; passing a set executes only those existing stage names in production order and rejects unknown names.
+- `raise_on_error=False` preserves the current returned failure-state behavior; passing `True` re-raises after failure state has been recorded.
+
+Coverage proves:
+
+- temporary construction with injected repository, loggers, checkpoint path, and `FakeWebODM`;
+- exactly one selected stage executes;
+- `data_segregation` reaches SQLite `running` state before the fake dependency returns;
+- deterministic fake output is persisted as completed stage output;
+- survey ID attachment, survey running/upsert, KML rename, run completion, and survey completion remain temporary;
+- checkpoint/control/database/output paths are under the pytest-owned application root;
+- later stages do not execute and do not create stage rows;
+- controlled ordinary failure is retried three times under the current StageRunner default, then marked failed and propagated with `raise_on_error=True`; and
+- network, subprocess, dotenv, input, keyboard, production path, and WebODM fake-call guards remain effective.
+
+Validation compiled the changed files, passed the focused success and failure tests, passed existing RGBPipeline construction, StageRunner, FakeWebODM, and safety-guard suites, collected 48 tests, passed `git diff --check`, and passed the final full default suite 48/48. No external operation occurred.
+
+Remaining default-suite integration gaps are every later RGBPipeline stage, the real data segregation implementation, full-run quality-gate behavior, real WebODM/QGIS/GDAL compatibility, configuration-loader coverage without dotenv, and repository connection-lifecycle semantics.

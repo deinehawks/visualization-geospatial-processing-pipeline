@@ -2355,6 +2355,8 @@ class RGBPipeline(
         *,
         resume: bool = True,
         force_stages: Optional[Set[str]] = None,
+        selected_stages: Optional[Set[str]] = None,
+        raise_on_error: bool = False,
     ) -> Dict[str, Any]:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
@@ -2373,131 +2375,97 @@ class RGBPipeline(
             if r and r.get("status") == "paused":
                 self.repo.mark_run_running(self.run_id)
                 pipeline_logger.info(
-                    "Resuming paused run → status set to running")
+                    "Resuming paused run; status set to running")
         except Exception:
             pipeline_logger.exception(
                 "Failed while attempting to resume paused run")
 
         total_start = time.perf_counter()
         force_stages = force_stages or set()
+        stage_steps = [
+            {
+                "name": "data_segregation",
+                "fn": self.stage_data_segregation,
+                "output_key": "data_segregation",
+                "stale_running_policy": None,
+            },
+            {
+                "name": "cross_run_filter",
+                "fn": self.stage_cross_run_image_filter,
+                "output_key": "cross_run_filter",
+                "stale_running_policy": None,
+            },
+            {
+                "name": "kml_boundary",
+                "fn": self.stage_kml_boundary,
+                "output_key": "kml_boundary",
+                "stale_running_policy": None,
+            },
+            {
+                "name": "webodm",
+                "fn": self.stage_webodm,
+                "output_key": "webodm",
+                "stale_running_policy": "rerun",
+            },
+            {
+                "name": "quality_gate",
+                "fn": self.stage_quality_gate,
+                "output_key": "quality_gate",
+                "stale_running_policy": None,
+            },
+            {
+                "name": "qgis",
+                "fn": lambda: self.stage_qgis(resume=resume),
+                "output_key": "qgis",
+                "stale_running_policy": "rerun",
+            },
+        ]
+        default_stage_names = {step["name"] for step in stage_steps}
+        if selected_stages is None:
+            stages_to_run = default_stage_names
+        else:
+            stages_to_run = set(selected_stages)
+            unknown_stages = stages_to_run.difference(default_stage_names)
+            if unknown_stages:
+                raise ValueError(
+                    "selected_stages contains unknown stages: "
+                    + ", ".join(sorted(unknown_stages))
+                )
 
         def _force(name: str) -> bool:
             return (name in force_stages) or (not resume)
 
         try:
+            for step in stage_steps:
+                stage_name = step["name"]
+                if stage_name not in stages_to_run:
+                    continue
 
-            self._check_control_or_raise("data_segregation")
+                self._check_control_or_raise(stage_name)
 
-            if self._stage_will_run(
-                "data_segregation",
-                force=_force("data_segregation"),
-            ):
-                self._preflight_stage("data_segregation")
+                if self._stage_will_run(stage_name, force=_force(stage_name)):
+                    self._preflight_stage(stage_name)
 
-            self.runner.run(
-                "data_segregation",
-                self.stage_data_segregation,
-                output_key="data_segregation",
-                state=self.state,
-                force=_force("data_segregation"),
-            )
-            self._hydrate_from_state()
+                runner_kwargs = {
+                    "output_key": step["output_key"],
+                    "state": self.state,
+                    "force": _force(stage_name),
+                }
+                if step["stale_running_policy"]:
+                    runner_kwargs["stale_running_policy"] = step[
+                        "stale_running_policy"
+                    ]
 
+                self.runner.run(stage_name, step["fn"], **runner_kwargs)
+                self._hydrate_from_state()
 
-            self._check_control_or_raise("cross_run_filter")
-
-            if self._stage_will_run(
-                "cross_run_filter",
-                force=_force("cross_run_filter"),
-            ):
-                self._preflight_stage("cross_run_filter")
-
-            self.runner.run(
-                "cross_run_filter",
-                self.stage_cross_run_image_filter,
-                output_key="cross_run_filter",
-                state=self.state,
-                force=_force("cross_run_filter"),
-            )
-            self._hydrate_from_state()
-
-
-            self._check_control_or_raise("kml_boundary")
-
-            if self._stage_will_run(
-                "kml_boundary",
-                force=_force("kml_boundary"),
-            ):
-                self._preflight_stage("kml_boundary")
-
-            self.runner.run(
-                "kml_boundary",
-                self.stage_kml_boundary,
-                output_key="kml_boundary",
-                state=self.state,
-                force=_force("kml_boundary"),
-            )
-            self._hydrate_from_state()
-
-
-            self._check_control_or_raise("webodm")
-
-            if self._stage_will_run(
-                "webodm",
-                force=_force("webodm"),
-            ):
-                self._preflight_stage("webodm")
-
-            self.runner.run(
-                "webodm",
-                self.stage_webodm,
-                output_key="webodm",
-                state=self.state,
-                force=_force("webodm"),
-                stale_running_policy="rerun",   # preserve partial state on resume
-            )
-            self._hydrate_from_state()
-
-            self._check_control_or_raise("quality_gate")
-
-            if self._stage_will_run(
-                "quality_gate",
-                force=_force("quality_gate"),
-            ):
-                self._preflight_stage("quality_gate")
-                
-            self.runner.run(
-                "quality_gate",
-                self.stage_quality_gate,
-                output_key="quality_gate",
-                state=self.state,
-                force=_force("quality_gate"),
-            )
-            self._hydrate_from_state()
-
-            q = self.state.get("quality_gate") or {}
-            if q.get("passed") is False:
-                reason = q.get("reason") or "quality_gate_failed"
-                raise RuntimeError(
-                    f"Pipeline stopped: Quality Gate failed ({reason})."
-                )
-
-            self._check_control_or_raise("qgis")
-
-            if self._stage_will_run(
-                "qgis",
-                force=_force("qgis"),
-            ):
-                self._preflight_stage("qgis")
-
-            self.runner.run(
-                "qgis",
-                lambda: self.stage_qgis(resume=resume),
-                output_key="qgis",
-                state=self.state,
-                force=_force("qgis"),
-                stale_running_policy="rerun",
-            )
+                if stage_name == "quality_gate":
+                    q = self.state.get("quality_gate") or {}
+                    if q.get("passed") is False:
+                        reason = q.get("reason") or "quality_gate_failed"
+                        raise RuntimeError(
+                            f"Pipeline stopped: Quality Gate failed ({reason})."
+                        )
 
             self.state["success"] = True
             total_runtime = time.perf_counter() - total_start
@@ -2514,7 +2482,7 @@ class RGBPipeline(
             pipeline_footer(pipeline_logger, total_runtime, success=True)
             return self.state
 
-        # ── Preflight Failed ──────────────────────────────────────
+        # Preflight Failed
         except PreflightError as e:
             self.state.update(
                 {
@@ -2554,6 +2522,9 @@ class RGBPipeline(
 
             pipeline_logger.error("")
             pipeline_logger.error(str(e))
+
+            if raise_on_error:
+                raise
 
             return self.state
 
@@ -2675,6 +2646,8 @@ class RGBPipeline(
             self.control.cleanup_flags()
             pipeline_footer(pipeline_logger, total_runtime, success=False)
             pipeline_logger.error(str(e))
+            if raise_on_error:
+                raise
             return self.state
 
         # ── Failure ───────────────────────────────────────────────
@@ -2710,4 +2683,6 @@ class RGBPipeline(
             self.control.cleanup_flags()
             pipeline_footer(pipeline_logger, total_runtime, success=False)
             pipeline_logger.error(str(e))
+            if raise_on_error:
+                raise
             return self.state
