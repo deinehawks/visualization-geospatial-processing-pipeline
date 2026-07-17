@@ -871,7 +871,12 @@ class RGBPipeline(
                     name=project_name,
                     description="RGB automated processing",
                 )
-
+                log_event(
+                    logger,
+                    "webodm_project_created",
+                    project_id=project_id,
+                    project_name=project_name,
+                )
                 self._save_webodm_checkpoint({
                     "project_id": project_id,
                     "project_name": project_name,
@@ -1196,10 +1201,27 @@ class RGBPipeline(
                             options=task2_options,
                             processing_node=webodm_cfg.get("node_id"),
                         )
+                        log_event(
+                            logger,
+                            "webodm_task_created",
+                            project_id=project_id,
+                            task_key="task2",
+                            task_id=current_task2_id,
+                            task_name=task2_name,
+                        )
                         t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
                             project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                         )
-    
+                        log_event(
+                            logger,
+                            "webodm_task_status",
+                            project_id=project_id,
+                            task_key="task2",
+                            task_id=current_task2_id,
+                            status=(_t2_info or {}).get("status"),
+                            success=t2_success,
+                            elapsed_seconds=f"{t2_runtime:.2f}",
+                        )
                 result["task2"] = {
                     "id": current_task2_id,
                     "name": task2_name,

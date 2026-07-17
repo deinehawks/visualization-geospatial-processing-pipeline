@@ -442,3 +442,16 @@ Coverage proves that generated RGBPipeline run events:
 - emit `event=run_failed` with exception type and quoted error message on the controlled failure path.
 
 This remains file-log based and does not introduce JSON logs, database events, migrations, external services, or threaded/concurrent execution tests.
+## WebODM boundary event coverage
+
+Added on 2026-07-17, the hermetic RGBPipeline WebODM-stage test verifies the first ADR-013 parseable external-boundary events for WebODM.
+
+Coverage proves that generated WebODM boundary events:
+
+- preserve the existing log columns and logical WebODM logger name;
+- carry the run ID in the existing `run_id` column;
+- emit `event=webodm_project_created` with project ID/name for newly created projects;
+- emit `event=webodm_task_created` with project ID, task key, task ID, and task name for primary Task 2 creation; and
+- emit `event=webodm_task_status` with project ID, task key, task ID, status, success flag, and elapsed seconds after waiting for primary Task 2.
+
+The test uses `FakeWebODM`, fake upload-cache behavior, pytest-owned paths, and a temporary log file. It does not contact WebODM, upload images, download assets, run QGIS/GDAL, or execute the full pipeline.

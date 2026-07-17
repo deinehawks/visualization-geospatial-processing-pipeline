@@ -65,12 +65,19 @@ def explicit_config(temporary_path_layout):
     }
 
 
-def isolated_loggers(prefix, pipeline_log_path=None):
+def isolated_loggers(prefix, pipeline_log_path=None, webodm_log_path=None):
     loggers = {key: logging.Logger(f"{prefix}.{key}") for key in LOGGER_KEYS}
     if pipeline_log_path is not None:
         loggers["pipeline"] = get_logger(
             f"{prefix}.pipeline",
             pipeline_log_path,
+            to_console=False,
+            run_id=RUN_ID,
+        )
+    if webodm_log_path is not None:
+        loggers["webodm"] = get_logger(
+            f"{prefix}.webodm",
+            webodm_log_path,
             to_console=False,
             run_id=RUN_ID,
         )
@@ -129,6 +136,7 @@ def build_pipeline(
     repository,
     fake_webodm,
     pipeline_log_path=None,
+    webodm_log_path=None,
 ):
     return RGBPipeline(
         temporary_path_layout.application_root,
@@ -141,6 +149,7 @@ def build_pipeline(
         loggers=isolated_loggers(
             "tests.rgb_pipeline.single_stage",
             pipeline_log_path=pipeline_log_path,
+            webodm_log_path=webodm_log_path,
         ),
         logs_dir=temporary_path_layout.logs_dir,
         checkpoint_dir=temporary_path_layout.checkpoint_dir,
@@ -344,3 +353,67 @@ def test_rgb_pipeline_selected_stage_failure_is_recorded_and_propagated(
     assert 'error_message="controlled segregation failure"' in content
     cleanup_logger(pipeline.loggers["pipeline"])
     assert list(temporary_path_layout.checkpoint_dir.iterdir()) == []
+
+def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = FakeWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-boundary-events.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+        webodm_log_path=webodm_log_path,
+    )
+    survey_id = "TEST-SURVEY-ODM"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    image_path = survey_path / "images" / "path"
+    boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
+    image_path.mkdir(parents=True)
+    boundary_path.parent.mkdir(parents=True)
+    boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    pipeline.survey_id = survey_id
+    pipeline.rgb_path = survey_path
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "dirs": {"path": str(image_path)},
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "boundary_available": True,
+            "boundary_geojson_path": str(boundary_path),
+        }
+    )
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    try:
+        result = pipeline.stage_webodm()
+
+        assert result["project_id"] == 100
+        assert result["task2"]["id"] == "task-0001"
+        assert [call.method for call in fake_webodm.calls] == [
+            "create_project",
+            "create_task_with_images",
+            "wait_for_completion",
+        ]
+
+        content = webodm_log_path.read_text(encoding="utf-8")
+        assert "event=webodm_project_created project_id=100" in content
+        assert (
+            "event=webodm_task_created project_id=100 task_key=task2 "
+            "task_id=task-0001"
+        ) in content
+        assert (
+            "event=webodm_task_status project_id=100 task_key=task2 "
+            "task_id=task-0001 status=queued success=False elapsed_seconds=0.00"
+        ) in content
+    finally:
+        cleanup_logger(pipeline.loggers["webodm"])

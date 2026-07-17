@@ -5,9 +5,9 @@
 - **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
 - **Current phase:** Phase 2 - Logging and observability
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** ADR-013 RGBPipeline run lifecycle event implementation
+- **Current task:** ADR-013 WebODM boundary event implementation
 - **Production code changed:** Yes - logging observability changes in shared/logging.py, shared/stage_runner.py, and pipelines/rgb_pipeline.py
-- **Next recommended task:** Extend parseable observability to WebODM and QGIS external-boundary events
+- **Next recommended task:** Extend parseable observability to remaining WebODM branches or QGIS command boundaries
 
 ## Completed tasks
 
@@ -753,3 +753,54 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 ### Recommended next Phase 2 task
 
 Add parseable external-boundary events at the WebODM and QGIS seams where task/project IDs, selected task labels, tool names, return codes, and artifact counts are already known, using fake-backed tests only.
+## ADR-013 WebODM boundary event implementation
+
+Date: 2026-07-17.
+
+Implemented the first WebODM external-boundary observability slice inside the main `stage_webodm()` Task 2 create/wait path.
+
+### Implemented behavior
+
+- New WebODM project creation emits `webodm_project_created` with `project_id` and `project_name`.
+- New primary Task 2 creation emits `webodm_task_created` with `project_id`, `task_key`, `task_id`, and `task_name`.
+- Primary Task 2 wait completion emits `webodm_task_status` with `project_id`, `task_key`, `task_id`, `status`, `success`, and `elapsed_seconds`.
+- Existing WebODM behavior, task naming, checkpoint writes, retry behavior, downloads, fake WebODM behavior, and operator-facing logs are preserved.
+
+This is intentionally the first narrow WebODM boundary slice. Resume/reattach branches, Task 1 branches, Task 4/fallback, quality-gate restart, and download/export boundary events remain for later slices.
+
+### Tests changed
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now includes one hermetic WebODM-stage test. It constructs `RGBPipeline` with `FakeWebODM`, pytest-owned paths, a temporary WebODM log file, fake upload-cache behavior, Task 1 skipped, Task 2 enabled, Task 4 skipped, and exports disabled. The test verifies fake project/task/wait calls and parseable `webodm_project_created`, `webodm_task_created`, and `webodm_task_status` events.
+
+### Files modified
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, event journal, JSON log format, retry behavior, checkpoint behavior, WebODM API implementation, QGIS/GDAL behavior, dependency list, or operator workflow changed.
+
+### Validation
+
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 3 passed in 0.28 seconds.
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 4 passed in 0.26 seconds.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 9 passed in 0.37 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 4 passed in 0.15 seconds.
+- `python -m pytest --collect-only -q` - 54 tests collected in 0.06 seconds.
+- `python -m pytest -q` - 54 passed in 1.06 seconds.
+- `git diff --check` - passed; Git reported LF-to-CRLF working-tree warnings for edited files.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- WebODM Task 1, Task 4/fallback, resume/reattach, quality-gate restart, and download/export branches do not yet emit or test parseable boundary events.
+- QGIS external-boundary events are still free-form or absent.
+- `query_survey_stats.py` does not yet prefer explicit `event=` records for analytics; it remains compatible with the existing text log parser.
+- Threaded/interleaved logging behavior remains deferred until production concurrency is introduced.
+
+### Recommended next Phase 2 task
+
+Either extend WebODM boundary events to Task 1/Task 4/download branches, or move to QGIS command-boundary events if command start/completion/failure attribution is more valuable for operators right now.
