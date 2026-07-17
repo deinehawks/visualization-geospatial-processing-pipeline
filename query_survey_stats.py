@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import shlex
 import sqlite3
 import sys
 from collections import defaultdict
@@ -284,13 +285,45 @@ def extract_task_runtimes(stage_outputs: Dict[str, Any]) -> Dict[str, dict]:
 
 # ── log parsing ──────────────────────────────────────────────────────────────
 
+def parse_event_message(message: str) -> Tuple[Optional[str], Dict[str, str]]:
+    """
+    Parse ADR-013 `event=<name> key=value ...` messages.
+
+    Returns `(None, {})` for historical free-form log messages. Values are
+    parsed with shell-like quoting so messages emitted by shared.logging.log_event()
+    round-trip without changing the outer log-file shape.
+    """
+    message = message.strip()
+    if not message.startswith("event="):
+        return None, {}
+
+    try:
+        parts = shlex.split(message, posix=True)
+    except ValueError:
+        return None, {}
+
+    fields: Dict[str, str] = {}
+    event_name: Optional[str] = None
+    for part in parts:
+        if "=" not in part:
+            continue
+        key, value = part.split("=", 1)
+        if not key:
+            continue
+        if key == "event":
+            event_name = value
+        else:
+            fields[key] = value
+
+    return event_name, fields
+
 def parse_log_events(
     logs_dir: Path,
     run_ids: List[str],
 ) -> Dict[str, List[dict]]:
     """
     Parse all log files and return events keyed by run_id.
-    Each event: {time, level, logger, stage, message, log_file}
+    Each event: {time, level, logger, stage, message, event, fields, log_file}
     """
     run_id_set = set(run_ids)
     events: Dict[str, List[dict]] = defaultdict(list)
@@ -307,12 +340,16 @@ def parse_log_events(
                 run_id = m.group("run_id").strip()
                 if run_id not in run_id_set:
                     continue
+                message = m.group("message").strip()
+                event_name, fields = parse_event_message(message)
                 events[run_id].append({
                     "time":     m.group("time").strip(),
                     "level":    m.group("level").strip(),
                     "logger":   m.group("logger").strip(),
                     "stage":    m.group("stage").strip(),
-                    "message":  m.group("message").strip(),
+                    "message":  message,
+                    "event":    event_name,
+                    "fields":   fields,
                     "log_file": log_name,
                 })
 
@@ -403,6 +440,7 @@ def extract_log_insights(
         "webodm_size_gb": None,
         "tile_count":     None,
         "stage_errors":   defaultdict(list),
+        "explicit_event_counts": defaultdict(int),
         # New, more specific timing signals:
         "upload_cache_images":  None,
         "upload_cache_seconds": None,
@@ -426,13 +464,18 @@ def extract_log_insights(
     for ev in events:
         msg   = ev["message"]
         stage = ev["stage"] or ev["logger"]
+        event_name = ev.get("event")
+        fields = ev.get("fields") or {}
+
+        if event_name:
+            insights["explicit_event_counts"][event_name] += 1
 
         # Pause / resume / abort
-        if "PAUSE" in msg or "__PIPELINE_PAUSED__" in msg:
+        if event_name == "run_paused" or "PAUSE" in msg or "__PIPELINE_PAUSED__" in msg:
             insights["pause_events"].append(ev["time"])
         if "Resuming paused run" in msg or "status set to running" in msg:
             insights["resume_events"].append(ev["time"])
-        if "ABORT" in msg or "__PIPELINE_ABORTED__" in msg:
+        if event_name == "run_aborted" or "ABORT" in msg or "__PIPELINE_ABORTED__" in msg:
             insights["abort_events"].append(ev["time"])
 
         # WebODM upload info (unique images headed to WebODM itself)
@@ -463,6 +506,23 @@ def extract_log_insights(
         m = _SELECTED_TASK_RE.search(msg) or _CLIPPING_TASK_RE.search(msg)
         if m:
             current_task = m.group("task").lower()
+
+        if event_name == "qgis_command_completed":
+            tool = (fields.get("tool") or "").lower()
+            try:
+                seconds = float(fields.get("elapsed_seconds", ""))
+            except ValueError:
+                seconds = None
+            if seconds is not None:
+                if tool == "gdalwarp":
+                    insights["clip_elapsed_seconds"] = seconds
+                    insights["clip_task"] = current_task
+                    insights["clip_attempts"].append(
+                        {"task": current_task, "seconds": seconds, "time": ev["time"]}
+                    )
+                elif tool == "gdal2tiles":
+                    insights["tile_elapsed_seconds"] = seconds
+                    insights["tile_task"] = current_task
 
         # QGIS clip runtime
         m = _first_match([_CLIP_ELAPSED_RE_PRIMARY, _CLIP_ELAPSED_RE_FALLBACK], msg)
@@ -510,7 +570,13 @@ def extract_log_insights(
                     pass
 
         # Errors
-        if ev["level"] in ("ERROR", "CRITICAL"):
+        if event_name in {"run_failed", "stage_failed", "qgis_command_failed"}:
+            error_text = fields.get("error_message") or msg
+            error_type = fields.get("error_type")
+            if error_type and error_type not in error_text:
+                error_text = f"{error_type}: {error_text}"
+            insights["stage_errors"][stage].append(error_text[:120])
+        elif ev["level"] in ("ERROR", "CRITICAL"):
             insights["stage_errors"][stage].append(msg[:120])
 
     return insights
@@ -558,6 +624,9 @@ def analyse_survey(
     total_pauses  = sum(len(v["pause_events"])  for v in all_insights.values())
     total_resumes = sum(len(v["resume_events"]) for v in all_insights.values())
     total_aborts  = sum(len(v["abort_events"])  for v in all_insights.values())
+    total_explicit_events = sum(
+        sum(v["explicit_event_counts"].values()) for v in all_insights.values()
+    )
 
     summary = Table(box=box.SIMPLE, show_header=False, padding=(0, 2))
     summary.add_column("Key",   style="dim")
@@ -569,6 +638,7 @@ def analyse_survey(
     summary.add_row("Pause events (logs)",   str(total_pauses))
     summary.add_row("Resume events (logs)",  str(total_resumes))
     summary.add_row("Abort events (logs)",   str(total_aborts))
+    summary.add_row("Explicit events (logs)", str(total_explicit_events))
     console.print(summary)
 
     # ── Per-run breakdown ─────────────────────────────────────────────────────

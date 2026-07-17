@@ -1,4 +1,4 @@
-﻿import importlib.util
+import importlib.util
 from importlib.machinery import ModuleSpec
 import logging
 import sys
@@ -62,8 +62,8 @@ if "rich" not in sys.modules and importlib.util.find_spec("rich") is None:
     sys.modules["rich.box"] = rich_box_stub
 
 from pipelines.rgb_pipeline import RGBPipeline
-from query_survey_stats import parse_log_events
-from shared.logging import get_context_filter, get_logger, set_stage_context
+from query_survey_stats import extract_log_insights, parse_event_message, parse_log_events
+from shared.logging import get_context_filter, get_logger, log_event, set_stage_context
 from tests.fakes import FakeWebODM
 
 
@@ -267,6 +267,8 @@ def test_generated_isolated_logger_output_remains_parser_compatible(tmp_path):
                 "logger": "rgb.pipeline",
                 "stage": "data_segregation",
                 "message": "parser compatibility probe",
+                "event": None,
+                "fields": {},
                 "log_file": "pipeline.log",
             }
         ]
@@ -274,3 +276,98 @@ def test_generated_isolated_logger_output_remains_parser_compatible(tmp_path):
         set_stage_context(logger, "")
         cleanup_logger(logger)
 
+def test_parser_extracts_explicit_event_fields_from_generated_logs(tmp_path):
+    logger = get_logger(
+        "rgb.pipeline",
+        tmp_path / "pipeline.log",
+        to_console=False,
+        run_id="run-parser-events",
+    )
+
+    try:
+        set_stage_context(logger, "qgis")
+        log_event(
+            logger,
+            "stage_retrying",
+            attempt=2,
+            error_type="RuntimeError",
+            error_message="quoted value with spaces",
+        )
+
+        events = parse_log_events(tmp_path, ["run-parser-events"])
+        event = events["run-parser-events"][0]
+
+        assert event["event"] == "stage_retrying"
+        assert event["fields"] == {
+            "attempt": "2",
+            "error_type": "RuntimeError",
+            "error_message": "quoted value with spaces",
+        }
+        assert event["stage"] == "qgis"
+        assert parse_event_message("ordinary historical message") == (None, {})
+    finally:
+        set_stage_context(logger, "")
+        cleanup_logger(logger)
+
+
+def test_log_insights_prefers_explicit_events_for_reporting():
+    events = [
+        {
+            "time": "12:00:01",
+            "level": "WARNING",
+            "logger": "rgb.pipeline",
+            "stage": "",
+            "message": "event=run_paused reason=operator",
+            "event": "run_paused",
+            "fields": {"reason": "operator"},
+            "log_file": "pipeline.log",
+        },
+        {
+            "time": "12:00:02",
+            "level": "INFO",
+            "logger": "rgb.qgis",
+            "stage": "qgis",
+            "message": "QGIS selected orthomosaic: task=task2 | file=ortho.tif",
+            "event": None,
+            "fields": {},
+            "log_file": "qgis.log",
+        },
+        {
+            "time": "12:00:03",
+            "level": "INFO",
+            "logger": "rgb.qgis",
+            "stage": "qgis",
+            "message": "event=qgis_command_completed tool=gdalwarp elapsed_seconds=4.25 returncode=0",
+            "event": "qgis_command_completed",
+            "fields": {"tool": "gdalwarp", "elapsed_seconds": "4.25", "returncode": "0"},
+            "log_file": "qgis.log",
+        },
+        {
+            "time": "12:00:04",
+            "level": "ERROR",
+            "logger": "rgb.qgis",
+            "stage": "qgis",
+            "message": "event=qgis_command_failed tool=gdal2tiles error_type=CalledProcessError error_message=failed returncode=7",
+            "event": "qgis_command_failed",
+            "fields": {
+                "tool": "gdal2tiles",
+                "error_type": "CalledProcessError",
+                "error_message": "failed",
+                "returncode": "7",
+            },
+            "log_file": "qgis.log",
+        },
+    ]
+
+    insights = extract_log_insights(events, "run-parser-events")
+
+    assert insights["pause_events"] == ["12:00:01"]
+    assert insights["clip_elapsed_seconds"] == 4.25
+    assert insights["clip_task"] == "task2"
+    assert insights["clip_attempts"] == [
+        {"task": "task2", "seconds": 4.25, "time": "12:00:03"}
+    ]
+    assert insights["stage_errors"]["qgis"] == ["CalledProcessError: failed"]
+    assert insights["explicit_event_counts"]["run_paused"] == 1
+    assert insights["explicit_event_counts"]["qgis_command_completed"] == 1
+    assert insights["explicit_event_counts"]["qgis_command_failed"] == 1

@@ -469,3 +469,19 @@ Coverage proves that generated QGIS command-boundary events:
 - avoid logging full input/output paths in the parseable failure event.
 
 The tests patch the `modules.qgis.qgis_tools.subprocess.run` boundary with fakes, use pytest-owned temporary inputs, outputs, and log files, and do not run real QGIS, GDAL, shell commands, or `stage_qgis()`.
+## Explicit event parser/reporting coverage
+
+Added on 2026-07-17, `tests/test_logging_context_ownership.py` verifies parser/reporting support for ADR-013 explicit event records.
+
+Coverage proves that:
+
+- historical free-form log lines remain parseable with the existing columns and raw message field;
+- generated `log_event()` messages round-trip through `parse_log_events()` as `event` plus parsed `fields`;
+- quoted event field values with spaces are preserved;
+- non-event messages return `event=None` and empty fields;
+- `extract_log_insights()` recognizes explicit `run_paused` records for pause timelines;
+- explicit `qgis_command_completed` records can populate QGIS clip timing and task attribution; and
+- explicit `qgis_command_failed` records populate reportable stage errors without depending on historical free-form error text; and
+- the survey summary can surface the total number of explicit events seen in logs.
+
+This remains compatible with historical regex fallbacks and does not introduce JSON logs, a database event journal, migrations, external services, or real QGIS/GDAL execution.

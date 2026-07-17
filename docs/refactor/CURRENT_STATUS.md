@@ -5,9 +5,9 @@
 - **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
 - **Current phase:** Phase 2 - Logging and observability
 - **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** ADR-013 QGIS command-boundary event implementation
+- **Current task:** ADR-013 parser/reporting support for explicit event records
 - **Production code changed:** Yes - logging observability changes in shared/logging.py, shared/stage_runner.py, and pipelines/rgb_pipeline.py
-- **Next recommended task:** Extend WebODM boundary events to remaining branches or add parser/reporting support for explicit event records
+- **Next recommended task:** Extend WebODM boundary events to remaining branches or add explicit event summaries to operator reports
 
 ## Completed tasks
 
@@ -857,3 +857,53 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 ### Recommended next Phase 2 task
 
 Either extend WebODM boundary events to Task 1/Task 4/download branches, or add parser/reporting support that recognizes explicit `event=` records so the lifecycle and external-boundary events become easier to query.
+## ADR-013 parser/reporting support for explicit event records
+
+Date: 2026-07-17.
+
+Implemented additive parser/reporting support for ADR-013 `event=<name> key=value ...` log messages in `query_survey_stats.py`.
+
+### Implemented behavior
+
+- Added `parse_event_message()` to parse explicit event messages using shell-like quoting compatible with `shared.logging.log_event()` output.
+- `parse_log_events()` now preserves the existing raw `message` field and additionally returns `event` and `fields` for parseable ADR-013 records.
+- Historical free-form log messages remain supported and are returned with `event=None` and empty `fields`.
+- `extract_log_insights()` now counts explicit events, recognizes `run_paused` and `run_aborted` records for timeline reporting, maps `qgis_command_completed` events for `gdalwarp` and `gdal2tiles` into QGIS timing insights, and converts explicit `run_failed`, `stage_failed`, and `qgis_command_failed` events into reportable stage errors.
+- The survey summary now includes an `Explicit events (logs)` row so operators can see whether ADR-013 records are present for the selected runs.
+- Existing regex fallbacks for historical WebODM upload, QGIS clip/tile, pause/abort, and error logs remain in place.
+
+No database schema, migration, JSON log format, event journal, pipeline behavior, WebODM behavior, QGIS/GDAL execution behavior, dependency list, or operator command-line interface changed.
+
+### Tests changed
+
+`tests/test_logging_context_ownership.py` now covers explicit event parser/reporting behavior. It verifies that generated `log_event()` output round-trips through `parse_log_events()` with quoted fields intact, that historical free-form parser compatibility remains intact, and that `extract_log_insights()` prefers explicit pause, QGIS command completion, and QGIS command failure records for reporting.
+
+### Files modified
+
+- Modified: `query_survey_stats.py`
+- Modified: `tests/test_logging_context_ownership.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+### Validation
+
+- `python -m py_compile query_survey_stats.py tests\test_logging_context_ownership.py` - passed.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 6 passed in 0.18 seconds.
+- `python -m pytest -q tests\test_qgis_tools_observability.py` - 2 passed in 0.05 seconds.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 9 passed in 0.34 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 3 passed in 0.23 seconds.
+- `python -m pytest --collect-only -q` - 58 tests collected in 0.08 seconds.
+- `python -m pytest -q` - 58 passed in 1.15 seconds.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, or destructive cleanup operation was used.
+
+### Remaining Phase 2 risks
+
+- The report tables do not yet include a dedicated explicit-event summary section; explicit events currently feed existing pause/error/QGIS timing insights and are counted internally.
+- WebODM Task 1, Task 4/fallback, resume/reattach, quality-gate restart, and download/export branches do not yet emit or test parseable boundary events.
+- QGIS `stage_qgis()` branch-level attribution is still limited to command events; disabled/skipped clip or tile branches do not yet emit explicit parseable artifact/branch events.
+- Threaded/interleaved logging behavior remains deferred until production concurrency is introduced.
+
+### Recommended next Phase 2 task
+
+Extend WebODM boundary events to the remaining Task 1, Task 4/fallback, resume/reattach, quality-gate restart, and download/export branches, or add a small operator-facing explicit-event summary to `query_survey_stats.py` if reporting visibility is more valuable first.
