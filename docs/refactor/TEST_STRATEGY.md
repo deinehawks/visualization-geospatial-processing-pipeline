@@ -652,3 +652,52 @@ Validation added or rerun for this slice:
 - `git diff --check`
 
 DEM downloads remain intentionally untested and unmigrated because production currently sets `dem_do_download = False`; activating that path should be a separate behavior decision with its own fake GDAL/WebODM coverage.
+
+## Phase 3 map-export publication-manifest compatibility coverage
+
+Date: 2026-07-20.
+
+Map-export manifest compatibility coverage lives in `tests/test_map_export_manifest_resolution.py` and uses only pytest-owned survey roots and tiny placeholder files. It does not run `map.py`, QGIS print export, GDAL/QGIS, the real RGB pipeline, WebODM, network shares, production SQLite, or real survey roots.
+
+Covered behavior:
+
+- clipped orthomosaic lookup prefers an existing `publication.json` artifact path over legacy glob candidates;
+- clipped orthomosaic lookup falls back to the legacy survey-tree scan when no publication manifest exists;
+- clipped orthomosaic lookup falls back to the legacy survey-tree scan when the manifest-listed artifact is missing;
+- boundary lookup prefers an existing publication-manifest KML/KMZ artifact before the legacy manifest `kml_file` path; and
+- publication artifact paths are resolved inside the published `rgb` root before they are considered usable.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile modules/map_export/survey_manifest.py modules/map_export/orthomosaic_finder.py modules/map_export/boundary_finder.py tests/test_map_export_manifest_resolution.py`
+- `python -m pytest -q tests/test_map_export_manifest_resolution.py`
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py tests/test_map_export_manifest_resolution.py`
+
+Publish activation, real map package export, print layout generation, large raster copying, and network-share behavior remain outside the safe default unit coverage for this slice.
+
+## Phase 3 file-only publish activation coverage
+
+Date: 2026-07-20.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `activate_publication()` helper using only pytest-owned temporary workspace and survey roots with tiny text placeholders.
+
+Coverage proves that:
+
+- a valid staged file replaces its legacy-compatible target and the published manifest is written with `status: published`;
+- the published manifest switch is the final replacement and the prior manifest is retained at a run-specific recovery path;
+- the replaced file remains available at a run-specific `.previous` recovery path;
+- copy failure before activation leaves all previous published files and the previous manifest unchanged;
+- an injected failure during multi-file replacement rolls already changed files back to their previous contents;
+- directory artifacts are rejected before the published root is created;
+- a staged file whose size no longer matches its manifest record is rejected before publication; and
+- a tampered manifest path that escapes the published root is rejected before publication.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile shared/artifacts.py tests/test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py` - 20 passed
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 50 passed
+- `python -m pytest --collect-only -q` - 103 collected
+- `python -m pytest -q` - 103 passed
+
+The helper is not wired into `RGBPipeline`. Real survey publication, network-share behavior, large-file throughput, directory/tile activation, process-crash recovery, concurrent publisher locking, and backup retention remain outside the safe default suite.

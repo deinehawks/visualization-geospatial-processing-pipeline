@@ -126,3 +126,86 @@ def load_manifest(surveys_root: Path, survey_id: str) -> dict:
         )
 
     return json.loads(matches[0].read_text(encoding="utf-8"))
+
+
+def load_publication_manifest(surveys_root: Path, survey_id: str) -> dict | None:
+    matches = list(surveys_root.rglob(f"{survey_id}/rgb/publication.json"))
+
+    if not matches:
+        return None
+
+    manifest_path = matches[0]
+    try:
+        return json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning(
+            "publication.json unreadable for survey %s, falling back to legacy scan: %s",
+            survey_id,
+            exc,
+        )
+        return None
+
+
+def resolve_publication_artifact_paths(
+    surveys_root: Path,
+    survey_id: str,
+) -> list[Path]:
+    publication = load_publication_manifest(surveys_root, survey_id)
+    if not publication:
+        return []
+
+    published_root_value = publication.get("published_root")
+    if published_root_value:
+        published_root = Path(str(published_root_value))
+    else:
+        published_root = _resolve_published_root(surveys_root, survey_id)
+
+    published_root = published_root.resolve(strict=False)
+    paths: list[Path] = []
+
+    for artifact in publication.get("artifacts") or []:
+        if not isinstance(artifact, dict):
+            continue
+
+        path = _resolve_publication_artifact_path(
+            artifact=artifact,
+            published_root=published_root,
+        )
+        if path is not None and path.is_file():
+            paths.append(path)
+
+    return paths
+
+
+def _resolve_published_root(surveys_root: Path, survey_id: str) -> Path:
+    matches = list(surveys_root.rglob(f"{survey_id}/rgb/manifest.json"))
+    if matches:
+        return matches[0].parent
+    return Path(surveys_root) / survey_id / "rgb"
+
+
+def _resolve_publication_artifact_path(
+    *,
+    artifact: dict,
+    published_root: Path,
+) -> Path | None:
+    relative_value = artifact.get("published_relative_path")
+    if relative_value:
+        relative_path = Path(str(relative_value))
+        if relative_path.is_absolute() or any(
+            part in {"", ".", ".."} for part in relative_path.parts
+        ):
+            return None
+        path = published_root / relative_path
+    else:
+        published_value = artifact.get("published_path")
+        if not published_value:
+            return None
+        path = Path(str(published_value))
+
+    resolved = path.resolve(strict=False)
+    try:
+        resolved.relative_to(published_root)
+    except ValueError:
+        return None
+    return path

@@ -2,11 +2,23 @@ from __future__ import annotations
 from pathlib import Path
 import logging
 import json
-from .survey_manifest import resolve_survey_id
+from .survey_manifest import resolve_publication_artifact_paths, resolve_survey_id
 
 logger = logging.getLogger("rgb.map_export")
 
 ORTHOMOSAIC_PATTERN = "orthomosaic-clipped--*.tif"
+
+
+def _is_clipped_orthomosaic(path: Path) -> bool:
+    normalized_parts = tuple(part.lower() for part in path.parts)
+    return (
+        path.is_file()
+        and path.suffix.lower() == ".tif"
+        and path.name.lower().startswith("orthomosaic-clipped--")
+        and "qgis" in normalized_parts
+        and "clipped" in normalized_parts
+        and "ortho" in normalized_parts
+    )
 
 
 def collect_orthomosaic_files(
@@ -23,7 +35,12 @@ def collect_orthomosaic_files(
     for survey_name in survey_names:
         survey_id = resolve_survey_id(surveys_root, db_path, survey_name)
 
-        matches = list(
+        publication_matches = [
+            path
+            for path in resolve_publication_artifact_paths(surveys_root, survey_id)
+            if _is_clipped_orthomosaic(path)
+        ]
+        matches = publication_matches or list(
             surveys_root.rglob(
                 f"{survey_id}/rgb/qgis/clipped/ortho/{ORTHOMOSAIC_PATTERN}"
             )

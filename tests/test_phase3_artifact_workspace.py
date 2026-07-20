@@ -5,6 +5,7 @@ import pytest
 
 from shared.artifacts import (
     PublicationArtifact,
+    activate_publication,
     create_run_workspace,
     describe_published_survey,
     describe_run_workspace,
@@ -198,3 +199,242 @@ def test_prepare_publication_rejects_paths_that_escape_published_root(
                 )
             ],
         )
+
+
+def test_activate_publication_writes_files_then_published_manifest(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    target = published.ortho / "orthomosaic--xcb-t4.tif"
+    target.parent.mkdir(parents=True)
+    target.write_text("previous active artifact", encoding="utf-8")
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "previous"}\n', encoding="utf-8"
+    )
+
+    source = workspace.webodm_ortho / target.name
+    source.write_text("new active artifact", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                logical_name="orthomosaic",
+                source_path=source,
+                published_relative_path=Path("ortho") / target.name,
+                kind="file",
+            )
+        ],
+    )
+
+    replacements = []
+
+    def recording_replace(source_path, destination_path):
+        replacements.append((source_path, destination_path))
+        source_path.replace(destination_path)
+
+    manifest_path = activate_publication(
+        workspace=workspace,
+        published=published,
+        replace_path=recording_replace,
+    )
+
+    assert manifest_path == published.publication_manifest.resolve(strict=False)
+    assert target.read_text(encoding="utf-8") == "new active artifact"
+    previous = target.with_name(f".{target.name}.run-001.previous")
+    assert previous.read_text(encoding="utf-8") == "previous active artifact"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "published"
+    assert manifest["run_id"] == "run-001"
+    assert manifest["artifacts"][0]["published_path"] == str(target.resolve())
+    assert manifest["artifacts"][0]["previous_published_path"] == str(previous.resolve())
+    previous_manifest = published.publication_manifest.with_name(
+        ".publication.json.run-001.previous"
+    )
+    assert json.loads(previous_manifest.read_text())["run_id"] == "previous"
+    assert manifest["previous_publication_manifest"] == str(previous_manifest.resolve())
+    assert replacements[-1][1] == published.publication_manifest.resolve(strict=False)
+    assert not target.with_name(f".{target.name}.run-001.publishing").exists()
+
+
+def test_activate_publication_copy_failure_leaves_published_state_untouched(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    first_target = published.ortho / "first.tif"
+    second_target = published.ortho / "second.tif"
+    first_target.parent.mkdir(parents=True)
+    first_target.write_text("old first", encoding="utf-8")
+    second_target.write_text("old second", encoding="utf-8")
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "old"}\n', encoding="utf-8"
+    )
+
+    first_source = workspace.webodm_ortho / first_target.name
+    second_source = workspace.webodm_ortho / second_target.name
+    first_source.write_text("new first", encoding="utf-8")
+    second_source.write_text("new second", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact("first", first_source, Path("ortho/first.tif"), "file"),
+            PublicationArtifact("second", second_source, Path("ortho/second.tif"), "file"),
+        ],
+    )
+
+    copy_count = 0
+
+    def fail_second_copy(source, destination):
+        nonlocal copy_count
+        copy_count += 1
+        if copy_count == 2:
+            raise OSError("simulated activation copy failure")
+        destination.write_bytes(source.read_bytes())
+
+    with pytest.raises(OSError, match="simulated activation copy failure"):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            copy_file=fail_second_copy,
+        )
+
+    assert first_target.read_text(encoding="utf-8") == "old first"
+    assert second_target.read_text(encoding="utf-8") == "old second"
+    assert json.loads(published.publication_manifest.read_text())["run_id"] == "old"
+    assert not first_target.with_name(".first.tif.run-001.publishing").exists()
+
+
+def test_activate_publication_replace_failure_rolls_back_published_files(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    first_target = published.ortho / "first.tif"
+    second_target = published.ortho / "second.tif"
+    first_target.parent.mkdir(parents=True)
+    first_target.write_text("old first", encoding="utf-8")
+    second_target.write_text("old second", encoding="utf-8")
+
+    first_source = workspace.webodm_ortho / first_target.name
+    second_source = workspace.webodm_ortho / second_target.name
+    first_source.write_text("new first", encoding="utf-8")
+    second_source.write_text("new second", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact("first", first_source, Path("ortho/first.tif"), "file"),
+            PublicationArtifact("second", second_source, Path("ortho/second.tif"), "file"),
+        ],
+    )
+
+    replace_count = 0
+
+    def fail_fourth_replace(source, destination):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 4:
+            raise OSError("simulated activation replace failure")
+        source.replace(destination)
+
+    with pytest.raises(OSError, match="simulated activation replace failure"):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            replace_path=fail_fourth_replace,
+        )
+
+    assert first_target.read_text(encoding="utf-8") == "old first"
+    assert second_target.read_text(encoding="utf-8") == "old second"
+    assert not published.publication_manifest.exists()
+
+
+def test_activate_publication_rejects_directory_artifacts_before_publishing(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    (workspace.qgis_tiles_round / "tile.png").write_bytes(b"tile")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "round_tiles",
+                workspace.qgis_tiles_round,
+                Path("tiles/ortho/round-corners"),
+                "directory",
+            )
+        ],
+    )
+
+    with pytest.raises(ValueError, match="file artifacts only"):
+        activate_publication(workspace=workspace, published=published)
+
+    assert not published.root.exists()
+
+
+def test_activate_publication_rejects_tampered_staged_artifact(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    source = workspace.webodm_ortho / "orthomosaic.tif"
+    source.write_text("original", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            )
+        ],
+    )
+    staged = workspace.publish / "staged" / "ortho" / "orthomosaic.tif"
+    staged.write_text("tampered and larger", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="size mismatch"):
+        activate_publication(workspace=workspace, published=published)
+
+    assert not published.root.exists()
+
+def test_activate_publication_rejects_tampered_escaping_manifest_path(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    source = workspace.webodm_ortho / "orthomosaic.tif"
+    source.write_text("safe staged artifact", encoding="utf-8")
+    manifest_path = prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            )
+        ],
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["artifacts"][0]["published_relative_path"] = "../escape.tif"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must not escape"):
+        activate_publication(workspace=workspace, published=published)
+
+    assert not published.root.exists()
+    assert not (tmp_path / "surveys" / "2026" / "AH-026019" / "escape.tif").exists()

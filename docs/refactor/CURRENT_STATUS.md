@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, remaining reachable WebODM pointcloud and all-assets ZIP outputs now write through the run workspace before legacy mirroring
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, and WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring
-- **Current task:** WebODM pointcloud and all-assets ZIP migration completed for currently reachable exports; next Phase 3 slice should address map-export publication inputs/outputs or explicitly decide whether to activate dormant DEM downloads
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, and WebODM pointcloud/all-assets workspace mirroring
-- **Next recommended task:** Migrate map-export publication inputs/outputs toward manifest-aware workspace/published paths, or explicitly decide whether dormant WebODM DEM downloads should be activated before migrating them
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, with a tested dormant file-only publish activation boundary and manifest-aware map-export compatibility
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, and the file-only publish activation helper
+- **Current task:** The smallest safe file-only publish activation boundary is implemented and tested but intentionally not wired into the live pipeline
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning and file-only activation in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
+- **Next recommended task:** Design the first deliberately scoped RGBPipeline integration point for file publication, including same-survey ownership and crash-reconciliation requirements, before enabling the dormant helper; keep directory/tile activation separate
 
 ## Completed tasks
 
@@ -1374,3 +1374,96 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 - WebODM legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
 - A failure after one artifact has mirrored can leave another artifact unpublished; full multi-artifact publish activation remains deferred.
 - Workspace retention and cleanup remain deferred.
+
+## Phase 3 map-export publication-manifest compatibility
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+Map export now preserves its legacy survey-tree behavior while gaining a publication-manifest-aware compatibility adapter for published boundary and clipped orthomosaic resolution.
+
+The map export paths now:
+
+- look for `publication.json` beside the published survey `rgb/manifest.json`;
+- resolve manifest artifact paths through `published_relative_path` or `published_path` only when they stay inside the published `rgb` root;
+- prefer existing manifest-listed clipped orthomosaics under `qgis/clipped/ortho` for orthomosaic map exports;
+- prefer existing manifest-listed KML/KMZ boundary files for boundary map exports;
+- fall back to the previous manifest lookup and legacy survey-tree globbing when no publication manifest exists, when it is unreadable, or when a listed artifact is missing; and
+- keep `map.py`, map package output layout, print-export behavior, QGIS behavior, database schema, and operator flags unchanged.
+
+This slice intentionally does not activate publication manifests, change map package writing, or migrate map export outputs into run workspaces. It only prepares existing consumers to read a manifest-backed published artifact set once the later publish activation step exists.
+
+### Files modified or created
+
+- Modified: `modules/map_export/survey_manifest.py`
+- Modified: `modules/map_export/orthomosaic_finder.py`
+- Modified: `modules/map_export/boundary_finder.py`
+- Created: `tests/test_map_export_manifest_resolution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, RGBPipeline stage behavior, WebODM behavior, QGIS/GDAL execution behavior, map package output layout, operator workflow, external-service behavior, production dependency, or dormant DEM behavior changed.
+
+### Validation
+
+- `python -m py_compile modules/map_export/survey_manifest.py modules/map_export/orthomosaic_finder.py modules/map_export/boundary_finder.py tests/test_map_export_manifest_resolution.py` - passed.
+- `python -m pytest -q tests/test_map_export_manifest_resolution.py` - 4 passed.
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py tests/test_map_export_manifest_resolution.py` - 44 passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, map print export, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Data segregation still creates and populates the legacy published survey tree directly.
+- Publish activation is still staged/planned rather than implemented as the authoritative switch to published artifacts.
+- DEM downloads remain dormant because production currently hard-disables them.
+- Map export now can prefer publication manifests, but existing pipeline stages still mirror directly to legacy compatibility paths until publish activation exists.
+- Workspace retention and cleanup remain deferred.
+
+## Phase 3 file-only publish activation boundary
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+`shared/artifacts.py` now provides an explicit `activate_publication()` boundary for staged file artifacts. The helper remains dormant until a later pipeline integration slice calls it.
+
+Activation now:
+
+- reads the exact staged `workspace/publish/staged/publication.json` prepared by `prepare_publication()`;
+- validates staged status, workspace and published roots, artifact path containment, recorded staged/published paths, duplicate targets, and file sizes before touching the published tree;
+- rejects directory artifacts before creating the published root, keeping tile-tree activation deferred;
+- copies every staged file to a run-specific temporary sibling and verifies the copied size before replacing any published artifact;
+- preserves replaced files and the previous publication manifest under run-specific `.previous` paths for recovery and diagnosis;
+- rolls back already replaced files when a later replacement fails; and
+- atomically replaces the published `publication.json` last with `status: published`, so manifest-aware consumers do not see a completed publication before its files are installed.
+
+This is intentionally a helper-level activation boundary. It is not called by `RGBPipeline`, does not replace the current workspace-to-legacy mirroring behavior, and does not activate directory/tile artifacts. Cross-process crash recovery, network-share semantics, backup retention, and same-survey publication locking remain later Phase 3/4 work.
+
+### Files modified
+
+- `shared/artifacts.py`
+- `tests/test_phase3_artifact_workspace.py`
+- `docs/refactor/CURRENT_STATUS.md`
+- `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, pipeline stage orchestration, map package output, WebODM behavior, QGIS/GDAL behavior, dependency, operator default, or dormant DEM behavior changed.
+
+### Validation
+
+- `python -m py_compile shared/artifacts.py tests/test_phase3_artifact_workspace.py` - passed.
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py` - 20 passed.
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 50 passed.
+- `python -m pytest --collect-only -q` - 103 tests collected.
+- `python -m pytest -q` - 103 passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- The activation helper is not yet wired into `RGBPipeline`; stages continue their legacy compatibility mirrors.
+- Directory and tile-tree activation still needs a recoverable protocol before it can be enabled.
+- A hard process or host crash during the multi-file replacement window requires reconciliation from retained `.previous` files; automatic recovery is not implemented yet.
+- Same-survey publication locking is deferred to Phase 4, so runtime activation must not be enabled before ownership is coordinated.
+- Backup retention and workspace cleanup remain intentionally deferred.
