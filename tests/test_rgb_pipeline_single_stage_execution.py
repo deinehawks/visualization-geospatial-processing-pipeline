@@ -58,6 +58,44 @@ class ControlledKMLFailure(Exception):
     pass
 
 
+class ControlledWebODMExportFailure(Exception):
+    pass
+
+
+class OrthomosaicExportFakeWebODM(FakeWebODM):
+    def __init__(self, *, fail_export=False):
+        super().__init__()
+        self.fail_export = fail_export
+
+    def export_orthomosaic(
+        self,
+        project_id,
+        task_id,
+        *,
+        out_dir,
+        filename,
+        epsg,
+        candidates,
+        gdalwarp_path,
+    ):
+        self._record(
+            "export_orthomosaic",
+            project_id,
+            str(task_id),
+            out_dir=out_dir,
+            filename=filename,
+            epsg=epsg,
+            candidates=list(candidates),
+            gdalwarp_path=gdalwarp_path,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / filename
+        out_path.write_text(f"workspace ortho {task_id}", encoding="utf-8")
+        if self.fail_export:
+            raise ControlledWebODMExportFailure("controlled orthomosaic export failure")
+        return out_path
+
+
 def explicit_config(temporary_path_layout):
     return {
         "paths": {
@@ -216,6 +254,44 @@ def prepare_kml_boundary_context(pipeline, temporary_path_layout, survey_id="TES
         },
     }
     return survey_path, boundary_dir
+
+
+def prepare_webodm_ortho_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-ODM-ORTHO"):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    image_path = survey_path / "images" / "path"
+    image_path.mkdir(parents=True)
+    (image_path / "image-001.jpg").write_text("image", encoding="utf-8")
+    boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
+    boundary_path.parent.mkdir(parents=True)
+    boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "dirs": {"path": str(image_path)},
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "boundary_available": True,
+            "boundary_geojson_path": str(boundary_path),
+        }
+    )
+    return survey_path, image_path, boundary_path
+
+
+def enable_only_orthomosaic_export(pipeline):
+    pipeline.config["exports"] = {
+        "enabled": True,
+        "ortho": {
+            "enabled": True,
+            "reproject_epsg": 4326,
+            "asset_candidates": ["orthophoto.tif"],
+        },
+        "pointcloud": {"enabled": False},
+        "all_assets_zip": {"enabled": False},
+        "tools": {"gdalwarp_path": "fake-gdalwarp"},
+    }
 
 
 def test_rgb_pipeline_executes_one_selected_stage_successfully(
@@ -872,6 +948,144 @@ def test_kml_boundary_failure_leaves_legacy_outputs_untouched(
     assert legacy_csv.read_text(encoding="utf-8") == "old csv"
     assert "boundary_available" not in pipeline.state
     assert "boundary_geojson_path" not in pipeline.state
+
+
+def test_webodm_task2_orthomosaic_exports_workspace_then_legacy(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.export_name_overrides["task2"] = "task2-output"
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    result = pipeline.stage_webodm()
+
+    workspace_ortho = pipeline.workspace_layout.webodm_ortho / "task2" / "task2-output.tif"
+    legacy_ortho = survey_path / "ortho" / "task2-output.tif"
+    export_calls = fake_webodm.calls_for("export_orthomosaic")
+
+    assert len(export_calls) == 1
+    assert export_calls[0].kwargs["out_dir"] == pipeline.workspace_layout.webodm_ortho / "task2"
+    assert export_calls[0].kwargs["filename"] == "task2-output.tif"
+    assert workspace_ortho.read_text(encoding="utf-8") == "workspace ortho task-0001"
+    assert legacy_ortho.read_text(encoding="utf-8") == "workspace ortho task-0001"
+    assert result["downloads"]["task2"]["orthomosaic"] == str(legacy_ortho)
+    assert result["workspace"]["webodm_ortho"]["task2"] == str(workspace_ortho)
+    assert result["published"]["webodm_ortho"]["task2"] == str(legacy_ortho)
+    assert result["selected_orthomosaic"]["source_path"] == str(legacy_ortho)
+    assert pipeline.state["selected_orthomosaic"]["source_path"] == str(legacy_ortho)
+
+    for path_to_check in (
+        workspace_ortho,
+        legacy_ortho,
+        repository.db_file,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_webodm_orthomosaic_export_failure_leaves_legacy_output_untouched(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM(fail_export=True)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.export_name_overrides["task2"] = "task2-output"
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    legacy_ortho = survey_path / "ortho" / "task2-output.tif"
+    legacy_ortho.parent.mkdir(parents=True)
+    legacy_ortho.write_text("old legacy ortho", encoding="utf-8")
+
+    with pytest.raises(
+        ControlledWebODMExportFailure,
+        match="controlled orthomosaic export failure",
+    ):
+        pipeline.stage_webodm()
+
+    workspace_ortho = pipeline.workspace_layout.webodm_ortho / "task2" / "task2-output.tif"
+
+    assert workspace_ortho.read_text(encoding="utf-8") == "workspace ortho task-0001"
+    assert legacy_ortho.read_text(encoding="utf-8") == "old legacy ortho"
+    assert "selected_orthomosaic" not in pipeline.state
+
+
+def test_webodm_fallback_orthomosaic_exports_workspace_then_legacy(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, _image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    reusable_upload = temporary_path_layout.upload_cache_dir / "reusable-webodm-upload"
+    reusable_upload.mkdir(parents=True)
+    pipeline._get_reusable_webodm_upload_folder = lambda **kwargs: reusable_upload
+    pipeline.state["webodm"] = {
+        "project_id": 100,
+        "project_name": "TEST-SURVEY-ODM-ORTHO",
+        "downloads": {},
+    }
+
+    result = pipeline.run_webodm_fallback_task(
+        task_key="task4",
+        fallback_reason="test_fallback",
+    )
+
+    export_calls = fake_webodm.calls_for("export_orthomosaic")
+    assert len(export_calls) == 1
+    filename = export_calls[0].kwargs["filename"]
+    workspace_ortho = pipeline.workspace_layout.webodm_ortho / "task4" / filename
+    legacy_ortho = survey_path / "ortho" / filename
+
+    assert export_calls[0].kwargs["out_dir"] == pipeline.workspace_layout.webodm_ortho / "task4"
+    assert workspace_ortho.read_text(encoding="utf-8") == "workspace ortho task-0001"
+    assert legacy_ortho.read_text(encoding="utf-8") == "workspace ortho task-0001"
+    assert result["downloads"]["orthomosaic"] == str(legacy_ortho)
+    assert result["selected_orthomosaic"]["source_path"] == str(legacy_ortho)
+    assert pipeline.state["webodm"]["workspace"]["webodm_ortho"]["task4"] == str(
+        workspace_ortho
+    )
+    assert pipeline.state["webodm"]["published"]["webodm_ortho"]["task4"] == str(
+        legacy_ortho
+    )
 
 def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
     temporary_path_layout,

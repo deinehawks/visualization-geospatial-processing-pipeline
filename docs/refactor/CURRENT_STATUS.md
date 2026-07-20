@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, KML boundary derived outputs now write through the run workspace before legacy mirroring
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, and KML boundary workspace-to-legacy mirroring
-- **Current task:** KML boundary migration completed; next Phase 3 slice should migrate the next artifact-producing stage behind tests
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, and KML boundary workspace mirroring
-- **Next recommended task:** Migrate WebODM export outputs toward run-owned workspace paths while preserving legacy published paths until publish activation exists
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, WebODM orthomosaic exports now write through the run workspace before legacy mirroring
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, and WebODM orthomosaic workspace-to-legacy mirroring
+- **Current task:** WebODM orthomosaic export migration completed; next Phase 3 slice should migrate the next artifact-producing stage behind tests
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, and WebODM orthomosaic workspace mirroring
+- **Next recommended task:** Migrate QGIS clipped orthomosaic and tile outputs toward run-owned workspace paths while preserving legacy published paths until publish activation exists
 
 ## Completed tasks
 
@@ -1226,4 +1226,53 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 - WebODM, QGIS, and map export still primarily consume or produce legacy paths.
 - KML boundary legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
 - A failure during a later individual file mirror could leave an earlier derived file mirrored; full multi-file publish activation remains deferred to the manifest-backed publish step.
+- Workspace retention and cleanup remain deferred.
+
+## Phase 3 WebODM orthomosaic workspace migration
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+`RGBPipeline.stage_webodm()` and `RGBPipeline.run_webodm_fallback_task()` now treat the run workspace as the first writable destination for WebODM orthomosaic exports, then mirror successful orthomosaic files back into the existing legacy survey orthomosaic folder.
+
+This slice intentionally migrates orthomosaic exports only. DEM, ODM, point-cloud, all-assets ZIP, WebODM task creation, upload-cache behavior, quality-gate behavior, and WebODM retry/resume semantics remain unchanged.
+
+The WebODM orthomosaic paths now:
+
+- create the run-owned workspace directory tree through `create_run_workspace(self.workspace_layout)` before WebODM export handling;
+- export Task 1, Task 2, and fallback/Task 4 orthomosaics to task-specific workspace folders under `workspace/webodm/ortho/<task_key>`;
+- mirror successful orthomosaic files back to the same legacy directory that the pre-migration branch would have used, including production `rgb/ortho` and experiment task-specific `ortho` directories;
+- replace individual legacy orthomosaic files through the existing temporary-and-backup file mirror helper;
+- preserve existing `downloads.<task>.orthomosaic` and `selected_orthomosaic.source_path` semantics by storing legacy-compatible mirrored paths; and
+- add additive `workspace.webodm_ortho` and `published.webodm_ortho` path metadata for exported orthomosaics.
+
+If orthomosaic export raises before returning a successful path, pre-existing legacy orthomosaic files remain untouched and partial workspace files are left as diagnostic evidence.
+
+### Files modified or created
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, WebODM task creation behavior, upload-cache behavior, QGIS/GDAL execution behavior, retry behavior, map export behavior, operator workflow, external-service behavior, or production dependency changed.
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- First `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - 35 passed in 1.07 seconds.
+- Final focused `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - 36 passed in 0.95 seconds.
+- `python -m pytest --collect-only -q` - 89 tests collected.
+- `python -m pytest -q` - 89 passed in 1.74 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Data segregation still creates and populates the legacy published survey tree directly.
+- WebODM DEM, ODM, point-cloud, and all-assets ZIP outputs still primarily use legacy paths.
+- QGIS and map export still primarily consume or produce legacy paths.
+- WebODM orthomosaic legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
 - Workspace retention and cleanup remain deferred.

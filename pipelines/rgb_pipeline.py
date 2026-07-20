@@ -585,6 +585,43 @@ class RGBPipeline(
             if backup_target.exists():
                 backup_target.unlink()
 
+    def _export_orthomosaic_to_workspace(
+        self,
+        *,
+        processor: Any,
+        project_id: int,
+        task_id: str,
+        task_key: str,
+        published_dir: Path,
+        filename: str,
+        epsg: int,
+        candidates: list[str],
+        gdalwarp_path: str,
+    ) -> tuple[Path | None, Path | None]:
+        workspace_dir = self.workspace_layout.webodm_ortho / task_key
+        self._reset_workspace_directory(workspace_dir)
+
+        workspace_path = processor.export_orthomosaic(
+            project_id,
+            task_id,
+            out_dir=workspace_dir,
+            filename=filename,
+            epsg=epsg,
+            candidates=candidates,
+            gdalwarp_path=gdalwarp_path,
+        )
+
+        if not workspace_path:
+            return None, None
+
+        workspace_path = self._require_workspace_owned_path(Path(workspace_path))
+        published_path = Path(published_dir) / workspace_path.name
+        self._replace_legacy_file_after_success(
+            source_file=workspace_path,
+            target_file=published_path,
+        )
+        return workspace_path, published_path
+
 
     def _check_control_or_raise(self, stage_name: str) -> None:
         try:
@@ -947,6 +984,7 @@ class RGBPipeline(
 
         survey_id = self._require_survey_id()
         rgb_path = self._require_rgb_path()
+        create_run_workspace(self.workspace_layout)
 
         webodm_cfg = self.config["webodm"]
         naming_cfg = self.config.get("naming", {})
@@ -1313,19 +1351,23 @@ class RGBPipeline(
                         flag=task1_flag,
                     )
 
-                out_path = processor.export_orthomosaic(
-                    project_id,
-                    current_task1_id,
-                    out_dir=out_dir,
+                workspace_path, published_path = self._export_orthomosaic_to_workspace(
+                    processor=processor,
+                    project_id=project_id,
+                    task_id=current_task1_id,
+                    task_key="task1",
+                    published_dir=out_dir,
                     filename=filename,
                     epsg=epsg,
                     candidates=candidates,
                     gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                 )
 
-                if out_path:
-                    result["downloads"]["task1"]["orthomosaic"] = str(out_path)
+                if published_path:
+                    result["downloads"]["task1"]["orthomosaic"] = str(published_path)
                     result["downloads"]["task1"]["epsg"] = epsg
+                    result.setdefault("workspace", {}).setdefault("webodm_ortho", {})["task1"] = str(workspace_path)
+                    result.setdefault("published", {}).setdefault("webodm_ortho", {})["task1"] = str(published_path)
                 else:
                     logger.warning("Could not download orthomosaic for Task 1.")
 
@@ -1495,23 +1537,27 @@ class RGBPipeline(
                             flag=task2_flag,
                         )
     
-                    out_path = processor.export_orthomosaic(
-                        project_id,
-                        current_task2_id,
-                        out_dir=out_dir,
+                    workspace_path, published_path = self._export_orthomosaic_to_workspace(
+                        processor=processor,
+                        project_id=project_id,
+                        task_id=current_task2_id,
+                        task_key="task2",
+                        published_dir=out_dir,
                         filename=filename,
                         epsg=epsg,
                         candidates=candidates,
                         gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
                     )
     
-                    if out_path:
-                        result["downloads"]["task2"]["orthomosaic"] = str(out_path)
+                    if published_path:
+                        result["downloads"]["task2"]["orthomosaic"] = str(published_path)
                         result["downloads"]["task2"]["epsg"] = epsg
+                        result.setdefault("workspace", {}).setdefault("webodm_ortho", {})["task2"] = str(workspace_path)
+                        result.setdefault("published", {}).setdefault("webodm_ortho", {})["task2"] = str(published_path)
     
                         selected = self._set_selected_orthomosaic(
                             task_key="task2",
-                            source_path=out_path,
+                            source_path=published_path,
                             flag=task2_flag,
                             boundary_used=True,
                             fallback_used=False,
@@ -2202,6 +2248,7 @@ class RGBPipeline(
 
         task_ortho_dir = rgb_path / "ortho"
         task_ortho_dir.mkdir(parents=True, exist_ok=True)
+        create_run_workspace(self.workspace_layout)
 
         processor = self._create_webodm_processor(logger)
 
@@ -2305,25 +2352,29 @@ class RGBPipeline(
                 flag=task_flag,
             )
 
-            out_path = processor.export_orthomosaic(
-                int(project_id),
-                str(current_task_id),
-                out_dir=task_ortho_dir,
+            workspace_path, published_path = self._export_orthomosaic_to_workspace(
+                processor=processor,
+                project_id=int(project_id),
+                task_id=str(current_task_id),
+                task_key=task_key,
+                published_dir=task_ortho_dir,
                 filename=filename,
                 epsg=epsg,
                 candidates=candidates,
                 gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
             )
 
-            if out_path:
-                task_downloads["orthomosaic"] = str(out_path)
+            if published_path:
+                task_downloads["orthomosaic"] = str(published_path)
                 task_downloads["epsg"] = epsg
+                web.setdefault("workspace", {}).setdefault("webodm_ortho", {})[task_key] = str(workspace_path)
+                web.setdefault("published", {}).setdefault("webodm_ortho", {})[task_key] = str(published_path)
 
                 self.state["webodm"] = web
 
                 selected = self._set_selected_orthomosaic(
                     task_key=task_key,
-                    source_path=out_path,
+                    source_path=published_path,
                     flag=task_flag,
                     boundary_used=True,
                     fallback_used=True,

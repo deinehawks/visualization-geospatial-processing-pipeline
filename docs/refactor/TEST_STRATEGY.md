@@ -586,3 +586,19 @@ Coverage proves that:
 - a controlled KML processing failure leaves pre-existing legacy GeoJSON and CSV files untouched and records no boundary state.
 
 The tests patch the KML boundary with fakes, use pytest-owned survey and workspace paths, and do not parse real KML, execute the full pipeline, contact WebODM, run QGIS/GDAL, access production storage, or delete real data.
+
+## Phase 3 WebODM orthomosaic workspace coverage
+
+Added on 2026-07-20, the hermetic RGBPipeline single-stage tests cover the WebODM orthomosaic workspace migration.
+
+Coverage proves that:
+
+- Task 2 orthomosaic export receives a task-specific run workspace output directory;
+- fallback/Task 4 orthomosaic export receives a task-specific run workspace output directory;
+- successful orthomosaic exports are mirrored back to legacy `rgb/ortho` paths for QGIS, quality-gate, map export, and operator compatibility;
+- successful WebODM output preserves legacy `downloads.<task>.orthomosaic` and `selected_orthomosaic.source_path` values;
+- successful WebODM output includes additive `workspace.webodm_ortho` and `published.webodm_ortho` metadata;
+- a controlled orthomosaic export failure leaves pre-existing legacy orthomosaic files untouched; and
+- partial workspace orthomosaic files remain available as diagnostic evidence after a controlled failure.
+
+The tests use a fake WebODM processor, pytest-owned survey/workspace paths, fake upload-cache behavior, and orthomosaic-only export configuration. They do not contact WebODM, run QGIS/GDAL, execute the real pipeline, access production storage, or delete real data.
