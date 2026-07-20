@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, pending artifact inventory and ADR-003 preparation
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, artifact inventory and ADR-003 proposal prepared for review
 - **Completed work:** Phase 1 safety baseline plus Phase 2 logger isolation, parseable run/stage/external-boundary events, parser/reporting support, threaded logging coverage, handler cleanup policy, and run pause/abort/cancel event coverage
-- **Current task:** Begin Phase 3 with artifact inventory and ADR-003 proposal; do not implement workspace changes until the ownership design is accepted
+- **Current task:** Review ADR-003 proposal and Phase 3 artifact inventory; do not implement workspace changes until the ownership design is accepted
 - **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, and query_survey_stats.py
-- **Next recommended task:** Inventory run-owned versus published artifacts and prepare ADR-003 for workspace/publication ownership
+- **Next recommended task:** Review and accept or revise ADR-003, then implement the smallest path-planning and publish abstraction with temporary-path tests
 
 ## Completed tasks
 
@@ -949,4 +949,43 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 
 ### Recommended next task
 
-Begin Phase 3 with a read-only artifact inventory covering every run-owned working path, survey-published path, upload/cache path, checkpoint path, and map/report consumer path. Use that inventory to prepare ADR-003 before changing workspace or publication behavior.
+Review and accept or revise ADR-003. Once accepted, implement the smallest path-planning and publish abstraction that moves mutable stage artifacts into a run-scoped workspace while preserving legacy-compatible published paths.
+
+## Phase 3 artifact inventory and ADR-003 proposal
+
+Date: 2026-07-20.
+
+### Planning outcome
+
+Prepared the Phase 3 artifact inventory and promoted ADR-003 from Pending to Proposed for review. The proposed direction is a run-scoped workspace for mutable artifacts plus a manifest-backed publish step into legacy-compatible survey paths.
+
+### Inventory coverage
+
+The inventory covers:
+
+- External field-data inputs.
+- Shared survey-published paths under `<surveys_root>/<year>/<survey_id>/rgb/`.
+- Data segregation outputs, boundary files, cross-run filter outputs, WebODM exports, QGIS clipped rasters, tile directories, upload caches, checkpoints, SQLite path state, logs, and map export consumers.
+- Current compatibility consumers in `modules/map_export/`, `map.py`, and `query_survey_stats.py`.
+
+### Files modified or created
+
+- Created: `docs/refactor/PHASE3_ARTIFACT_INVENTORY.md`
+- Modified: `docs/refactor/DECISIONS.md`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+
+No runtime code, database schema, migration, path behavior, retry behavior, cleanup behavior, map export behavior, or operator workflow changed.
+
+### Validation
+
+Validation for this docs-only planning task is limited to Markdown/content review and repository diff checks. Runtime tests are not required because no executable code changed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- ADR-003 is Proposed, not Accepted; implementation should not start until the ownership model is approved or revised.
+- Publish semantics for Windows network shares and cross-volume replacement still need detailed design.
+- Workspace retention and cleanup policy is intentionally deferred.
+- Historical SQLite outputs and logs may contain legacy absolute paths and need compatibility handling.
+- Map export should remain legacy-compatible and may later prefer publication manifests when present.

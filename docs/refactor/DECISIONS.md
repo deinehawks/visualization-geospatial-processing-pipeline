@@ -35,7 +35,7 @@ These entries identify required decisions without selecting final architectures.
 |---|---|---|---|---|---|---|---|
 | ADR-001 | 2026-07-16 | Accepted | Normal test discovery is currently unsafe and no framework is declared. | Use pytest as the default test framework. | Standard-library unittest; another approved runner. | pytest becomes a development/test dependency; configuration, markers, and safe handling of existing scripts are required. | R13; `tests/`; `requirements.txt` |
 | ADR-002 | 2026-07-17 | Accepted | Run/stage log context must remain correct under threads and multiple pipeline instances. | Use owned per-run logger instances keyed by logical name, run ID, and log destination, while preserving logical logger names in records and using context-local stage state. | Pure `contextvars`; per-run logger adapters; explicit structured event objects; per-run logger names only. | Fixes handler/context leakage while preserving log parser columns; requires explicit handler cleanup in tests. | R05; `shared/logging.py`; `query_survey_stats.py`; `tests/test_logging_context_ownership.py` |
-| ADR-003 | 2026-07-16 | Pending | Intermediate work and final published survey artifacts need separate ownership. | Pending. | Run-scoped workspace plus atomic publish; versioned immutable outputs plus pointer; serialized in-place writes. | Affects storage, compatibility, cleanup, recovery, and map consumers. | R02, R07; `modules/data_segregation/`; `pipelines/rgb_pipeline.py` |
+| ADR-003 | 2026-07-20 | Proposed | Intermediate work and final published survey artifacts need separate ownership. | Use a run-scoped workspace for mutable stage artifacts, then publish validated artifacts to legacy-compatible survey paths through a manifest-backed publish step. | Versioned immutable outputs plus pointer; serialized in-place writes; current shared tree. | Affects storage, compatibility, cleanup, recovery, and map consumers. | R02, R07; `docs/refactor/PHASE3_ARTIFACT_INVENTORY.md`; `modules/data_segregation/`; `pipelines/rgb_pipeline.py` |
 | ADR-004 | 2026-07-16 | Pending | Conflicting survey/resource use must be coordinated across the intended deployment topology. | Pending. | Database leases; OS/file locks; lock service; scheduler-enforced exclusivity. | Affects stale recovery, multi-host support, and operational complexity. | R02–R04; Phase 4 |
 | ADR-005 | 2026-07-16 | Pending | Survey IDs must be reserved atomically while preserving existing naming. | Pending. | SQLite allocation table/transaction; dedicated sequence service; atomic directory reservation; externally supplied IDs only. | Affects gaps, migration, legacy reconciliation, and database dependency. | R03; `generate_next_survey_id` |
 | ADR-006 | 2026-07-16 | Pending | A forced rerun can create a newer failed attempt after an older success. | Pending. | Latest attempt authoritative; explicit selected attempt; successful output remains active until atomic replacement; stage generation model. | Defines resume, reporting, publication, and migration semantics. | R11; `stages`; `PipelineRepo.get_latest_stage` |
@@ -72,7 +72,37 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, and ADR-013 are accepted. ADR-003 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, and ADR-013 are accepted. ADR-003 is proposed for review. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+
+### ADR-003 - Separate run-owned workspace from published survey artifacts
+
+- **Decision ID:** ADR-003
+- **Date:** 2026-07-20
+- **Status:** Proposed
+- **Context:**
+  - Current RGB processing writes many mutable intermediate and final artifacts into `<surveys_root>/<year>/<survey_id>/rgb/`.
+  - Data segregation, cross-run filtering, WebODM exports, KML conversion, QGIS clipping, and tile copy-back can all modify the same shared survey tree.
+  - QGIS and tile generation already use local run-scoped staging in some cases, but the final copy-back still targets legacy shared directories directly.
+  - Map export and reporting consumers currently depend on the legacy survey layout and must remain compatible.
+  - Failed, aborted, canceled, forced, or same-survey overlapping runs must not partially replace the active published artifact set.
+- **Decision:**
+  - Proposed: introduce a run-scoped workspace for mutable stage artifacts and publish only validated artifacts into the legacy-compatible survey tree.
+  - The publish step should be manifest-backed, record the active run and artifact set, and preserve the previous active published artifacts until the new set is complete.
+  - Existing consumers should continue resolving legacy paths. When a publication manifest exists, consumers may later prefer the manifest and fall back to legacy globbing for older runs.
+  - Cleanup and retention of failed or superseded workspaces should be handled by a later explicit policy.
+- **Alternatives considered:**
+  - Versioned immutable outputs plus pointer: strong recovery and audit model, but broader because every consumer must learn the pointer/version layout before Phase 3 can reduce shared-tree collision risk.
+  - Serialized in-place writes: reduces concurrent same-survey writes, but still exposes partial outputs, stale artifacts, and crash ambiguity inside the published tree.
+  - Current shared tree: lowest implementation cost, but keeps the main R02/R07 risks in place.
+- **Consequences:**
+  - Same-survey runs can perform mutable work in separate directories.
+  - Failed, aborted, or canceled runs can retain diagnostic workspaces without replacing active published artifacts.
+  - Existing published paths can remain stable for operators, map export, and reporting.
+  - Storage usage will increase until retention is designed and implemented.
+  - Publish behavior must handle Windows and network-share copy/rename semantics explicitly.
+  - SQLite stage output and historical logs may contain legacy absolute paths; migration or compatibility handling must be planned before changing stored path meaning.
+  - Rollback should be possible by disabling the new workspace/publish path planner and continuing to use the legacy shared layout, provided no destructive migration has been performed.
+- **Related files or issues:** R02, R07, R10, R11; `docs/refactor/PHASE3_ARTIFACT_INVENTORY.md`; `modules/data_segregation/data_segregation.py`; `pipelines/rgb_pipeline.py`; `modules/cross_run_image_filter/cross_run_image_filter.py`; `modules/kml_boundary_setter/kml_boundary_setter.py`; `modules/qgis/qgis_tools.py`; `modules/webodm/webodm_processor.py`; `modules/map_export/`.
 
 
 ### ADR-002 - Isolate logger context and handler ownership per run
