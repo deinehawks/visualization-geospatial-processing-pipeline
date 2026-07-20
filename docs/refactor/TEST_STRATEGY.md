@@ -727,3 +727,28 @@ Validation added or rerun for this slice:
 - `git diff --check`
 
 This coverage assumes a single publisher. It does not exercise live `RGBPipeline` publication, concurrent same-survey publishers, process or host termination, network shares, large files, content hashing, directory/tile activation, or backup retention.
+
+## Phase 3 publication ownership coverage
+
+Date: 2026-07-20.
+
+`tests/test_publication_lock.py` covers the dormant same-survey publication lock using only pytest-owned temporary roots with an explicit ownership sentinel.
+
+Coverage proves that:
+
+- acquisition writes a parseable ownership record and release removes it;
+- two concurrent contenders for one published root produce exactly one owner and one fail-closed conflict;
+- a caller with the wrong owner token cannot release another owner's lock;
+- malformed existing lock evidence blocks acquisition and remains unchanged;
+- replacing a lock with another valid owner's record prevents the old handle from deleting it; and
+- filesystem roots are rejected as publication roots.
+
+Validation added for this slice:
+
+- `python -m py_compile shared/publication_lock.py tests/test_publication_lock.py`
+- `python -m pytest -q tests/test_publication_lock.py` - 6 passed
+- `python -m pytest -q tests/test_publication_lock.py tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 60 passed
+- `python -m pytest --collect-only -q` - 113 collected
+- `python -m pytest -q` - 113 passed
+
+This is hermetic helper-level coverage. It does not wire lock ownership into `activate_publication()` or `RGBPipeline`, terminate a real process, exercise stale-lock operator recovery, access network shares, validate Windows SMB atomicity, run the real pipeline, contact WebODM, execute QGIS/GDAL, or touch production storage.

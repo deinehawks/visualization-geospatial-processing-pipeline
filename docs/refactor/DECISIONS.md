@@ -46,6 +46,7 @@ These entries identify required decisions without selecting final architectures.
 | ADR-011 | 2026-07-16 | Pending | Job scheduling topology determines state-store and lock requirements. | Pending. | Single-host multi-process; single-host service with workers; multi-host durable queue; retain manual independent CLI runs. | Affects dependencies, SQLite viability, deployment, and operations. | R01, R04; Phase 12 |
 | ADR-012 | 2026-07-16 | Pending | Quality approval must support unattended execution without losing manual oversight. | Pending. | Persisted manual approval; rules-based automatic gate; external API/UI; hybrid shadow mode. | Affects authorization, auditability, worker capacity, and output quality risk. | R12; `stage_quality_gate`; Phase 13 |
 | ADR-013 | 2026-07-17 | Accepted | Phase 2 needs consistent machine-readable run/stage observability without a schema change. | Keep existing text log columns and standardize lifecycle messages as key=value event records. | JSON logs; database event journal; free-form human-only logs. | Preserves parser compatibility and avoids persistent migration; future DB refactor can promote the same event model into state tables. | Phase 2; `shared/logging.py`; `shared/stage_runner.py`; `pipelines/rgb_pipeline.py`; `query_survey_stats.py` |
+| ADR-014 | 2026-07-20 | Accepted | File publication recovery requires one identifiable owner for a survey publication target. | Use an atomic, fail-closed filesystem ownership record in the published `rgb` root for the deliberately scoped publication boundary. | Local SQLite lease; OS advisory lock; external lock service; automatically expiring lease. | Coordinates contenders where exclusive file creation is reliable, but a crashed owner leaves evidence that requires explicit recovery. | R02, R04, R07; `shared/publication_lock.py`; `shared/artifacts.py`; Phase 3 |
 
 ## Accepted decisions
 
@@ -72,7 +73,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, and ADR-013 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, ADR-013, and ADR-014 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -104,6 +105,39 @@ ADR-001, ADR-002, ADR-003, and ADR-013 are accepted. ADR-004 through ADR-012 rem
   - SQLite stage output and historical logs may contain legacy absolute paths; migration or compatibility handling must be planned before changing stored path meaning.
   - Rollback should be possible by disabling the new workspace/publish path planner and continuing to use the legacy shared layout, provided no destructive migration has been performed.
 - **Related files or issues:** R02, R07, R10, R11; `docs/refactor/PHASE3_ARTIFACT_INVENTORY.md`; `shared/artifacts.py`; `modules/data_segregation/data_segregation.py`; `pipelines/rgb_pipeline.py`; `modules/cross_run_image_filter/cross_run_image_filter.py`; `modules/kml_boundary_setter/kml_boundary_setter.py`; `modules/qgis/qgis_tools.py`; `modules/webodm/webodm_processor.py`; `modules/map_export/`.
+
+
+
+### ADR-014 - Use fail-closed filesystem ownership for survey publication
+
+- **Decision ID:** ADR-014
+- **Date:** 2026-07-20
+- **Status:** Accepted
+- **Approval context:** On 2026-07-20, after the file-publication recovery milestone, the user approved the smallest safe same-survey publication-ownership slice before live RGBPipeline integration.
+- **Context:**
+  - File-publication retry and crash reconciliation deliberately assumes that only one run modifies a survey publication target at a time.
+  - A published survey root can live on shared storage and can be reached by independent workstations, so a lease held only in one workstation's SQLite database would not necessarily coordinate every publisher.
+  - Publication ownership must be diagnosable after a crash and must not silently guess that an existing owner is dead.
+- **Decision:**
+  - Represent ownership with an atomically exclusive-created `.publication.lock` JSON file in the published survey `rgb` root.
+  - Record the lock version, run ID, survey ID, published root, creation time, and a unique owner token.
+  - Treat any existing lock, including malformed or apparently stale evidence, as owned and fail closed. Do not automatically steal or expire it.
+  - Release a lock only when the on-disk run ID, survey ID, and owner token match the caller's lock handle.
+  - Introduce the helper as a dormant boundary first. Do not wire it into `activate_publication()` or `RGBPipeline` until a separate integration slice defines acquisition scope and exception-safe release behavior.
+  - Keep ADR-004 pending for broader resource locking, scheduling topology, lease recovery, and non-publication resources.
+- **Alternatives considered:**
+  - Local SQLite lease: useful for one database authority, but it may not coordinate independent hosts that share only the publication tree.
+  - OS advisory lock: avoids a retained ownership file but has less portable Windows/SMB behavior and weaker post-crash diagnostic evidence.
+  - External lock service: can coordinate multiple hosts robustly, but introduces a new operational dependency and is broader than this Phase 3 slice.
+  - Automatically expiring lease: improves unattended recovery, but requires trustworthy clocks or heartbeats and can permit two owners when a slow or partitioned publisher is still active.
+- **Consequences:**
+  - Competing publishers can identify a single owner where the target filesystem honors exclusive file creation.
+  - A process or host crash can leave a stale lock; an explicit, separately designed operator recovery path is required before live activation.
+  - Malformed lock evidence blocks publication instead of being overwritten, preserving evidence for diagnosis.
+  - Real Windows SMB atomic-create and disconnect behavior remains unvalidated by the hermetic suite.
+  - No database schema, dependency, live pipeline behavior, or existing operator default changes in the dormant slice.
+  - Rollback consists of removing the unused helper, its tests, and this decision record; no persistent migration is required.
+- **Related files or issues:** R02, R04, R07; `shared/publication_lock.py`; `shared/artifacts.py`; `tests/test_publication_lock.py`; Phase 3; ADR-003; ADR-004.
 
 
 ### ADR-002 - Isolate logger context and handler ownership per run
