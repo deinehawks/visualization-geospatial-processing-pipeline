@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, QGIS clipped orthomosaic and tile outputs now write through the run workspace before legacy mirroring
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, and QGIS clipped orthomosaic/tile workspace-to-legacy mirroring
-- **Current task:** QGIS clipped orthomosaic and tile output migration completed; next Phase 3 slice should migrate another remaining artifact-producing output behind tests
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, and QGIS workspace mirroring
-- **Next recommended task:** Migrate another remaining artifact-producing output, such as remaining WebODM non-orthomosaic exports or map-export publication inputs, while preserving legacy published paths until publish activation exists
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, remaining reachable WebODM pointcloud and all-assets ZIP outputs now write through the run workspace before legacy mirroring
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, and WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring
+- **Current task:** WebODM pointcloud and all-assets ZIP migration completed for currently reachable exports; next Phase 3 slice should address map-export publication inputs/outputs or explicitly decide whether to activate dormant DEM downloads
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, and WebODM pointcloud/all-assets workspace mirroring
+- **Next recommended task:** Migrate map-export publication inputs/outputs toward manifest-aware workspace/published paths, or explicitly decide whether dormant WebODM DEM downloads should be activated before migrating them
 
 ## Completed tasks
 
@@ -1324,4 +1324,53 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 - Map export still primarily consumes legacy paths.
 - QGIS legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
 - A failure after one QGIS artifact has mirrored can leave another artifact unpublished; full multi-artifact publish activation remains deferred.
+- Workspace retention and cleanup remain deferred.
+## Phase 3 WebODM pointcloud and all-assets ZIP workspace migration
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+`RGBPipeline.stage_webodm()` now treats the run workspace as the first writable destination for the remaining currently reachable WebODM Task 2 non-orthomosaic downloads: pointcloud LAZ/PCD files and the all-assets ZIP. Successful artifacts are mirrored back into the existing legacy survey paths for compatibility.
+
+This slice intentionally does not activate DEM downloads. The existing production code has `dem_do_download = False`, so DEM configuration remains dormant. That behavior was preserved to avoid silently introducing new WebODM/GDAL work in production.
+
+The WebODM non-orthomosaic paths now:
+
+- include a run-owned `workspace/webodm/3d` layout directory for pointcloud outputs;
+- export Task 2 pointcloud files to `workspace/webodm/3d/task2` before mirroring LAZ/PCD/PLY files that exist to legacy `rgb/3d`;
+- download Task 2 all-assets ZIP files to `workspace/webodm/odm/task2` before mirroring the ZIP to legacy `rgb/odm`;
+- preserve existing legacy-compatible `downloads.task2.pointcloud_laz`, `downloads.task2.pointcloud_pcd`, `downloads.task2.pointcloud_ply`, `downloads.task2.pointcloud_asset_type`, and `downloads.task2.all_assets_zip` values; and
+- add additive `workspace.webodm_3d`, `published.webodm_3d`, `workspace.webodm_odm`, and `published.webodm_odm` metadata for migrated files.
+
+If pointcloud export raises before returning successfully, pre-existing legacy pointcloud files remain untouched and partial workspace files remain as diagnostic evidence. If an all-assets ZIP endpoint is unavailable or returns false through the safe downloader, the legacy ZIP path is not updated.
+
+### Files modified
+
+- Modified: `shared/artifacts.py`
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, WebODM task creation behavior, upload-cache behavior, orthomosaic behavior, QGIS/GDAL execution behavior, retry behavior, map export behavior, operator workflow, external-service behavior, production dependency, or dormant DEM behavior changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_single_stage_execution.py -k "webodm_task2_remaining or webodm_pointcloud_failure"` - 2 passed, 31 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - 40 passed in 1.31 seconds.
+- `python -m pytest --collect-only -q` - 93 tests collected in 0.08 seconds.
+- `python -m pytest -q` - 93 passed in 2.21 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Data segregation still creates and populates the legacy published survey tree directly.
+- DEM downloads remain dormant because production currently hard-disables them.
+- Map export still primarily consumes legacy paths.
+- WebODM legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
+- A failure after one artifact has mirrored can leave another artifact unpublished; full multi-artifact publish activation remains deferred.
 - Workspace retention and cleanup remain deferred.

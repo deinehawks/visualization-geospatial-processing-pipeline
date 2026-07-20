@@ -622,6 +622,89 @@ class RGBPipeline(
         )
         return workspace_path, published_path
 
+    def _export_pointcloud_to_workspace(
+        self,
+        *,
+        processor: Any,
+        project_id: int,
+        task_id: str,
+        task_key: str,
+        published_dir: Path,
+        laz_archive_name: str,
+        pcd_name: str,
+        candidates: list[str],
+        max_points: int,
+        viewpoint: str,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
+        workspace_dir = self.workspace_layout.webodm_3d / task_key
+        self._reset_workspace_directory(workspace_dir)
+
+        workspace_result = processor.export_pointcloud(
+            project_id,
+            task_id,
+            out_dir=workspace_dir,
+            laz_archive_name=laz_archive_name,
+            pcd_name=pcd_name,
+            candidates=candidates,
+            max_points=max_points,
+            viewpoint=viewpoint,
+        )
+
+        published_result = dict(workspace_result or {})
+        workspace_paths: dict[str, str] = {}
+        published_paths: dict[str, str] = {}
+
+        for key in ("laz", "ply", "pcd"):
+            value = published_result.get(key)
+            if not value:
+                continue
+            workspace_path = self._require_workspace_owned_path(Path(value))
+            if not workspace_path.is_file():
+                continue
+            published_path = Path(published_dir) / workspace_path.name
+            self._replace_legacy_file_after_success(
+                source_file=workspace_path,
+                target_file=published_path,
+            )
+            workspace_paths[key] = str(workspace_path)
+            published_paths[key] = str(published_path)
+            published_result[key] = str(published_path)
+
+        return published_result, workspace_paths, published_paths
+
+    def _download_all_assets_zip_to_workspace(
+        self,
+        *,
+        processor: Any,
+        project_id: int,
+        task_id: str,
+        task_key: str,
+        published_dir: Path,
+        filename: str,
+    ) -> tuple[Path | None, Path | None]:
+        workspace_dir = self.workspace_layout.webodm_odm / task_key
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        workspace_path = workspace_dir / filename
+
+        ok = processor.download_all_assets_safe(
+            project_id,
+            task_id,
+            workspace_path,
+        )
+        if not ok:
+            return None, None
+
+        workspace_path = self._require_workspace_owned_path(workspace_path)
+        if not workspace_path.is_file():
+            raise FileNotFoundError(f"Workspace all-assets zip not found: {workspace_path}")
+
+        published_path = Path(published_dir) / workspace_path.name
+        self._replace_legacy_file_after_success(
+            source_file=workspace_path,
+            target_file=published_path,
+        )
+        return workspace_path, published_path
+
 
     def _check_control_or_raise(self, stage_name: str) -> None:
         try:
@@ -1623,16 +1706,16 @@ class RGBPipeline(
                     pc_enabled = bool(pc_cfg.get("enabled", True))
     
                     if pc_enabled:
-                        pc_dir = task2_3d_dir
                         laz_candidates = list(
                             pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
                         )
-                        pdal_path = qgis_tools_cfg.get("pdal_path") or "pdal"
     
-                        pc_out = processor.export_pointcloud(
-                            project_id,
-                            current_task2_id,
-                            out_dir=pc_dir,
+                        pc_out, pc_workspace, pc_published = self._export_pointcloud_to_workspace(
+                            processor=processor,
+                            project_id=project_id,
+                            task_id=current_task2_id,
+                            task_key="task2",
+                            published_dir=task2_3d_dir,
                             laz_archive_name=f"{task2_export_id}.laz",
                             pcd_name=f"{task2_export_id}.pcd",
                             candidates=laz_candidates,
@@ -1644,6 +1727,10 @@ class RGBPipeline(
                         result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get("ply")
                         result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get("pcd")
                         result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get("asset_type")
+                        if pc_workspace:
+                            result.setdefault("workspace", {}).setdefault("webodm_3d", {})["task2"] = pc_workspace
+                        if pc_published:
+                            result.setdefault("published", {}).setdefault("webodm_3d", {})["task2"] = pc_published
     
                         if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
                             raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
@@ -1654,7 +1741,6 @@ class RGBPipeline(
     
                     if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                         zcfg = exports_cfg["all_assets_zip"]
-                        out_dir = task2_odm_dir
     
                         task2_zip_override = self.export_name_overrides.get("task2")
                         if task2_zip_override:
@@ -1668,13 +1754,18 @@ class RGBPipeline(
                                 flag=task2_flag,
                             )
     
-                        zip_path = out_dir / fname
-    
-                        ok = processor.download_all_assets_safe(
-                            project_id, current_task2_id, zip_path
+                        workspace_zip, published_zip = self._download_all_assets_zip_to_workspace(
+                            processor=processor,
+                            project_id=project_id,
+                            task_id=current_task2_id,
+                            task_key="task2",
+                            published_dir=task2_odm_dir,
+                            filename=fname,
                         )
-                        if ok:
-                            result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+                        if published_zip:
+                            result["downloads"]["task2"]["all_assets_zip"] = str(published_zip)
+                            result.setdefault("workspace", {}).setdefault("webodm_odm", {})["task2_all_assets_zip"] = str(workspace_zip)
+                            result.setdefault("published", {}).setdefault("webodm_odm", {})["task2_all_assets_zip"] = str(published_zip)
                         else:
                             logger.warning(
                                 "All-assets zip was not downloaded (endpoint missing or failed)."

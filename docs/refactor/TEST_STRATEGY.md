@@ -626,3 +626,29 @@ Validation added or rerun for this slice:
 - `git diff --check`
 
 The tests intentionally do not validate real GDAL/QGIS command-line behavior, local/network throughput, or Windows SMB behavior. Those remain external/operator concerns outside the safe default test suite.
+## Phase 3 WebODM pointcloud and all-assets ZIP workspace coverage
+
+Date: 2026-07-20.
+
+WebODM remaining-export coverage stays in `tests/test_rgb_pipeline_single_stage_execution.py` and uses a fake WebODM processor. The fake records pointcloud and all-assets ZIP calls and writes tiny placeholder files under pytest-owned temporary paths. It does not contact WebODM, upload images, download real assets, run QGIS/GDAL, convert real point clouds, execute subprocesses, access network shares, or touch real survey roots.
+
+Covered behavior:
+
+- Task 2 pointcloud export receives `workspace/webodm/3d/task2` as its output directory;
+- successful pointcloud LAZ/PCD outputs are mirrored back to legacy `rgb/3d`;
+- Task 2 all-assets ZIP download receives `workspace/webodm/odm/task2/<name>.zip` as its output path;
+- successful all-assets ZIP output is mirrored back to legacy `rgb/odm`;
+- returned WebODM downloads preserve legacy-compatible pointcloud and ZIP paths;
+- additive `workspace` and `published` metadata reports both ownership layers; and
+- controlled pointcloud failure leaves existing legacy pointcloud files untouched while preserving partial workspace evidence.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_single_stage_execution.py -k "webodm_task2_remaining or webodm_pointcloud_failure"`
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest --collect-only -q`
+- `python -m pytest -q`
+- `git diff --check`
+
+DEM downloads remain intentionally untested and unmigrated because production currently sets `dem_do_download = False`; activating that path should be a separate behavior decision with its own fake GDAL/WebODM coverage.

@@ -62,6 +62,10 @@ class ControlledWebODMExportFailure(Exception):
     pass
 
 
+class ControlledWebODMPointcloudFailure(Exception):
+    pass
+
+
 class ControlledQGISFailure(Exception):
     pass
 
@@ -202,6 +206,63 @@ class OrthomosaicExportFakeWebODM(FakeWebODM):
         if self.fail_export:
             raise ControlledWebODMExportFailure("controlled orthomosaic export failure")
         return out_path
+
+
+
+
+class RemainingWebODMExportFake(OrthomosaicExportFakeWebODM):
+    def __init__(self, *, fail_pointcloud=False, fail_zip=False):
+        super().__init__()
+        self.fail_pointcloud = fail_pointcloud
+        self.fail_zip = fail_zip
+
+    def export_pointcloud(
+        self,
+        project_id,
+        task_id,
+        *,
+        out_dir,
+        laz_archive_name,
+        pcd_name="odm.pcd",
+        candidates=None,
+        max_points=3_000_000,
+        viewpoint="0 0 0 1 0 0 0",
+    ):
+        self._record(
+            "export_pointcloud",
+            project_id,
+            str(task_id),
+            out_dir=out_dir,
+            laz_archive_name=laz_archive_name,
+            pcd_name=pcd_name,
+            candidates=list(candidates or []),
+            max_points=max_points,
+            viewpoint=viewpoint,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        laz_path = out_dir / laz_archive_name
+        pcd_path = out_dir / pcd_name
+        laz_path.write_text("workspace laz", encoding="utf-8")
+        pcd_path.write_text("workspace pcd", encoding="utf-8")
+        if self.fail_pointcloud:
+            raise ControlledWebODMPointcloudFailure("controlled pointcloud failure")
+        return {
+            "laz": str(laz_path),
+            "pcd": str(pcd_path),
+            "asset_type": "georeferenced_model.laz",
+        }
+
+    def download_all_assets_safe(self, project_id, task_id, out_file):
+        self._record(
+            "download_all_assets_safe",
+            project_id,
+            str(task_id),
+            str(out_file),
+        )
+        out_file = Path(out_file)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("workspace all assets", encoding="utf-8")
+        return not self.fail_zip
 
 
 def explicit_config(temporary_path_layout):
@@ -455,6 +516,26 @@ def configure_qgis_for_fake_tools(pipeline):
             "gdal2tiles_path": "fake-gdal2tiles",
             "gdalinfo_path": "fake-gdalinfo",
         },
+    }
+
+
+
+def enable_remaining_webodm_exports(pipeline):
+    pipeline.config["exports"] = {
+        "enabled": True,
+        "ortho": {"enabled": False},
+        "pointcloud": {
+            "enabled": True,
+            "required": True,
+            "asset_candidates": ["georeferenced_model.laz"],
+            "max_points": 123,
+            "viewpoint": "0 0 0 1 0 0 0",
+        },
+        "all_assets_zip": {
+            "enabled": True,
+            "filename_template": "{survey_id}-RGB-{flag}-all.zip",
+        },
+        "tools": {"pdal_path": "fake-pdal"},
     }
 
 def enable_only_orthomosaic_export(pipeline):
@@ -1266,6 +1347,118 @@ def test_webodm_fallback_orthomosaic_exports_workspace_then_legacy(
 
 
 
+
+
+def test_webodm_task2_remaining_exports_workspace_then_legacy(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = RemainingWebODMExportFake()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_remaining_webodm_exports(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.export_name_overrides["task2"] = "task2-output"
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    result = pipeline.stage_webodm()
+
+    workspace_3d_dir = pipeline.workspace_layout.webodm_3d / "task2"
+    workspace_laz = workspace_3d_dir / "task2-output.laz"
+    workspace_pcd = workspace_3d_dir / "task2-output.pcd"
+    legacy_laz = survey_path / "3d" / "task2-output.laz"
+    legacy_pcd = survey_path / "3d" / "task2-output.pcd"
+    workspace_zip = pipeline.workspace_layout.webodm_odm / "task2" / "task2-output-all.zip"
+    legacy_zip = survey_path / "odm" / "task2-output-all.zip"
+    pointcloud_calls = fake_webodm.calls_for("export_pointcloud")
+    zip_calls = fake_webodm.calls_for("download_all_assets_safe")
+
+    assert len(pointcloud_calls) == 1
+    assert pointcloud_calls[0].kwargs["out_dir"] == workspace_3d_dir
+    assert pointcloud_calls[0].kwargs["laz_archive_name"] == "task2-output.laz"
+    assert pointcloud_calls[0].kwargs["pcd_name"] == "task2-output.pcd"
+    assert pointcloud_calls[0].kwargs["max_points"] == 123
+    assert len(zip_calls) == 1
+    assert zip_calls[0].args[2] == str(workspace_zip)
+    assert workspace_laz.read_text(encoding="utf-8") == "workspace laz"
+    assert workspace_pcd.read_text(encoding="utf-8") == "workspace pcd"
+    assert legacy_laz.read_text(encoding="utf-8") == "workspace laz"
+    assert legacy_pcd.read_text(encoding="utf-8") == "workspace pcd"
+    assert workspace_zip.read_text(encoding="utf-8") == "workspace all assets"
+    assert legacy_zip.read_text(encoding="utf-8") == "workspace all assets"
+    assert result["downloads"]["task2"]["pointcloud_laz"] == str(legacy_laz)
+    assert result["downloads"]["task2"]["pointcloud_pcd"] == str(legacy_pcd)
+    assert result["downloads"]["task2"]["pointcloud_asset_type"] == "georeferenced_model.laz"
+    assert result["downloads"]["task2"]["all_assets_zip"] == str(legacy_zip)
+    assert result["workspace"]["webodm_3d"]["task2"]["laz"] == str(workspace_laz)
+    assert result["workspace"]["webodm_3d"]["task2"]["pcd"] == str(workspace_pcd)
+    assert result["published"]["webodm_3d"]["task2"]["laz"] == str(legacy_laz)
+    assert result["published"]["webodm_3d"]["task2"]["pcd"] == str(legacy_pcd)
+    assert result["workspace"]["webodm_odm"]["task2_all_assets_zip"] == str(workspace_zip)
+    assert result["published"]["webodm_odm"]["task2_all_assets_zip"] == str(legacy_zip)
+
+    for path_to_check in (
+        workspace_laz,
+        workspace_pcd,
+        workspace_zip,
+        legacy_laz,
+        legacy_pcd,
+        legacy_zip,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_webodm_pointcloud_failure_leaves_legacy_outputs_untouched(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = RemainingWebODMExportFake(fail_pointcloud=True)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_remaining_webodm_exports(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.export_name_overrides["task2"] = "task2-output"
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+    legacy_laz = survey_path / "3d" / "task2-output.laz"
+    legacy_pcd = survey_path / "3d" / "task2-output.pcd"
+    legacy_laz.parent.mkdir(parents=True)
+    legacy_laz.write_text("old laz", encoding="utf-8")
+    legacy_pcd.write_text("old pcd", encoding="utf-8")
+
+    with pytest.raises(
+        ControlledWebODMPointcloudFailure,
+        match="controlled pointcloud failure",
+    ):
+        pipeline.stage_webodm()
+
+    workspace_laz = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.laz"
+    workspace_pcd = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.pcd"
+    assert workspace_laz.read_text(encoding="utf-8") == "workspace laz"
+    assert workspace_pcd.read_text(encoding="utf-8") == "workspace pcd"
+    assert legacy_laz.read_text(encoding="utf-8") == "old laz"
+    assert legacy_pcd.read_text(encoding="utf-8") == "old pcd"
 def test_qgis_outputs_workspace_then_mirrors_legacy_paths(
     monkeypatch,
     temporary_path_layout,

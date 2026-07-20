@@ -22,6 +22,7 @@ class RunWorkspaceLayout:
     webodm_ortho: Path
     webodm_odm: Path
     webodm_dem: Path
+    webodm_3d: Path
     qgis_clipped_ortho: Path
     qgis_tiles_round: Path
     qgis_tiles_soft: Path
@@ -38,6 +39,7 @@ class RunWorkspaceLayout:
             self.webodm_ortho,
             self.webodm_odm,
             self.webodm_dem,
+            self.webodm_3d,
             self.qgis_clipped_ortho,
             self.qgis_tiles_round,
             self.qgis_tiles_soft,
@@ -86,6 +88,7 @@ def plan_run_workspace(workspace_root: Path, run_id: str) -> RunWorkspaceLayout:
         webodm_ortho=root / "webodm" / "ortho",
         webodm_odm=root / "webodm" / "odm",
         webodm_dem=root / "webodm" / "dem",
+        webodm_3d=root / "webodm" / "3d",
         qgis_clipped_ortho=root / "qgis" / "clipped" / "ortho",
         qgis_tiles_round=root / "qgis" / "tiles" / "round-corners",
         qgis_tiles_soft=root / "qgis" / "tiles" / "soft-corners",
