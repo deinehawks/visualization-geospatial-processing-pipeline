@@ -1832,6 +1832,7 @@ class RGBPipeline(
     def stage_qgis(self, *, resume: bool = False) -> Dict[str, Any]:
         logger = self.loggers["qgis"]
         logger.info("Stage: QGIS Processing (selected orthomosaic clip + tiles)")
+        create_run_workspace(self.workspace_layout)
 
         rgb_path = self._require_rgb_path()
 
@@ -1918,20 +1919,23 @@ class RGBPipeline(
                     "QGIS will use soft-corners tile workflow."
                 )
 
-        clipped_ortho_dir = dir_from_key(
+        published_clipped_ortho_dir = dir_from_key(
             "qgis_clipped_ortho",
             fallback=(rgb_path / "qgis" / "clipped" / "ortho"),
         )
 
-        tiles_round_dir = dir_from_key(
+        published_tiles_round_dir = dir_from_key(
             "tiles_ortho_round",
             fallback=(rgb_path / "tiles" / "ortho" / "round-corners"),
         )
 
-        tiles_soft_dir = optional_dir_from_keys(
+        published_tiles_soft_dir = optional_dir_from_keys(
             ["tiles_ortho_soft"],
             fallback=(rgb_path / "tiles" / "ortho" / "soft-corners"),
         )
+        workspace_clipped_ortho_dir = self.workspace_layout.qgis_clipped_ortho
+        workspace_tiles_round_dir = self.workspace_layout.qgis_tiles_round
+        workspace_tiles_soft_dir = self.workspace_layout.qgis_tiles_soft
 
         clip_cfg = qgis_cfg.get("clip") or {}
         clip_enabled = bool(clip_cfg.get("enabled", True))
@@ -2015,32 +2019,39 @@ class RGBPipeline(
 
         # ── Clip ─────────────────────────────────────────────────────────────
         clipped_path: Path
+        workspace_clipped_path: Path | None = None
+        published_clipped_path: Path | None = None
 
         if boundary_used and clip_enabled:
             clipped_filename = self._clipped_orthomosaic_filename(
                 task_key=task_key,
                 flag=flag,
             )
-            clipped_path = clipped_ortho_dir / clipped_filename
+            workspace_clipped_path = workspace_clipped_ortho_dir / clipped_filename
+            published_clipped_path = published_clipped_ortho_dir / clipped_filename
 
             logger.info(
-                f"Clipping selected orthomosaic ({task_key}) -> {clipped_path.name}"
+                f"Clipping selected orthomosaic ({task_key}) -> {workspace_clipped_path.name}"
             )
 
             if mask_geojson is None:
                 raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
 
             skip_clip = False
-            if resume and clipped_path.exists():
+            if resume and workspace_clipped_path.exists():
                 logger.info(
                     f"Resume: clipped orthomosaic already exists "
-                    f"({clipped_path.name}); verifying before reuse..."
+                    f"({workspace_clipped_path.name}); verifying before reuse..."
                 )
                 try:
-                    tools.verify_raster_readable(clipped_path, retries=1, delay_s=2.0)
+                    tools.verify_raster_readable(
+                        workspace_clipped_path,
+                        retries=1,
+                        delay_s=2.0,
+                    )
                     skip_clip = True
                     logger.info(
-                        f"Existing clip verified OK, skipping re-clip: {clipped_path.name}"
+                        f"Existing clip verified OK, skipping re-clip: {workspace_clipped_path.name}"
                     )
                 except RuntimeError as e:
                     logger.warning(
@@ -2051,10 +2062,16 @@ class RGBPipeline(
                 tools.clip_raster_by_mask(
                     input_tif=source_path,
                     mask_geojson=mask_geojson,
-                    output_tif=clipped_path,
+                    output_tif=workspace_clipped_path,
                     dst_nodata=dst_nodata,
                     local_staging_dir=clip_staging_dir,
                 )
+
+            self._replace_legacy_file_after_success(
+                source_file=workspace_clipped_path,
+                target_file=published_clipped_path,
+            )
+            clipped_path = published_clipped_path
 
         elif boundary_used and not clip_enabled:
             logger.warning(
@@ -2076,7 +2093,12 @@ class RGBPipeline(
 
         self.state["selected_orthomosaic"] = selected
 
-        tiles_dir = tiles_round_dir if boundary_used else tiles_soft_dir
+        workspace_tiles_dir = (
+            workspace_tiles_round_dir if boundary_used else workspace_tiles_soft_dir
+        )
+        published_tiles_dir = (
+            published_tiles_round_dir if boundary_used else published_tiles_soft_dir
+        )
 
         # ── Tile generation ──────────────────────────────────────────────────
         _staging_root: Optional[Path] = None
@@ -2084,8 +2106,8 @@ class RGBPipeline(
             tile_resume = bool(resume)
             tile_clean = not tile_resume
 
-            tiling_input_path = clipped_path
-            tiling_output_dir = tiles_dir
+            tiling_input_path = workspace_clipped_path or clipped_path
+            tiling_output_dir = workspace_tiles_dir
             _local_tile_staging_active = False
 
             if local_staging_root is not None:
@@ -2093,7 +2115,7 @@ class RGBPipeline(
                 try:
                     _local_ortho_staging = local_staging_root / "ortho"
                     tiling_input_path = tools.stage_local_copy(
-                        clipped_path,
+                        workspace_clipped_path or clipped_path,
                         _local_ortho_staging,
                     )
                     tiling_output_dir = local_staging_root / "tiles" / tile_mode
@@ -2101,15 +2123,15 @@ class RGBPipeline(
                     logger.info(
                         f"Local staging enabled: tiling will read/write on "
                         f"local disk ({tiling_output_dir}) and copy results "
-                        f"to {tiles_dir} afterward."
+                        f"to {workspace_tiles_dir} afterward."
                     )
                 except Exception as e:
                     logger.warning(
                         f"Local staging setup failed ({e}); falling back to "
-                        f"tiling directly against {clipped_path}."
+                        f"tiling directly against {workspace_clipped_path or clipped_path}."
                     )
-                    tiling_input_path = clipped_path
-                    tiling_output_dir = tiles_dir
+                    tiling_input_path = workspace_clipped_path or clipped_path
+                    tiling_output_dir = workspace_tiles_dir
                     _local_tile_staging_active = False
 
             logger.info(
@@ -2130,12 +2152,19 @@ class RGBPipeline(
 
             if _local_tile_staging_active:
                 logger.info(
-                    f"Copying tiles from local staging to network share: "
-                    f"{tiling_output_dir} -> {tiles_dir}"
+                    f"Copying tiles from local staging to run workspace: "
+                    f"{tiling_output_dir} -> {workspace_tiles_dir}"
                 )
                 t0 = time.perf_counter()
-                tiles_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(tiling_output_dir, tiles_dir, dirs_exist_ok=True)
+                if tile_resume:
+                    workspace_tiles_dir.mkdir(parents=True, exist_ok=True)
+                else:
+                    self._reset_workspace_directory(workspace_tiles_dir)
+                shutil.copytree(
+                    tiling_output_dir,
+                    workspace_tiles_dir,
+                    dirs_exist_ok=True,
+                )
                 logger.info(
                     f"Tile copy-back complete in {time.perf_counter() - t0:.1f}s"
                 )
@@ -2159,7 +2188,11 @@ class RGBPipeline(
                                 f"Could not clean up {_label} ({_stale_dir}): {_e}"
                             )
 
-            selected["tiles_dir"] = str(tiles_dir)
+            self._replace_legacy_directory_after_success(
+                source_dir=workspace_tiles_dir,
+                target_dir=published_tiles_dir,
+            )
+            selected["tiles_dir"] = str(published_tiles_dir)
         else:
             logger.warning(
                 "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation."
@@ -2185,11 +2218,23 @@ class RGBPipeline(
             "tiles": {
                 "enabled": tiles_enabled,
                 "mode": tile_mode,
-                "output_dir": str(tiles_dir) if tiles_enabled else None,
+                "output_dir": str(published_tiles_dir) if tiles_enabled else None,
                 "zoom": zoom,
                 "profile": profile,
                 "webviewer": webviewer,
                 "copyright": copyright_text,
+            },
+            "workspace": {
+                "qgis_clipped_ortho": (
+                    str(workspace_clipped_path) if workspace_clipped_path else None
+                ),
+                "tiles_dir": str(workspace_tiles_dir) if tiles_enabled else None,
+            },
+            "published": {
+                "qgis_clipped_ortho": (
+                    str(published_clipped_path) if published_clipped_path else None
+                ),
+                "tiles_dir": str(published_tiles_dir) if tiles_enabled else None,
             },
         }
     

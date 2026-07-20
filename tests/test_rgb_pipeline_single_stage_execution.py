@@ -62,6 +62,114 @@ class ControlledWebODMExportFailure(Exception):
     pass
 
 
+class ControlledQGISFailure(Exception):
+    pass
+
+
+class FakeQGISTools:
+    instances = []
+    fail_clip = False
+    fail_tiles = False
+
+    def __init__(
+        self,
+        *,
+        logger,
+        qgis_root="",
+        gdalwarp_path="gdalwarp",
+        gdal2tiles_path="gdal2tiles.py",
+        gdalinfo_path="gdalinfo",
+    ):
+        self.logger = logger
+        self.qgis_root = qgis_root
+        self.gdalwarp_path = gdalwarp_path
+        self.gdal2tiles_path = gdal2tiles_path
+        self.gdalinfo_path = gdalinfo_path
+        self.calls = []
+        type(self).instances.append(self)
+
+    def clip_raster_by_mask(
+        self,
+        *,
+        input_tif,
+        mask_geojson,
+        output_tif,
+        dst_nodata=None,
+        local_staging_dir=None,
+    ):
+        self.calls.append(
+            {
+                "method": "clip_raster_by_mask",
+                "input_tif": input_tif,
+                "mask_geojson": mask_geojson,
+                "output_tif": output_tif,
+                "dst_nodata": dst_nodata,
+                "local_staging_dir": local_staging_dir,
+            }
+        )
+        output_tif.parent.mkdir(parents=True, exist_ok=True)
+        output_tif.write_text("workspace clipped ortho", encoding="utf-8")
+        if type(self).fail_clip:
+            raise ControlledQGISFailure("controlled qgis clip failure")
+        return output_tif
+
+    def generate_tiles(
+        self,
+        *,
+        input_tif,
+        output_dir,
+        zoom="11-24",
+        profile="mercator",
+        webviewer="none",
+        copyright_text="ASIMOV-HAWKS",
+        resume=False,
+        clean=False,
+    ):
+        self.calls.append(
+            {
+                "method": "generate_tiles",
+                "input_tif": input_tif,
+                "output_dir": output_dir,
+                "zoom": zoom,
+                "profile": profile,
+                "webviewer": webviewer,
+                "copyright_text": copyright_text,
+                "resume": resume,
+                "clean": clean,
+            }
+        )
+        if type(self).fail_tiles:
+            raise ControlledQGISFailure("controlled qgis tile failure")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        tile = output_dir / "12" / "345" / "678.png"
+        tile.parent.mkdir(parents=True, exist_ok=True)
+        tile.write_text("workspace tile", encoding="utf-8")
+        return output_dir
+
+    def stage_local_copy(self, src, local_dir):
+        self.calls.append(
+            {
+                "method": "stage_local_copy",
+                "src": src,
+                "local_dir": local_dir,
+            }
+        )
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dst = local_dir / Path(src).name
+        dst.write_text(Path(src).read_text(encoding="utf-8"), encoding="utf-8")
+        return dst
+
+    def verify_raster_readable(self, tif_path, *, retries=3, delay_s=5.0):
+        self.calls.append(
+            {
+                "method": "verify_raster_readable",
+                "tif_path": tif_path,
+                "retries": retries,
+                "delay_s": delay_s,
+            }
+        )
+
+
 class OrthomosaicExportFakeWebODM(FakeWebODM):
     def __init__(self, *, fail_export=False):
         super().__init__()
@@ -279,6 +387,75 @@ def prepare_webodm_ortho_context(pipeline, temporary_path_layout, survey_id="TES
     )
     return survey_path, image_path, boundary_path
 
+
+
+
+def prepare_qgis_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-QGIS"):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    source_ortho = survey_path / "ortho" / "orthomosaic--xcb-t2.tif"
+    source_ortho.parent.mkdir(parents=True)
+    source_ortho.write_text("source ortho", encoding="utf-8")
+
+    boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
+    boundary_path.parent.mkdir(parents=True)
+    boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+                "dirs": {
+                    "qgis_clipped_ortho": str(survey_path / "qgis" / "clipped" / "ortho"),
+                    "tiles_ortho_round": str(
+                        survey_path / "tiles" / "ortho" / "round-corners"
+                    ),
+                    "tiles_ortho_soft": str(
+                        survey_path / "tiles" / "ortho" / "soft-corners"
+                    ),
+                },
+            },
+            "boundary_available": True,
+            "boundary_geojson_path": str(boundary_path),
+            "selected_webodm_task": "task2",
+            "selected_orthomosaic": {
+                "task_key": "task2",
+                "task_label": "t2",
+                "task_id": "task-0001",
+                "task_name": "TEST-SURVEY-QGIS-RGB--xcb-t2",
+                "flag": "xcb",
+                "source_path": str(source_ortho),
+                "source_filename": source_ortho.name,
+                "boundary_used": True,
+                "tile_mode": "round-corners",
+                "fallback_used": False,
+                "fallback_reason": None,
+            },
+        }
+    )
+    return survey_path, source_ortho, boundary_path
+
+
+def configure_qgis_for_fake_tools(pipeline):
+    pipeline.config["qgis"] = {
+        "enabled": True,
+        "clip": {"enabled": True, "dst_nodata": "0"},
+        "tiles": {
+            "enabled": True,
+            "zoom": "11-12",
+            "profile": "mercator",
+            "webviewer": "none",
+            "copyright": "TEST-COPYRIGHT",
+        },
+        "local_staging": {"enabled": False},
+        "tools": {
+            "qgis_root": "",
+            "gdalwarp_path": "fake-gdalwarp",
+            "gdal2tiles_path": "fake-gdal2tiles",
+            "gdalinfo_path": "fake-gdalinfo",
+        },
+    }
 
 def enable_only_orthomosaic_export(pipeline):
     pipeline.config["exports"] = {
@@ -1086,6 +1263,131 @@ def test_webodm_fallback_orthomosaic_exports_workspace_then_legacy(
     assert pipeline.state["webodm"]["published"]["webodm_ortho"]["task4"] == str(
         legacy_ortho
     )
+
+
+
+def test_qgis_outputs_workspace_then_mirrors_legacy_paths(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, source_ortho, boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = False
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    legacy_clipped = (
+        survey_path / "qgis" / "clipped" / "ortho" / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    legacy_clipped.parent.mkdir(parents=True)
+    legacy_clipped.write_text("old clipped", encoding="utf-8")
+    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    legacy_stale_tile = legacy_tiles / "stale.png"
+    legacy_stale_tile.parent.mkdir(parents=True)
+    legacy_stale_tile.write_text("old tile", encoding="utf-8")
+
+    result = pipeline.stage_qgis()
+
+    workspace_clipped = (
+        pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    workspace_tile = pipeline.workspace_layout.qgis_tiles_round / "12" / "345" / "678.png"
+    legacy_tile = legacy_tiles / "12" / "345" / "678.png"
+    fake_tools = FakeQGISTools.instances[-1]
+
+    assert [call["method"] for call in fake_tools.calls] == [
+        "clip_raster_by_mask",
+        "generate_tiles",
+    ]
+    assert fake_tools.calls[0]["input_tif"] == source_ortho
+    assert fake_tools.calls[0]["mask_geojson"] == boundary_path
+    assert fake_tools.calls[0]["output_tif"] == workspace_clipped
+    assert fake_tools.calls[0]["dst_nodata"] == 0.0
+    assert fake_tools.calls[0]["local_staging_dir"] is None
+    assert fake_tools.calls[1]["input_tif"] == workspace_clipped
+    assert fake_tools.calls[1]["output_dir"] == pipeline.workspace_layout.qgis_tiles_round
+    assert fake_tools.calls[1]["clean"] is True
+    assert fake_tools.calls[1]["resume"] is False
+
+    assert workspace_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert legacy_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert workspace_tile.read_text(encoding="utf-8") == "workspace tile"
+    assert legacy_tile.read_text(encoding="utf-8") == "workspace tile"
+    assert not legacy_stale_tile.exists()
+    assert result["clip"]["output"] == str(legacy_clipped)
+    assert result["tiles"]["output_dir"] == str(legacy_tiles)
+    assert result["selected_orthomosaic"]["clipped_path"] == str(legacy_clipped)
+    assert result["selected_orthomosaic"]["tiles_dir"] == str(legacy_tiles)
+    assert result["workspace"]["qgis_clipped_ortho"] == str(workspace_clipped)
+    assert result["workspace"]["tiles_dir"] == str(pipeline.workspace_layout.qgis_tiles_round)
+    assert result["published"]["qgis_clipped_ortho"] == str(legacy_clipped)
+    assert result["published"]["tiles_dir"] == str(legacy_tiles)
+    assert pipeline.state["selected_orthomosaic"]["tiles_dir"] == str(legacy_tiles)
+
+    for path_to_check in (
+        workspace_clipped,
+        workspace_tile,
+        legacy_clipped,
+        legacy_tile,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_qgis_clip_failure_leaves_legacy_outputs_untouched(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, source_ortho, _boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = True
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    legacy_clipped = (
+        survey_path / "qgis" / "clipped" / "ortho" / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    legacy_clipped.parent.mkdir(parents=True)
+    legacy_clipped.write_text("old clipped", encoding="utf-8")
+    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    legacy_tile = legacy_tiles / "keep.png"
+    legacy_tile.parent.mkdir(parents=True)
+    legacy_tile.write_text("old tile", encoding="utf-8")
+
+    with pytest.raises(ControlledQGISFailure, match="controlled qgis clip failure"):
+        pipeline.stage_qgis()
+
+    workspace_clipped = (
+        pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    assert workspace_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert legacy_clipped.read_text(encoding="utf-8") == "old clipped"
+    assert legacy_tile.read_text(encoding="utf-8") == "old tile"
+    assert pipeline.state["selected_orthomosaic"]["source_path"] == str(source_ortho)
+    assert "clipped_path" not in pipeline.state["selected_orthomosaic"]
 
 def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
     temporary_path_layout,

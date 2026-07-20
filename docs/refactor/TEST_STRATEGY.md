@@ -602,3 +602,27 @@ Coverage proves that:
 - partial workspace orthomosaic files remain available as diagnostic evidence after a controlled failure.
 
 The tests use a fake WebODM processor, pytest-owned survey/workspace paths, fake upload-cache behavior, and orthomosaic-only export configuration. They do not contact WebODM, run QGIS/GDAL, execute the real pipeline, access production storage, or delete real data.
+## Phase 3 QGIS workspace coverage
+
+Date: 2026-07-20.
+
+QGIS workspace migration coverage remains in `tests/test_rgb_pipeline_single_stage_execution.py` and uses a fake `QGISTools` boundary. The fake records clip/tile calls and writes tiny text/tile placeholders under pytest-owned temporary paths. It does not execute QGIS, GDAL, `gdalwarp`, `gdal2tiles`, `gdalinfo`, subprocesses, network shares, or real survey roots.
+
+Covered behavior:
+
+- bounded QGIS clips write to `workspace/qgis/clipped/ortho` first and then mirror to legacy `rgb/qgis/clipped/ortho`;
+- tile generation writes to `workspace/qgis/tiles/<mode>` first and then mirrors to legacy `rgb/tiles/ortho/<mode>`;
+- returned QGIS outputs preserve legacy-compatible `clip.output`, `tiles.output_dir`, `selected_orthomosaic.clipped_path`, and `selected_orthomosaic.tiles_dir`;
+- additive `workspace` and `published` metadata reports both ownership layers; and
+- controlled clip failure leaves existing legacy clipped/tile outputs untouched while preserving partial workspace evidence.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py`
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k qgis`
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest --collect-only -q`
+- `python -m pytest -q`
+- `git diff --check`
+
+The tests intentionally do not validate real GDAL/QGIS command-line behavior, local/network throughput, or Windows SMB behavior. Those remain external/operator concerns outside the safe default test suite.
