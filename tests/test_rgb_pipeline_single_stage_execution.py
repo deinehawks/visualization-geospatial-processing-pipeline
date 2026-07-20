@@ -54,6 +54,10 @@ class ControlledCrossRunFailure(Exception):
     pass
 
 
+class ControlledKMLFailure(Exception):
+    pass
+
+
 def explicit_config(temporary_path_layout):
     return {
         "paths": {
@@ -195,6 +199,23 @@ def prepare_cross_run_context(pipeline, temporary_path_layout, survey_id="TEST-S
         },
     }
     return survey_path, raw_dir
+
+
+def prepare_kml_boundary_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-KML"):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    boundary_dir = survey_path / "boundary"
+    boundary_dir.mkdir(parents=True)
+    (boundary_dir / f"{survey_id}.kml").write_text("<kml />", encoding="utf-8")
+
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state["data_segregation"] = {
+        "survey_id": survey_id,
+        "survey_path": str(survey_path),
+        "dirs": {
+            "boundary": str(boundary_dir),
+        },
+    }
+    return survey_path, boundary_dir
 
 
 def test_rgb_pipeline_executes_one_selected_stage_successfully(
@@ -677,6 +698,181 @@ def test_rgb_pipeline_webodm_ui_cancel_emits_parseable_run_event(
         assert "event=run_canceled reason=webodm_ui_cancel after_stage=webodm" in content
     finally:
         cleanup_logger(pipeline.loggers["pipeline"])
+
+def test_kml_boundary_writes_workspace_then_mirrors_legacy_outputs(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    _survey_path, boundary_dir = prepare_kml_boundary_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    legacy_geojson = boundary_dir / "TEST-SURVEY-KML.geojson"
+    legacy_csv = boundary_dir / "TEST-SURVEY-KML.csv"
+    legacy_geojson.write_text("old geojson", encoding="utf-8")
+    legacy_csv.write_text("old csv", encoding="utf-8")
+    calls = []
+
+    def fake_run_kml(kml_dir, geojson_dir, csv_dir, logger):
+        calls.append(
+            {
+                "kml_dir": kml_dir,
+                "geojson_dir": geojson_dir,
+                "csv_dir": csv_dir,
+            }
+        )
+        geojson_dir.mkdir(parents=True, exist_ok=True)
+        csv_dir.mkdir(parents=True, exist_ok=True)
+        workspace_geojson = geojson_dir / "TEST-SURVEY-KML.geojson"
+        workspace_csv = csv_dir / "TEST-SURVEY-KML.csv"
+        workspace_geojson.write_text('{"type":"FeatureCollection"}', encoding="utf-8")
+        workspace_csv.write_text("id\nTEST-SURVEY-KML\n", encoding="utf-8")
+        return {
+            "success": True,
+            "processed": 1,
+            "failed": 0,
+            "processed_files": [
+                {
+                    "kml": "TEST-SURVEY-KML.kml",
+                    "geojson": str(workspace_geojson),
+                    "csv": str(workspace_csv),
+                }
+            ],
+            "failed_files": [],
+            "geojson_dir": str(geojson_dir),
+            "csv_dir": str(csv_dir),
+        }
+
+    monkeypatch.setattr(rgb_module, "run_kml", fake_run_kml)
+
+    result = pipeline.stage_kml_boundary()
+
+    assert calls == [
+        {
+            "kml_dir": boundary_dir,
+            "geojson_dir": pipeline.workspace_layout.boundary,
+            "csv_dir": pipeline.workspace_layout.boundary,
+        }
+    ]
+    assert (pipeline.workspace_layout.boundary / "TEST-SURVEY-KML.geojson").is_file()
+    assert (pipeline.workspace_layout.boundary / "TEST-SURVEY-KML.csv").is_file()
+    assert legacy_geojson.read_text(encoding="utf-8") == '{"type":"FeatureCollection"}'
+    assert legacy_csv.read_text(encoding="utf-8") == "id\nTEST-SURVEY-KML\n"
+    assert result["geojson_dir"] == str(boundary_dir)
+    assert result["csv_dir"] == str(boundary_dir)
+    assert result["processed_files"][0]["geojson"] == str(legacy_geojson)
+    assert result["processed_files"][0]["csv"] == str(legacy_csv)
+    assert result["workspace"]["geojson_dir"] == str(pipeline.workspace_layout.boundary)
+    assert result["workspace"]["processed_files"][0]["geojson"] == str(
+        pipeline.workspace_layout.boundary / "TEST-SURVEY-KML.geojson"
+    )
+    assert result["published"]["processed_files"][0]["geojson"] == str(legacy_geojson)
+    assert result["boundary_available"] is True
+    assert result["boundary_geojson_path"] == str(legacy_geojson)
+    assert pipeline.state["boundary_available"] is True
+    assert pipeline.state["boundary_geojson_path"] == str(legacy_geojson)
+
+    for path_to_check in (
+        pipeline.workspace_layout.boundary,
+        legacy_geojson,
+        legacy_csv,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_kml_boundary_without_processed_files_preserves_legacy_shape(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    _survey_path, boundary_dir = prepare_kml_boundary_context(
+        pipeline,
+        temporary_path_layout,
+    )
+
+    def fake_run_kml(kml_dir, geojson_dir, csv_dir, logger):
+        return {
+            "success": True,
+            "processed": 0,
+            "failed": 1,
+            "processed_files": [],
+            "failed_files": ["TEST-SURVEY-KML.kml"],
+            "geojson_dir": str(geojson_dir),
+            "csv_dir": str(csv_dir),
+        }
+
+    monkeypatch.setattr(rgb_module, "run_kml", fake_run_kml)
+
+    result = pipeline.stage_kml_boundary()
+
+    assert result["processed_files"] == []
+    assert result["geojson_dir"] == str(boundary_dir)
+    assert result["csv_dir"] == str(boundary_dir)
+    assert result["workspace"]["geojson_dir"] == str(pipeline.workspace_layout.boundary)
+    assert result["published"]["processed_files"] == []
+    assert result["boundary_available"] is False
+    assert result["boundary_geojson_path"] is None
+    assert pipeline.state["boundary_available"] is False
+    assert pipeline.state["boundary_geojson_path"] is None
+
+
+def test_kml_boundary_failure_leaves_legacy_outputs_untouched(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    _survey_path, boundary_dir = prepare_kml_boundary_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    legacy_geojson = boundary_dir / "TEST-SURVEY-KML.geojson"
+    legacy_csv = boundary_dir / "TEST-SURVEY-KML.csv"
+    legacy_geojson.write_text("old geojson", encoding="utf-8")
+    legacy_csv.write_text("old csv", encoding="utf-8")
+
+    def failing_run_kml(kml_dir, geojson_dir, csv_dir, logger):
+        geojson_dir.mkdir(parents=True, exist_ok=True)
+        (geojson_dir / "TEST-SURVEY-KML.geojson").write_text(
+            "partial workspace geojson",
+            encoding="utf-8",
+        )
+        raise ControlledKMLFailure("controlled kml failure")
+
+    monkeypatch.setattr(rgb_module, "run_kml", failing_run_kml)
+
+    with pytest.raises(ControlledKMLFailure, match="controlled kml failure"):
+        pipeline.stage_kml_boundary()
+
+    assert (
+        pipeline.workspace_layout.boundary / "TEST-SURVEY-KML.geojson"
+    ).read_text(encoding="utf-8") == "partial workspace geojson"
+    assert legacy_geojson.read_text(encoding="utf-8") == "old geojson"
+    assert legacy_csv.read_text(encoding="utf-8") == "old csv"
+    assert "boundary_available" not in pipeline.state
+    assert "boundary_geojson_path" not in pipeline.state
+
 def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
     temporary_path_layout,
     sample_dataset_dir,

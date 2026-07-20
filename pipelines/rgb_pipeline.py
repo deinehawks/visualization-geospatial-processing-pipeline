@@ -549,6 +549,42 @@ class RGBPipeline(
             if backup_target.exists():
                 shutil.rmtree(backup_target)
 
+    def _replace_legacy_file_after_success(
+        self,
+        *,
+        source_file: Path,
+        target_file: Path,
+    ) -> None:
+        source = self._require_workspace_owned_path(source_file)
+        if not source.is_file():
+            raise FileNotFoundError(f"Workspace file not found: {source_file}")
+
+        target = Path(target_file)
+        target_parent = target.parent
+        target_parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not target.is_file():
+            raise IsADirectoryError(f"Legacy mirror target is not a file: {target}")
+
+        temp_target = target_parent / f".{target.name}.tmp-{self.run_id}"
+        backup_target = target_parent / f".{target.name}.bak-{self.run_id}"
+        if temp_target.exists() or backup_target.exists():
+            raise FileExistsError(
+                f"Stale publish mirror path exists: {temp_target} or {backup_target}"
+            )
+
+        shutil.copy2(source, temp_target)
+        try:
+            if target.exists():
+                target.rename(backup_target)
+            temp_target.rename(target)
+        except Exception:
+            if not target.exists() and backup_target.exists():
+                backup_target.rename(target)
+            raise
+        else:
+            if backup_target.exists():
+                backup_target.unlink()
+
 
     def _check_control_or_raise(self, stage_name: str) -> None:
         try:
@@ -825,18 +861,68 @@ class RGBPipeline(
 
         rgb_path = self._require_rgb_path()
         boundary_dir = rgb_path / "boundary"
+        workspace_boundary_dir = self.workspace_layout.boundary
+        create_run_workspace(self.workspace_layout)
+        self._reset_workspace_directory(workspace_boundary_dir)
+
+        logger.info(f"Input boundary KML/KMZ: {boundary_dir}")
+        logger.info(f"Workspace boundary output: {workspace_boundary_dir}")
+        logger.info(f"Legacy boundary mirror: {boundary_dir}")
 
         summary = run_kml(
             kml_dir=boundary_dir,
-            geojson_dir=boundary_dir,
-            csv_dir=boundary_dir,
+            geojson_dir=workspace_boundary_dir,
+            csv_dir=workspace_boundary_dir,
             logger=logger,
         )
 
+        workspace_summary = dict(summary)
         processed_files = summary.get("processed_files") or []
+        published_processed_files = []
+
+        for processed in processed_files:
+            published_processed = dict(processed)
+            geojson_value = processed.get("geojson")
+            if geojson_value:
+                workspace_geojson = Path(str(geojson_value))
+                published_geojson = boundary_dir / workspace_geojson.name
+                self._replace_legacy_file_after_success(
+                    source_file=workspace_geojson,
+                    target_file=published_geojson,
+                )
+                published_processed["geojson"] = str(published_geojson)
+
+            csv_value = processed.get("csv")
+            if csv_value:
+                workspace_csv = Path(str(csv_value))
+                published_csv = boundary_dir / workspace_csv.name
+                self._replace_legacy_file_after_success(
+                    source_file=workspace_csv,
+                    target_file=published_csv,
+                )
+                published_processed["csv"] = str(published_csv)
+
+            published_processed_files.append(published_processed)
+
+        summary = dict(summary)
+        summary["processed_files"] = published_processed_files
+        summary["geojson_dir"] = str(boundary_dir)
+        summary["csv_dir"] = str(boundary_dir)
+        summary["workspace"] = {
+            "input_dir": str(boundary_dir),
+            "geojson_dir": str(workspace_boundary_dir),
+            "csv_dir": str(workspace_boundary_dir),
+            "processed_files": workspace_summary.get("processed_files") or [],
+        }
+        summary["published"] = {
+            "geojson_dir": str(boundary_dir),
+            "csv_dir": str(boundary_dir),
+            "processed_files": published_processed_files,
+        }
+
         geojson_path = None
-        if processed_files:
-            geojson_path = processed_files[0].get("geojson")
+        if published_processed_files:
+            geojson_path = published_processed_files[0].get("geojson")
 
         boundary_ok = bool(geojson_path and Path(geojson_path).exists())
 

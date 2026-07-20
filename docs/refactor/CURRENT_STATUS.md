@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, cross-run filter now writes through the run workspace before legacy mirroring
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, and cross-run filter workspace-to-legacy mirroring
-- **Current task:** Cross-run filter migration completed; next Phase 3 slice should migrate the next artifact-producing stage behind tests
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, and cross-run filter workspace mirroring
-- **Next recommended task:** Migrate KML boundary outputs toward run-owned workspace paths while preserving legacy published paths until publish activation exists
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, KML boundary derived outputs now write through the run workspace before legacy mirroring
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, and KML boundary workspace-to-legacy mirroring
+- **Current task:** KML boundary migration completed; next Phase 3 slice should migrate the next artifact-producing stage behind tests
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, and KML boundary workspace mirroring
+- **Next recommended task:** Migrate WebODM export outputs toward run-owned workspace paths while preserving legacy published paths until publish activation exists
 
 ## Completed tasks
 
@@ -1182,4 +1182,48 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 - KML, WebODM, QGIS, and map export still primarily consume or produce legacy paths.
 - Cross-run filter legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
 - If a mirror operation fails after creating a temporary mirror directory, the temporary path can remain for diagnosis and the next retry will fail fast until it is inspected or removed.
+- Workspace retention and cleanup remain deferred.
+
+## Phase 3 KML boundary workspace migration
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+`RGBPipeline.stage_kml_boundary()` now treats the run workspace as the first writable destination for derived boundary artifacts, then mirrors successful derived files back into the existing legacy survey boundary folder.
+
+The stage now:
+
+- creates the run-owned workspace directory tree through `create_run_workspace(self.workspace_layout)` when KML boundary processing starts;
+- keeps KML/KMZ input discovery at the legacy `rgb/boundary` folder for compatibility with the current data segregation output;
+- writes derived GeoJSON and CSV files to `workspace/boundary`;
+- mirrors successful derived GeoJSON and CSV files back to legacy `rgb/boundary` paths;
+- replaces individual legacy derived files through a temporary-and-backup rename sequence;
+- preserves existing top-level `processed_files`, `geojson_dir`, `csv_dir`, `boundary_available`, and `boundary_geojson_path` semantics using legacy paths; and
+- adds additive `workspace` and `published` dictionaries to the stage output for later publication/reporting work.
+
+If KML processing raises before returning a successful summary, pre-existing legacy GeoJSON and CSV files remain untouched and partial workspace files are left as diagnostic evidence. If no valid boundary is produced, the stage preserves the legacy no-boundary shape while still reporting workspace and published path metadata.
+
+### Files modified or created
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, KML input path, WebODM behavior, QGIS/GDAL behavior, retry behavior, map export behavior, operator workflow, external-service behavior, or production dependency changed.
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - 33 passed in 0.97 seconds.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Data segregation still creates and populates the legacy published survey tree directly.
+- WebODM, QGIS, and map export still primarily consume or produce legacy paths.
+- KML boundary legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
+- A failure during a later individual file mirror could leave an earlier derived file mirrored; full multi-file publish activation remains deferred to the manifest-backed publish step.
 - Workspace retention and cleanup remain deferred.

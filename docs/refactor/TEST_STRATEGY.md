@@ -570,3 +570,19 @@ Coverage proves that:
 - a controlled filter failure leaves pre-existing legacy output folders untouched and records no crossrun state.
 
 The tests patch the filter boundary with fakes, use pytest-owned survey and workspace paths, and do not process EXIF, run the real filter algorithm, execute the full pipeline, contact WebODM, run QGIS/GDAL, access production storage, or delete real data.
+
+## Phase 3 KML boundary workspace coverage
+
+Added on 2026-07-20, the hermetic RGBPipeline single-stage tests cover the KML boundary workspace migration.
+
+Coverage proves that:
+
+- the KML stage reads KML/KMZ inputs from the legacy `rgb/boundary` folder;
+- derived GeoJSON and CSV outputs are first written under the run workspace `boundary` directory;
+- successful derived files are mirrored back to legacy `rgb/boundary` paths for WebODM, QGIS, map export, and operator compatibility;
+- successful stage output preserves legacy top-level `processed_files`, `geojson_dir`, `csv_dir`, `boundary_available`, and `boundary_geojson_path` values;
+- successful stage output includes additive `workspace` and `published` path metadata;
+- no-valid-boundary output keeps the existing fallback semantics while reporting workspace/published metadata; and
+- a controlled KML processing failure leaves pre-existing legacy GeoJSON and CSV files untouched and records no boundary state.
+
+The tests patch the KML boundary with fakes, use pytest-owned survey and workspace paths, and do not parse real KML, execute the full pipeline, contact WebODM, run QGIS/GDAL, access production storage, or delete real data.
