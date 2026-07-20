@@ -10,6 +10,15 @@ from shared.stage_runner import StageRunner
 from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
+from shared.artifacts import (
+    PublishedSurveyLayout,
+    RunWorkspaceLayout,
+    create_run_workspace,
+    describe_published_survey,
+    describe_run_workspace,
+    plan_published_survey_from_rgb_path,
+    plan_run_workspace,
+)
 
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
 from modules.webodm.webodm_processor import WebODMProcessor
@@ -74,11 +83,16 @@ class RGBPipeline(
         logs_dir: Optional[Path] = None,
         checkpoint_dir: Optional[Path] = None,
         webodm_processor: Optional[Any] = None,
+        workspace_root: Optional[Path] = None,
+        workspace_layout: Optional[RunWorkspaceLayout] = None,
+        published_layout: Optional[PublishedSurveyLayout] = None,
     ):
         if not isinstance(config, Mapping):
             raise TypeError("config must be a mapping")
         if repository is not None and db_file is not None:
             raise ValueError("repository and db_file are mutually exclusive")
+        if workspace_root is not None and workspace_layout is not None:
+            raise ValueError("workspace_root and workspace_layout are mutually exclusive")
 
         logger_names = {
             "pipeline",
@@ -103,6 +117,17 @@ class RGBPipeline(
         self.year = int(year)
         self.run_id = run_id or str(uuid.uuid4())
         self.survey_id: Optional[str] = None
+        self.workspace_root = (
+            Path(workspace_root)
+            if workspace_root is not None
+            else self.base_dir / "data" / "workspaces"
+        )
+        self.workspace_layout = (
+            workspace_layout
+            if workspace_layout is not None
+            else plan_run_workspace(self.workspace_root, self.run_id)
+        )
+        self.published_layout = published_layout
         self.logs_dir = (
             Path(logs_dir)
             if logs_dir is not None
@@ -211,6 +236,12 @@ class RGBPipeline(
         self.rgb_path: Optional[Path] = None
 
     # Helpers
+    def _set_survey_artifact_context(self, survey_id: str, rgb_path: Path) -> None:
+        self.survey_id = survey_id
+        self.rgb_path = Path(rgb_path)
+        if self.published_layout is None:
+            self.published_layout = plan_published_survey_from_rgb_path(self.rgb_path)
+
     def _create_webodm_processor(self, logger: logging.Logger) -> Any:
         if self.webodm_processor is not None:
             return self.webodm_processor
@@ -239,10 +270,20 @@ class RGBPipeline(
         state = self.state
 
         seg = state.get("data_segregation") or {}
-        if seg.get("survey_id"):
-            self.survey_id = seg["survey_id"]
-        if seg.get("survey_path"):
-            self.rgb_path = Path(seg["survey_path"])
+        if seg.get("survey_id") and seg.get("survey_path"):
+            self._set_survey_artifact_context(
+                seg["survey_id"],
+                Path(seg["survey_path"]),
+            )
+        else:
+            if seg.get("survey_id"):
+                self.survey_id = seg["survey_id"]
+            if seg.get("survey_path"):
+                self.rgb_path = Path(seg["survey_path"])
+                if self.published_layout is None:
+                    self.published_layout = plan_published_survey_from_rgb_path(
+                        self.rgb_path
+                    )
 
         flt = state.get("cross_run_filter") or {}
         if flt.get("crossrun_flag"):
@@ -455,6 +496,60 @@ class RGBPipeline(
         except Exception:
             logger.exception(f"Failed to clean upload cache: {cache_dir}")
 
+    def _require_workspace_owned_path(self, path: Path) -> Path:
+        candidate = Path(path).resolve(strict=False)
+        workspace_root = self.workspace_layout.root.resolve(strict=False)
+        try:
+            candidate.relative_to(workspace_root)
+        except ValueError as exc:
+            raise ValueError(f"Path escapes run workspace: {path}") from exc
+        return candidate
+
+    def _reset_workspace_directory(self, path: Path) -> None:
+        directory = self._require_workspace_owned_path(path)
+        if directory == self.workspace_layout.root.resolve(strict=False):
+            raise ValueError("Refusing to reset the workspace root")
+        if directory.exists():
+            shutil.rmtree(directory)
+        directory.mkdir(parents=True, exist_ok=True)
+
+    def _replace_legacy_directory_after_success(
+        self,
+        *,
+        source_dir: Path,
+        target_dir: Path,
+    ) -> None:
+        source = self._require_workspace_owned_path(source_dir)
+        if not source.is_dir():
+            raise FileNotFoundError(f"Workspace directory not found: {source_dir}")
+
+        target = Path(target_dir)
+        target_parent = target.parent
+        target_parent.mkdir(parents=True, exist_ok=True)
+        if target.exists() and not target.is_dir():
+            raise NotADirectoryError(f"Legacy mirror target is not a directory: {target}")
+
+        temp_target = target_parent / f".{target.name}.tmp-{self.run_id}"
+        backup_target = target_parent / f".{target.name}.bak-{self.run_id}"
+        if temp_target.exists() or backup_target.exists():
+            raise FileExistsError(
+                f"Stale publish mirror path exists: {temp_target} or {backup_target}"
+            )
+
+        shutil.copytree(source, temp_target)
+        try:
+            if target.exists():
+                target.rename(backup_target)
+            temp_target.rename(target)
+        except Exception:
+            if not target.exists() and backup_target.exists():
+                backup_target.rename(target)
+            raise
+        else:
+            if backup_target.exists():
+                shutil.rmtree(backup_target)
+
+
     def _check_control_or_raise(self, stage_name: str) -> None:
         try:
             self.control.check_or_raise()
@@ -487,6 +582,7 @@ class RGBPipeline(
     def stage_data_segregation(self) -> Dict[str, Any]:
         logger = self.loggers["segregation"]
         logger.info("Stage: Data Segregation")
+        create_run_workspace(self.workspace_layout)
 
         summary = run_data_segregation(
             source_dir=self.source_dir,
@@ -502,9 +598,11 @@ class RGBPipeline(
             force=self.force_segregation,
         )
 
-        self.survey_id = summary["survey_id"]
-        # .../<year>/<survey_id>/rgb
-        self.rgb_path = Path(summary["survey_path"])
+        # .../<year>/<survey_id>/rgb by default; can be without year subdir.
+        self._set_survey_artifact_context(
+            summary["survey_id"],
+            Path(summary["survey_path"]),
+        )
 
         # Rename KML to match survey ID
         boundary_dir = self.rgb_path / "boundary"
@@ -529,6 +627,11 @@ class RGBPipeline(
         self.repo.attach_survey_id(self.run_id, self.survey_id)
         self.repo.upsert_survey_running(self.survey_id)
 
+        summary = dict(summary)
+        summary["workspace"] = describe_run_workspace(self.workspace_layout)
+        if self.published_layout is not None:
+            summary["published"] = describe_published_survey(self.published_layout)
+
         return summary
 
     def stage_cross_run_image_filter(self) -> Dict[str, Any]:
@@ -538,8 +641,11 @@ class RGBPipeline(
         rgb_path = self._require_rgb_path()
 
         input_dir = rgb_path / "images" / "raw"
-        output_dir = rgb_path / "images" / "path"
-        excluded_dir = output_dir.parent / "cross-runs"
+        legacy_output_dir = rgb_path / "images" / "path"
+        legacy_excluded_dir = legacy_output_dir.parent / "cross-runs"
+        output_dir = self.workspace_layout.images_path
+        excluded_dir = self.workspace_layout.images_cross_runs
+        create_run_workspace(self.workspace_layout)
 
         filter_cfg = self.config.get("cross_run_filter", {})
         max_gap = int(filter_cfg.get("max_gap", 10))
@@ -551,21 +657,35 @@ class RGBPipeline(
             enabled = bool(filter_cfg.get("enabled", True))
 
         logger.info(f"Input (raw): {input_dir}")
-        logger.info(f"Output (kept/path): {output_dir}")
-        logger.info(f"Output (excluded/cross-runs): {excluded_dir}")
+        logger.info(f"Workspace output (kept/path): {output_dir}")
+        logger.info(f"Workspace output (excluded/cross-runs): {excluded_dir}")
+        logger.info(f"Legacy output mirror (kept/path): {legacy_output_dir}")
+        logger.info(f"Legacy output mirror (excluded/cross-runs): {legacy_excluded_dir}")
 
         if not enabled:
             logger.info("Cross-run filter disabled. Copying RAW -> PATH without exclusions.")
 
-            output_dir.mkdir(parents=True, exist_ok=True)
-            excluded_dir.mkdir(parents=True, exist_ok=True)
+            self._reset_workspace_directory(output_dir)
+            self._reset_workspace_directory(excluded_dir)
 
             images = self._iter_jpeg_files(input_dir)
             for img in images:
                 shutil.copy2(img, output_dir / img.name)
 
+            self._replace_legacy_directory_after_success(
+                source_dir=output_dir,
+                target_dir=legacy_output_dir,
+            )
+            self._replace_legacy_directory_after_success(
+                source_dir=excluded_dir,
+                target_dir=legacy_excluded_dir,
+            )
+
             result = {
                 "filter_enabled": False,
+                "input_dir": str(input_dir),
+                "output_dir": str(legacy_output_dir),
+                "excluded_dir": str(legacy_excluded_dir),
                 "total_images": len(images),
                 "total_kept": len(images),
                 "total_excluded": 0,
@@ -575,6 +695,15 @@ class RGBPipeline(
                 "crossrun_flag": "c",                 # keep default semantics
                 "experiment_crossrun_label": "NF",   # experiment naming only
                 "raw_deleted": False,
+                "workspace": {
+                    "input_dir": str(input_dir),
+                    "output_dir": str(output_dir),
+                    "excluded_dir": str(excluded_dir),
+                },
+                "published": {
+                    "output_dir": str(legacy_output_dir),
+                    "excluded_dir": str(legacy_excluded_dir),
+                },
             }
 
             self.state["crossrun_flag"] = "c"
@@ -588,6 +717,28 @@ class RGBPipeline(
             max_gap=max_gap,
             cross_run_window=window,
         )
+
+        self._replace_legacy_directory_after_success(
+            source_dir=output_dir,
+            target_dir=legacy_output_dir,
+        )
+        self._replace_legacy_directory_after_success(
+            source_dir=excluded_dir,
+            target_dir=legacy_excluded_dir,
+        )
+
+        result = dict(result)
+        result["workspace"] = {
+            "input_dir": str(input_dir),
+            "output_dir": str(output_dir),
+            "excluded_dir": str(excluded_dir),
+        }
+        result["published"] = {
+            "output_dir": str(legacy_output_dir),
+            "excluded_dir": str(legacy_excluded_dir),
+        }
+        result["output_dir"] = str(legacy_output_dir)
+        result["excluded_dir"] = str(legacy_excluded_dir)
 
         excluded = self._safe_int(result.get("total_excluded"))
         # Naming semantics:

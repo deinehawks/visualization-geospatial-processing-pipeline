@@ -224,6 +224,57 @@ Current tests do not provide confirmed automated coverage for:
 - Map-export compatibility with refactored paths/state.
 - Multi-worker scheduling, leases, duplicate delivery, and crash recovery.
 
+
+
+## Phase 3 artifact workspace coverage
+
+Added on 2026-07-20, `tests/test_phase3_artifact_workspace.py` covers the first ADR-003 implementation slice.
+
+Coverage proves:
+
+- two run IDs for the same survey receive distinct workspace roots and mutable working directories;
+- unsafe run IDs and escaping published artifact paths are rejected;
+- published survey path planning preserves the legacy `rgb/` layout expected by existing consumers;
+- a complete staged publish set is copied under the run workspace and receives a manifest only after artifacts are staged;
+- staged publication does not modify the existing published survey tree; and
+- injected copy failure leaves the published tree untouched and does not write a complete publication manifest.
+
+This remains helper-level coverage. It does not run the real pipeline, copy real survey data, contact WebODM, execute QGIS/GDAL, change the database schema, activate a publish set, or alter map export behavior.
+
+
+
+## Phase 3 RGBPipeline workspace seam coverage
+
+Added on 2026-07-20, construction and single-stage tests cover the RGBPipeline seam for ADR-003 artifact ownership.
+
+Coverage proves:
+
+- default construction computes a run workspace layout under `<base_dir>/data/workspaces/<run_id>` without creating it;
+- injected workspace and published layouts are preserved;
+- ambiguous `workspace_root` and `workspace_layout` inputs are rejected;
+- default construction keeps `published_layout` unset before a survey path is known;
+- data segregation success derives `published_layout` from the actual returned `survey_path`; and
+- resume-state hydration derives `published_layout` from the actual stored `survey_path`, including layouts without a year subdirectory.
+
+This is seam coverage only. It does not migrate a stage to the run workspace, create workspace directories during construction, activate a publish set, run the real pipeline, contact WebODM, execute QGIS/GDAL, or touch production storage.
+
+
+
+## Phase 3 data segregation workspace metadata coverage
+
+Added on 2026-07-20, the hermetic RGBPipeline single-stage tests cover data segregation workspace metadata.
+
+Coverage proves:
+
+- successful data segregation creates the run-owned workspace directories;
+- successful data segregation persists additive `workspace` and `published` metadata in stage output;
+- existing top-level `survey_id`, `survey_path`, and fake dependency output remain backward-compatible;
+- the published layout still derives from the actual returned `survey_path`;
+- failed data segregation prepares the workspace but records no successful stage output; and
+- all workspace, survey, checkpoint, control, and SQLite paths remain under pytest-owned temporary roots.
+
+This is still not a full stage migration. The real data segregation implementation continues to populate the legacy survey tree, and no publish activation, map export manifest preference, WebODM, QGIS/GDAL, or network behavior is exercised.
+
 ## Validation sequence for future changes
 
 Once Phase 1 is approved and implemented, validation should progress from safest to broadest:
@@ -502,3 +553,20 @@ New coverage proves:
 This closes the Phase 2 acceptance gap for in-process threaded logger context, handler lifecycle, parser compatibility, and run-control observability. Remaining coverage belongs to later phases: cross-process worker logging, subprocess-output attribution, richer WebODM branch events, QGIS branch/artifact events, and typed control-state semantics.
 
 Validation: changed Python files compiled; focused logging tests passed 8/8; focused RGBPipeline single-stage/run-event tests passed 6/6; collection found 63 tests; the full default suite passed 63/63; `git diff --check` passed with only LF-to-CRLF working-tree warnings. No external operation occurred.
+
+## Phase 3 cross-run filter workspace coverage
+
+Added on 2026-07-20, the hermetic RGBPipeline single-stage tests cover the cross-run filter workspace migration.
+
+Coverage proves that:
+
+- the enabled filter receives `rgb/images/raw` as input but writes kept images into the run workspace;
+- excluded filter outputs are kept under the run workspace sibling `images/cross-runs` directory;
+- successful filter results are mirrored back to legacy `rgb/images/path` and `rgb/images/cross-runs` paths for compatibility;
+- stale legacy image outputs are replaced only after workspace outputs exist;
+- disabled filtering copies raw images through the workspace before mirroring to legacy output folders;
+- existing crossrun flag and experiment-label semantics are preserved for enabled and disabled modes;
+- successful stage output includes additive `workspace` and `published` path metadata while preserving legacy top-level output paths; and
+- a controlled filter failure leaves pre-existing legacy output folders untouched and records no crossrun state.
+
+The tests patch the filter boundary with fakes, use pytest-owned survey and workspace paths, and do not process EXIF, run the real filter algorithm, execute the full pipeline, contact WebODM, run QGIS/GDAL, access production storage, or delete real data.

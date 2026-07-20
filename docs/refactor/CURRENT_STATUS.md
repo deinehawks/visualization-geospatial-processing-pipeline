@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, artifact inventory and ADR-003 proposal prepared for review
-- **Completed work:** Phase 1 safety baseline plus Phase 2 logger isolation, parseable run/stage/external-boundary events, parser/reporting support, threaded logging coverage, handler cleanup policy, and run pause/abort/cancel event coverage
-- **Current task:** Review ADR-003 proposal and Phase 3 artifact inventory; do not implement workspace changes until the ownership design is accepted
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, and query_survey_stats.py
-- **Next recommended task:** Review and accept or revise ADR-003, then implement the smallest path-planning and publish abstraction with temporary-path tests
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, cross-run filter now writes through the run workspace before legacy mirroring
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, and cross-run filter workspace-to-legacy mirroring
+- **Current task:** Cross-run filter migration completed; next Phase 3 slice should migrate the next artifact-producing stage behind tests
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning groundwork in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, and cross-run filter workspace mirroring
+- **Next recommended task:** Migrate KML boundary outputs toward run-owned workspace paths while preserving legacy published paths until publish activation exists
 
 ## Completed tasks
 
@@ -949,7 +949,7 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 
 ### Recommended next task
 
-Review and accept or revise ADR-003. Once accepted, implement the smallest path-planning and publish abstraction that moves mutable stage artifacts into a run-scoped workspace while preserving legacy-compatible published paths.
+Review the data segregation workspace metadata slice. Next migrate cross-run filter inputs and outputs toward run-owned workspace paths while preserving legacy published paths until publish activation exists.
 
 ## Phase 3 artifact inventory and ADR-003 proposal
 
@@ -984,8 +984,202 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 
 ### Remaining Phase 3 risks
 
-- ADR-003 is Proposed, not Accepted; implementation should not start until the ownership model is approved or revised.
+- ADR-003 is now Accepted, but only the reusable groundwork exists; runtime stages still use legacy shared survey paths.
 - Publish semantics for Windows network shares and cross-volume replacement still need detailed design.
 - Workspace retention and cleanup policy is intentionally deferred.
 - Historical SQLite outputs and logs may contain legacy absolute paths and need compatibility handling.
 - Map export should remain legacy-compatible and may later prefer publication manifests when present.
+
+## Phase 3 path-planning and staged-publication groundwork
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+Accepted ADR-003 and added the first reusable Phase 3 helper without wiring it into runtime stage execution.
+
+`shared/artifacts.py` now provides:
+
+- `plan_run_workspace()` for run-ID-owned workspace paths.
+- `plan_published_survey()` for legacy-compatible published survey paths.
+- `create_run_workspace()` for creating only directories contained by the run workspace root.
+- `PublicationArtifact` and `prepare_publication()` for staging a complete publish set under the run workspace and writing `publication.json` only after artifact staging succeeds.
+
+The staged-publication helper intentionally does not modify the published survey tree. This preserves current production behavior while giving later stage migrations a tested contract for preparing publishable artifacts.
+
+### Files modified or created
+
+- Created: `shared/artifacts.py`
+- Created: `tests/test_phase3_artifact_workspace.py`
+- Modified: `docs/refactor/DECISIONS.md`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, existing RGBPipeline stage path, retry behavior, cleanup behavior, map export behavior, operator workflow, or external-service behavior changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed.
+- First `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 12 passed.
+- Final `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 12 passed.
+- `python -m pytest --collect-only -q` - 75 tests collected.
+- `python -m pytest -q` - 75 passed in 1.29 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Runtime stages are not yet using the run workspace helper.
+- There is no activation step that replaces or points consumers at the staged publish set.
+- Directory activation across Windows network shares remains intentionally unimplemented.
+- Retention and cleanup of staged or superseded workspaces remains deferred.
+- Map export still uses legacy path discovery only.
+
+## Phase 3 RGBPipeline workspace layout seam
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+Wired the Phase 3 artifact helper into `RGBPipeline` as a backward-compatible constructor and resume seam.
+
+`RGBPipeline` now:
+
+- accepts optional `workspace_root`, `workspace_layout`, and `published_layout` parameters;
+- computes a default run workspace layout at `<base_dir>/data/workspaces/<run_id>` without creating directories;
+- keeps `published_layout` unset until the actual survey `rgb` path is known;
+- derives `published_layout` from the actual `survey_path` after data segregation or state hydration, preserving year-subdir and no-year-subdir layouts; and
+- rejects ambiguous `workspace_root` plus `workspace_layout` inputs before opening default collaborators.
+
+This does not move any runtime stage output yet. Existing stages still use the legacy shared survey tree until each stage is migrated with its own tests.
+
+### Files modified or created
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `shared/artifacts.py`
+- Modified: `tests/test_phase3_artifact_workspace.py`
+- Modified: `tests/test_rgb_pipeline_construction.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, existing stage output path, retry behavior, cleanup behavior, map export behavior, operator workflow, or external-service behavior changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 13 passed.
+- First `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 6 passed.
+- Final `python -m pytest -q tests\test_rgb_pipeline_construction.py` - 7 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 6 passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 26 passed in 0.64 seconds.
+- `python -m pytest --collect-only -q` - 79 tests collected.
+- `python -m pytest -q` - 79 passed in 1.35 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Runtime stages still write to legacy shared survey paths.
+- Run workspace directories are planned but not created by `RGBPipeline` construction.
+- No publish activation step exists yet.
+- No map export manifest preference exists yet.
+- Retention and cleanup remain deferred.
+
+## Phase 3 data segregation workspace metadata slice
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+`RGBPipeline.stage_data_segregation()` now prepares the run workspace and records artifact ownership metadata while preserving the existing legacy data segregation behavior.
+
+The stage now:
+
+- creates the run-owned workspace directory tree through `create_run_workspace(self.workspace_layout)` when data segregation starts;
+- continues to call `run_data_segregation()` with the existing source, survey root, year, override, and force parameters;
+- continues to use the returned legacy `survey_path` as `rgb_path`;
+- continues to rename the KML in the published survey boundary directory;
+- preserves existing top-level `survey_id`, `survey_path`, and other data segregation output keys; and
+- adds additive `workspace` and `published` dictionaries to the successful stage output for later stage migration and reporting.
+
+The failure path prepares the run-owned workspace before the stage dependency runs, but still records no successful `data_segregation` output when the stage fails after retries.
+
+### Files modified or created
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `shared/artifacts.py`
+- Modified: `tests/test_phase3_artifact_workspace.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, legacy survey output path, data segregation copy behavior, retry behavior, cleanup behavior, map export behavior, operator workflow, or external-service behavior changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 27 passed in 0.70 seconds.
+- `python -m pytest --collect-only -q` - 80 tests collected.
+- `python -m pytest -q` - 80 passed in 1.32 seconds.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Data segregation still creates and populates the legacy published survey tree directly.
+- Cross-run filter, KML, WebODM, QGIS, and map export still consume legacy paths.
+- No publish activation step exists yet.
+- Workspace retention and cleanup remain deferred.
+- Failed data segregation attempts can leave an empty run workspace, which is intentional evidence for now but needs later retention policy.
+
+## Phase 3 cross-run filter workspace migration
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+`RGBPipeline.stage_cross_run_image_filter()` now treats the run workspace as the first writable destination for mutable filter outputs, then mirrors a successful result back into the existing legacy survey image folders.
+
+The stage now:
+
+- creates the run-owned workspace directory tree through `create_run_workspace(self.workspace_layout)` when cross-run filtering starts;
+- keeps the raw-image input at the legacy `rgb/images/raw` location for compatibility with the current data segregation output;
+- writes kept images to `workspace/images/path` and excluded images to `workspace/images/cross-runs`;
+- mirrors only successful workspace outputs back to the legacy `rgb/images/path` and `rgb/images/cross-runs` folders;
+- replaces legacy image output folders through a temporary-and-backup rename sequence instead of deleting them before filter success;
+- preserves existing top-level `output_dir`, `excluded_dir`, crossrun flag, experiment label, and raw-cleanup result semantics; and
+- adds additive `workspace` and `published` dictionaries to the stage output for later publication/reporting work.
+
+The disabled-filter branch now also copies raw images through the workspace before mirroring to legacy output folders. If the enabled filter raises before completion, legacy output folders remain untouched and any partial workspace files are left as diagnostic evidence.
+
+### Files modified or created
+
+- Modified: `pipelines/rgb_pipeline.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, migration, raw image input path, experiment naming default, retry behavior, map export behavior, operator workflow, external-service behavior, or production dependency changed.
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - passed.
+- First `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - failed because the single-stage test `exifread` stub lacked a module spec and because the fake filter used an unrealistic `mkdir(..., exist_ok=False)` after workspace creation.
+- Final `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py` - 30 passed in 1.00 seconds.
+- `python -m pytest --collect-only -q` - 83 tests collected.
+- `python -m pytest -q` - 83 passed in 1.48 seconds.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Data segregation still creates and populates the legacy published survey tree directly.
+- KML, WebODM, QGIS, and map export still primarily consume or produce legacy paths.
+- Cross-run filter legacy mirroring is compatibility glue, not the final manifest-backed publish activation step.
+- If a mirror operation fails after creating a temporary mirror directory, the temporary path can remain for diagnosis and the next retry will fail fast until it is inspected or removed.
+- Workspace retention and cleanup remain deferred.

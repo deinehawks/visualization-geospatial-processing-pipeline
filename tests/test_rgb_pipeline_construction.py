@@ -20,6 +20,7 @@ if importlib.util.find_spec("exifread") is None:
 from pipelines import rgb_pipeline as rgb_module
 from pipelines.rgb_pipeline import RGBPipeline
 from shared.db.repo import PipelineRepo
+from shared.artifacts import plan_published_survey_from_rgb_path, plan_run_workspace
 from tests.fakes import FakeWebODM
 
 
@@ -77,6 +78,9 @@ def build_pipeline(
     db_file=None,
     loggers=None,
     webodm_processor=None,
+    workspace_root=None,
+    workspace_layout=None,
+    published_layout=None,
 ):
     return RGBPipeline(
         temporary_path_layout.application_root,
@@ -91,6 +95,9 @@ def build_pipeline(
         logs_dir=temporary_path_layout.logs_dir,
         checkpoint_dir=temporary_path_layout.checkpoint_dir,
         webodm_processor=webodm_processor,
+        workspace_root=workspace_root,
+        workspace_layout=workspace_layout,
+        published_layout=published_layout,
     )
 
 
@@ -131,11 +138,22 @@ def test_rgb_pipeline_constructs_with_only_test_owned_dependencies(
     assert pipeline.runner.run_id == "hermetic-construction"
     assert pipeline.state == {"run_id": "hermetic-construction"}
     assert pipeline.rgb_path is None
+    assert pipeline.published_layout is None
+    assert pipeline.workspace_layout.root == (
+        temporary_path_layout.application_root
+        / "data"
+        / "workspaces"
+        / "hermetic-construction"
+    )
 
     owned_paths = (
         pipeline.base_dir,
         pipeline.source_dir,
         pipeline.surveys_root,
+        pipeline.workspace_root,
+        pipeline.workspace_layout.root,
+        pipeline.workspace_layout.images_raw,
+        pipeline.workspace_layout.publish,
         pipeline.logs_dir,
         pipeline.checkpoint_dir,
         pipeline._webodm_checkpoint_path(),
@@ -157,6 +175,7 @@ def test_rgb_pipeline_constructs_with_only_test_owned_dependencies(
     assert temporary_path_layout.database_path.is_file()
     assert list(temporary_path_layout.logs_dir.iterdir()) == []
     assert list(temporary_path_layout.checkpoint_dir.iterdir()) == []
+    assert not pipeline.workspace_layout.root.exists()
 
 
 def test_rgb_pipeline_preserves_injected_dependencies_and_database_path(
@@ -201,6 +220,40 @@ def test_rgb_pipeline_preserves_injected_dependencies_and_database_path(
         "running"
     )
     assert_within(explicit_database_path, temporary_path_layout.application_root)
+
+
+def test_rgb_pipeline_preserves_injected_phase3_artifact_layouts(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    workspace = plan_run_workspace(
+        temporary_path_layout.data_dir / "custom-workspaces",
+        "layout-injection",
+    )
+    published = plan_published_survey_from_rgb_path(
+        temporary_path_layout.surveys_dir / "custom" / "rgb"
+    )
+
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        run_id="layout-injection",
+        repository=repository,
+        loggers=isolated_loggers("tests.rgb_pipeline.layouts"),
+        webodm_processor=FakeWebODM(),
+        workspace_layout=workspace,
+        published_layout=published,
+    )
+
+    assert pipeline.workspace_layout is workspace
+    assert pipeline.workspace_root == (
+        temporary_path_layout.application_root / "data" / "workspaces"
+    )
+    assert pipeline.published_layout is published
+    assert not workspace.root.exists()
+    assert_within(workspace.root, temporary_path_layout.application_root)
+    assert_within(published.root, temporary_path_layout.application_root)
 
 
 def test_rgb_pipeline_defaults_keep_existing_production_wiring(
@@ -272,6 +325,17 @@ def test_rgb_pipeline_defaults_keep_existing_production_wiring(
     assert all(run_id == "default-construction" for _, _, run_id in logger_calls)
     assert pipeline.logs_dir == expected_logs_dir
     assert pipeline.checkpoint_dir == expected_logs_dir
+    assert pipeline.workspace_root == (
+        temporary_path_layout.application_root / "data" / "workspaces"
+    )
+    assert pipeline.workspace_layout.root == (
+        temporary_path_layout.application_root
+        / "data"
+        / "workspaces"
+        / "default-construction"
+    )
+    assert not pipeline.workspace_layout.root.exists()
+    assert pipeline.published_layout is None
     assert pipeline._webodm_checkpoint_path() == (
         expected_logs_dir / "webodm_checkpoint_default-construction.json"
     )
@@ -326,3 +390,56 @@ def test_rgb_pipeline_invalid_config_fails_before_side_effects(
         )
 
     assert not invalid_root.exists()
+
+def test_rgb_pipeline_hydrates_published_layout_from_actual_state_survey_path(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    survey_path_without_year = temporary_path_layout.surveys_dir / "AH-026019" / "rgb"
+
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        run_id="hydrate-layout",
+        repository=repository,
+        loggers=isolated_loggers("tests.rgb_pipeline.hydrate_layout"),
+        webodm_processor=FakeWebODM(),
+    )
+    pipeline.state["data_segregation"] = {
+        "survey_id": "AH-026019",
+        "survey_path": str(survey_path_without_year),
+    }
+
+    pipeline._hydrate_from_state()
+
+    assert pipeline.survey_id == "AH-026019"
+    assert pipeline.rgb_path == survey_path_without_year
+    assert pipeline.published_layout is not None
+    assert pipeline.published_layout.root == survey_path_without_year
+    assert pipeline.published_layout.manifest == survey_path_without_year / "manifest.json"
+    assert pipeline.published_layout.tiles_ortho_round == (
+        survey_path_without_year / "tiles" / "ortho" / "round-corners"
+    )
+
+
+def test_rgb_pipeline_rejects_ambiguous_workspace_layout_inputs(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    workspace = plan_run_workspace(
+        temporary_path_layout.data_dir / "custom-workspaces",
+        "ambiguous-layout",
+    )
+
+    with pytest.raises(ValueError, match="workspace_root and workspace_layout"):
+        build_pipeline(
+            temporary_path_layout,
+            sample_dataset_dir,
+            run_id="ambiguous-layout",
+            repository=PipelineRepo(temporary_path_layout.database_path),
+            loggers=isolated_loggers("tests.rgb_pipeline.ambiguous"),
+            webodm_processor=FakeWebODM(),
+            workspace_root=temporary_path_layout.data_dir / "other-workspaces",
+            workspace_layout=workspace,
+        )

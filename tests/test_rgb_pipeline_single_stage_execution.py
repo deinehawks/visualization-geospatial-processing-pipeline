@@ -11,6 +11,7 @@ import pytest
 
 if "exifread" not in sys.modules and importlib.util.find_spec("exifread") is None:
     exifread_stub = types.ModuleType("exifread")
+    exifread_stub.__spec__ = importlib.util.spec_from_loader("exifread", loader=None)
 
     def reject_exif_processing(*args, **kwargs):
         pytest.fail("single-stage test attempted EXIF processing")
@@ -46,6 +47,10 @@ LATER_STAGES = (
 
 
 class ControlledSegregationFailure(Exception):
+    pass
+
+
+class ControlledCrossRunFailure(Exception):
     pass
 
 
@@ -172,6 +177,26 @@ def block_later_stages(pipeline, calls):
     pipeline.stage_qgis = fail_later_stage("qgis")
 
 
+def prepare_cross_run_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-XRF"):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    raw_dir = survey_path / "images" / "raw"
+    raw_dir.mkdir(parents=True)
+    for name in ("image-001.jpg", "image-002.jpeg"):
+        (raw_dir / name).write_text(f"raw {name}", encoding="utf-8")
+
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state["data_segregation"] = {
+        "survey_id": survey_id,
+        "survey_path": str(survey_path),
+        "dirs": {
+            "raw": str(raw_dir),
+            "path": str(survey_path / "images" / "path"),
+            "cross_runs": str(survey_path / "images" / "cross-runs"),
+        },
+    }
+    return survey_path, raw_dir
+
+
 def test_rgb_pipeline_executes_one_selected_stage_successfully(
     monkeypatch,
     temporary_path_layout,
@@ -239,6 +264,12 @@ def test_rgb_pipeline_executes_one_selected_stage_successfully(
         RUN_ID,
         SELECTED_STAGE,
     )
+    assert selected_output["workspace"]["root"] == str(pipeline.workspace_layout.root)
+    assert selected_output["workspace"]["images_raw"] == str(
+        pipeline.workspace_layout.images_raw
+    )
+    assert selected_output["published"]["root"] == str(survey_path)
+    assert selected_output["published"]["boundary"] == str(survey_path / "boundary")
     assert running_observed == ["running"]
     assert len(dependency_calls) == 1
     assert dependency_calls[0]["source_dir"] == sample_dataset_dir
@@ -330,6 +361,11 @@ def test_rgb_pipeline_selected_stage_failure_is_recorded_and_propagated(
     assert stage["error_message"] == "controlled segregation failure"
     assert stage["output_json"] is None
     assert repository.get_run(RUN_ID)["status"] == "failed"
+    assert pipeline.workspace_layout.root.is_dir()
+    assert pipeline.workspace_layout.images_raw.is_dir()
+    assert pipeline.workspace_layout.publish.is_dir()
+    assert "data_segregation" not in pipeline.state
+    assert repository.get_latest_stage_output(RUN_ID, SELECTED_STAGE) is None
     assert "cross_run_filter" not in pipeline.state
     assert "kml_boundary" not in pipeline.state
     assert "webodm" not in pipeline.state
@@ -354,6 +390,169 @@ def test_rgb_pipeline_selected_stage_failure_is_recorded_and_propagated(
     cleanup_logger(pipeline.loggers["pipeline"])
     assert list(temporary_path_layout.checkpoint_dir.iterdir()) == []
 
+
+
+def test_cross_run_filter_writes_workspace_then_mirrors_legacy_outputs(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, raw_dir = prepare_cross_run_context(pipeline, temporary_path_layout)
+    legacy_output_dir = survey_path / "images" / "path"
+    legacy_excluded_dir = survey_path / "images" / "cross-runs"
+    legacy_output_dir.mkdir(parents=True)
+    (legacy_output_dir / "stale.jpg").write_text("old output", encoding="utf-8")
+    calls = []
+
+    def fake_run_filter(input_dir, output_dir, logger, max_gap, cross_run_window):
+        calls.append(
+            {
+                "input_dir": input_dir,
+                "output_dir": output_dir,
+                "max_gap": max_gap,
+                "cross_run_window": cross_run_window,
+            }
+        )
+        excluded_dir = output_dir.parent / "cross-runs"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        excluded_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "kept.jpg").write_text("kept", encoding="utf-8")
+        (excluded_dir / "excluded.jpg").write_text("excluded", encoding="utf-8")
+        return {
+            "input_dir": str(input_dir),
+            "output_dir": str(output_dir),
+            "excluded_dir": str(excluded_dir),
+            "total_images": 2,
+            "total_kept": 1,
+            "total_excluded": 1,
+            "cross_runs_detected": 1,
+        }
+
+    monkeypatch.setattr(rgb_module, "run_filter", fake_run_filter)
+
+    result = pipeline.stage_cross_run_image_filter()
+
+    assert calls == [
+        {
+            "input_dir": raw_dir,
+            "output_dir": pipeline.workspace_layout.images_path,
+            "max_gap": 10,
+            "cross_run_window": 3,
+        }
+    ]
+    assert (pipeline.workspace_layout.images_path / "kept.jpg").is_file()
+    assert (pipeline.workspace_layout.images_cross_runs / "excluded.jpg").is_file()
+    assert (legacy_output_dir / "kept.jpg").is_file()
+    assert (legacy_excluded_dir / "excluded.jpg").is_file()
+    assert not (legacy_output_dir / "stale.jpg").exists()
+    assert result["output_dir"] == str(legacy_output_dir)
+    assert result["excluded_dir"] == str(legacy_excluded_dir)
+    assert result["workspace"]["output_dir"] == str(pipeline.workspace_layout.images_path)
+    assert result["workspace"]["excluded_dir"] == str(
+        pipeline.workspace_layout.images_cross_runs
+    )
+    assert result["published"]["output_dir"] == str(legacy_output_dir)
+    assert result["crossrun_flag"] == "xc"
+    assert result["experiment_crossrun_label"] == "F"
+    assert pipeline.state["crossrun_flag"] == "xc"
+    assert pipeline.state["experiment_crossrun_label"] == "F"
+
+    for path_to_check in (
+        pipeline.workspace_layout.images_path,
+        pipeline.workspace_layout.images_cross_runs,
+        legacy_output_dir,
+        legacy_excluded_dir,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_cross_run_filter_disabled_copies_raw_through_workspace_then_legacy(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, raw_dir = prepare_cross_run_context(pipeline, temporary_path_layout)
+    legacy_output_dir = survey_path / "images" / "path"
+    legacy_excluded_dir = survey_path / "images" / "cross-runs"
+    legacy_output_dir.mkdir(parents=True)
+    (legacy_output_dir / "stale.jpg").write_text("old output", encoding="utf-8")
+    pipeline.crossrun_enabled_override = False
+
+    result = pipeline.stage_cross_run_image_filter()
+
+    assert sorted(path.name for path in pipeline.workspace_layout.images_path.iterdir()) == [
+        "image-001.jpg",
+        "image-002.jpeg",
+    ]
+    assert list(pipeline.workspace_layout.images_cross_runs.iterdir()) == []
+    assert sorted(path.name for path in legacy_output_dir.iterdir()) == [
+        "image-001.jpg",
+        "image-002.jpeg",
+    ]
+    assert list(legacy_excluded_dir.iterdir()) == []
+    assert not (legacy_output_dir / "stale.jpg").exists()
+    assert result["filter_enabled"] is False
+    assert result["total_images"] == 2
+    assert result["total_kept"] == 2
+    assert result["total_excluded"] == 0
+    assert result["raw_deleted"] is False
+    assert result["output_dir"] == str(legacy_output_dir)
+    assert result["workspace"]["input_dir"] == str(raw_dir)
+    assert result["workspace"]["output_dir"] == str(pipeline.workspace_layout.images_path)
+    assert result["published"]["excluded_dir"] == str(legacy_excluded_dir)
+    assert pipeline.state["crossrun_flag"] == "c"
+    assert pipeline.state["experiment_crossrun_label"] == "NF"
+
+
+def test_cross_run_filter_failure_leaves_legacy_outputs_untouched(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, _raw_dir = prepare_cross_run_context(pipeline, temporary_path_layout)
+    legacy_output_dir = survey_path / "images" / "path"
+    legacy_excluded_dir = survey_path / "images" / "cross-runs"
+    legacy_output_dir.mkdir(parents=True)
+    legacy_excluded_dir.mkdir(parents=True)
+    (legacy_output_dir / "keep-existing.jpg").write_text("existing", encoding="utf-8")
+    (legacy_excluded_dir / "keep-excluded.jpg").write_text("existing", encoding="utf-8")
+
+    def failing_run_filter(input_dir, output_dir, logger, max_gap, cross_run_window):
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "partial-workspace.jpg").write_text("partial", encoding="utf-8")
+        raise ControlledCrossRunFailure("controlled cross-run failure")
+
+    monkeypatch.setattr(rgb_module, "run_filter", failing_run_filter)
+
+    with pytest.raises(ControlledCrossRunFailure, match="controlled cross-run failure"):
+        pipeline.stage_cross_run_image_filter()
+
+    assert (pipeline.workspace_layout.images_path / "partial-workspace.jpg").is_file()
+    assert (legacy_output_dir / "keep-existing.jpg").read_text(encoding="utf-8") == "existing"
+    assert (legacy_excluded_dir / "keep-excluded.jpg").read_text(encoding="utf-8") == "existing"
+    assert not (legacy_output_dir / "partial-workspace.jpg").exists()
+    assert "crossrun_flag" not in pipeline.state
+    assert "experiment_crossrun_label" not in pipeline.state
 
 def test_rgb_pipeline_pause_signal_emits_parseable_run_event(
     temporary_path_layout,
