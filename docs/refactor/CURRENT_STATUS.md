@@ -2,12 +2,12 @@
 
 ## Summary
 
-- **Refactor status:** In progress; Phase 2 logging and observability started with ADR-002 accepted and first isolation fix implemented
-- **Current phase:** Phase 2 - Logging and observability
-- **Completed work:** Canonical pytest configuration, safe operator tools, reusable temporary test infrastructure, fake WebODM behavior, suite-wide default safety guards, StageRunner failure classification, hermetic RGBPipeline construction, and one hermetic RGBPipeline stage execution
-- **Current task:** ADR-013 parser/reporting support for explicit event records
-- **Production code changed:** Yes - logging observability changes in shared/logging.py, shared/stage_runner.py, and pipelines/rgb_pipeline.py
-- **Next recommended task:** Extend WebODM boundary events to remaining branches or add explicit event summaries to operator reports
+- **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, pending artifact inventory and ADR-003 preparation
+- **Completed work:** Phase 1 safety baseline plus Phase 2 logger isolation, parseable run/stage/external-boundary events, parser/reporting support, threaded logging coverage, handler cleanup policy, and run pause/abort/cancel event coverage
+- **Current task:** Begin Phase 3 with artifact inventory and ADR-003 proposal; do not implement workspace changes until the ownership design is accepted
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, and query_survey_stats.py
+- **Next recommended task:** Inventory run-owned versus published artifacts and prepare ADR-003 for workspace/publication ownership
 
 ## Completed tasks
 
@@ -907,3 +907,46 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 ### Recommended next Phase 2 task
 
 Extend WebODM boundary events to the remaining Task 1, Task 4/fallback, resume/reattach, quality-gate restart, and download/export branches, or add a small operator-facing explicit-event summary to `query_survey_stats.py` if reporting visibility is more valuable first.
+
+## Phase 2 completion assessment
+
+Date: 2026-07-20.
+
+Phase 2 logging and observability is complete enough to move to Phase 3 planning. The remaining WebODM branch and QGIS artifact/branch events are intentionally deferred because the Phase 2 acceptance criteria are now supported by owned logger isolation, threaded interleaving coverage, parseable lifecycle/external-boundary events, parser compatibility, and direct run-control event tests.
+
+### Completion evidence
+
+- `shared.logging.close_logger()` defines the handler lifecycle rule for tests and other owned logger callers: remove handlers, close them, clear filters, and allow later reconfiguration of the same concrete logger identity.
+- `tests/test_logging_context_ownership.py` now proves threaded/interleaved owned loggers do not exchange run IDs, stage names, handler destinations, or parseable event records.
+- `tests/test_rgb_pipeline_single_stage_execution.py` now directly exercises `run_paused`, `run_aborted`, and WebODM UI `run_canceled` event records without running real stages or external services.
+- Existing tests continue to prove run start/completion/failure events, StageRunner lifecycle events, WebODM Task 2 boundary events, QGIS command boundary events, and explicit event parser/reporting support.
+
+### Files modified
+
+- Modified: `shared/logging.py`
+- Modified: `tests/test_logging_context_ownership.py`
+- Modified: `tests/test_rgb_pipeline_single_stage_execution.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+### Validation
+
+- `python -m py_compile shared\logging.py tests\test_logging_context_ownership.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_logging_context_ownership.py` - 8 passed in 0.22 seconds.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 6 passed in 0.46 seconds.
+- `python -m pytest --collect-only -q` - 63 tests collected in 0.07 seconds.
+- `python -m pytest -q` - 63 passed in 1.19 seconds.
+- `git diff --check` - passed; Git reported LF-to-CRLF working-tree warnings for edited files.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, keyboard hook, interactive input, production path, production SQLite database, real survey root, network storage, git remote operation, or destructive cleanup operation was used.
+
+### Residual risks carried into later phases
+
+- WebODM Task 1, Task 4/fallback, resume/reattach, quality-gate restart, and download/export branches still do not all emit dedicated parseable boundary events.
+- QGIS `stage_qgis()` branch-level attribution is still limited to command events; disabled/skipped clip or tile branches do not emit dedicated parseable artifact/branch events.
+- StageRunner still propagates pause/abort/direct cancellation signals without terminally finalizing the active stage row; typed control exceptions and active-stage terminal semantics remain a later control-state design topic.
+- Cross-process file-handler behavior and subprocess-output attribution remain future concerns for the worker/scheduler phases.
+
+### Recommended next task
+
+Begin Phase 3 with a read-only artifact inventory covering every run-owned working path, survey-published path, upload/cache path, checkpoint path, and map/report consumer path. Use that inventory to prepare ADR-003 before changing workspace or publication behavior.

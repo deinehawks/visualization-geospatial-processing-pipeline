@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 from importlib.machinery import ModuleSpec
 import logging
@@ -63,7 +64,13 @@ if "rich" not in sys.modules and importlib.util.find_spec("rich") is None:
 
 from pipelines.rgb_pipeline import RGBPipeline
 from query_survey_stats import extract_log_insights, parse_event_message, parse_log_events
-from shared.logging import get_context_filter, get_logger, log_event, set_stage_context
+from shared.logging import (
+    close_logger,
+    get_context_filter,
+    get_logger,
+    log_event,
+    set_stage_context,
+)
 from tests.fakes import FakeWebODM
 
 
@@ -78,12 +85,7 @@ RGB_LOGGER_NAMES = (
 
 
 def cleanup_logger(logger):
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
-        handler.close()
-    logger.filters.clear()
-    if hasattr(logger, "_configured"):
-        delattr(logger, "_configured")
+    close_logger(logger)
 
 
 def cleanup_named_loggers(names):
@@ -202,6 +204,88 @@ def test_stage_context_is_isolated_between_owned_logger_instances(tmp_path):
     finally:
         for logger in created_loggers:
             cleanup_logger(logger)
+
+def test_owned_loggers_keep_context_under_threaded_interleaving(tmp_path):
+    logger_name = "tests.logging.phase2.threaded"
+    first_log = tmp_path / "threaded-first.log"
+    second_log = tmp_path / "threaded-second.log"
+    first = get_logger(logger_name, first_log, to_console=False, run_id="run-a")
+    second = get_logger(logger_name, second_log, to_console=False, run_id="run-b")
+
+    try:
+        from threading import Barrier
+
+        ready = Barrier(2)
+        released = Barrier(2)
+
+        def write_interleaved(logger, stage_name, marker):
+            set_stage_context(logger, stage_name)
+            logger.info(f"before barrier {marker}")
+            ready.wait(timeout=5)
+            released.wait(timeout=5)
+            log_event(logger, "thread_probe", marker=marker)
+            set_stage_context(logger, "")
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(
+                write_interleaved,
+                first,
+                "stage-a",
+                "first",
+            )
+            second_future = executor.submit(
+                write_interleaved,
+                second,
+                "stage-b",
+                "second",
+            )
+            first_future.result(timeout=5)
+            second_future.result(timeout=5)
+
+        first_content = first_log.read_text(encoding="utf-8")
+        second_content = second_log.read_text(encoding="utf-8")
+
+        assert "tests.logging.phase2.threaded | run-a | stage-a | before barrier first" in first_content
+        assert "tests.logging.phase2.threaded | run-a | stage-a | event=thread_probe marker=first" in first_content
+        assert "run-b" not in first_content
+        assert "stage-b" not in first_content
+
+        assert "tests.logging.phase2.threaded | run-b | stage-b | before barrier second" in second_content
+        assert "tests.logging.phase2.threaded | run-b | stage-b | event=thread_probe marker=second" in second_content
+        assert "run-a" not in second_content
+        assert "stage-a" not in second_content
+    finally:
+        cleanup_logger(first)
+        cleanup_logger(second)
+
+
+def test_close_logger_releases_handlers_and_allows_reconfiguration(tmp_path):
+    logger_name = "tests.logging.phase2.close"
+    first_log = tmp_path / "first-close.log"
+    second_log = tmp_path / "second-close.log"
+
+    logger = get_logger(logger_name, first_log, to_console=False, run_id="run-close")
+    logger.info("before close")
+    close_logger(logger)
+
+    assert logger.handlers == []
+    assert logger.filters == []
+    assert not hasattr(logger, "_configured")
+
+    first_log.unlink()
+    reconfigured = get_logger(
+        logger_name,
+        second_log,
+        to_console=False,
+        run_id="run-close",
+    )
+
+    try:
+        reconfigured.info("after close")
+        assert not first_log.exists()
+        assert "after close" in second_log.read_text(encoding="utf-8")
+    finally:
+        cleanup_logger(reconfigured)
 
 
 def test_default_rgb_pipeline_loggers_own_handlers_per_instance(tmp_path):

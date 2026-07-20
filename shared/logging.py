@@ -222,6 +222,16 @@ def get_logger(
     return logger
 
 
+def close_logger(logger: logging.Logger) -> None:
+    """Close handlers owned by a logger created with get_logger()."""
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+    logger.filters.clear()
+    if hasattr(logger, "_configured"):
+        delattr(logger, "_configured")
+
+
 # ================================
 # Pretty dividers / banners
 # ================================

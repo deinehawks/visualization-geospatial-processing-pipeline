@@ -354,9 +354,134 @@ def test_rgb_pipeline_selected_stage_failure_is_recorded_and_propagated(
     cleanup_logger(pipeline.loggers["pipeline"])
     assert list(temporary_path_layout.checkpoint_dir.iterdir()) == []
 
+
+def test_rgb_pipeline_pause_signal_emits_parseable_run_event(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline_log_path = temporary_path_layout.logs_dir / "pipeline-paused-events.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+        pipeline_log_path=pipeline_log_path,
+    )
+
+    pipeline.control.start_hotkeys = lambda logger: None
+
+    def pause_requested():
+        raise RuntimeError("__PIPELINE_PAUSED__")
+
+    pipeline.control.check_or_raise = pause_requested
+
+    try:
+        result = pipeline.run(selected_stages={SELECTED_STAGE})
+
+        assert result["success"] is False
+        assert result["paused"] is True
+        assert result["error"] == "paused_by_flag"
+        assert repository.get_run(RUN_ID)["status"] == "paused"
+        assert all_stage_names(temporary_path_layout.database_path) == []
+
+        content = pipeline_log_path.read_text(encoding="utf-8")
+        assert "event=run_started" in content
+        assert "event=run_paused reason=paused_by_flag after_stage=" in content
+    finally:
+        cleanup_logger(pipeline.loggers["pipeline"])
+
+
+def test_rgb_pipeline_abort_signal_emits_parseable_run_event(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline_log_path = temporary_path_layout.logs_dir / "pipeline-aborted-events.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+        pipeline_log_path=pipeline_log_path,
+    )
+
+    pipeline.control.start_hotkeys = lambda logger: None
+
+    def abort_requested():
+        raise RuntimeError("__PIPELINE_ABORTED__")
+
+    pipeline.control.check_or_raise = abort_requested
+
+    try:
+        result = pipeline.run(selected_stages={SELECTED_STAGE})
+
+        assert result["success"] is False
+        assert result["aborted"] is True
+        assert result["error"] == "aborted_by_hotkey"
+        assert repository.get_run(RUN_ID)["status"] == "failed"
+        assert all_stage_names(temporary_path_layout.database_path) == []
+
+        content = pipeline_log_path.read_text(encoding="utf-8")
+        assert "event=run_started" in content
+        assert "event=run_aborted" in content
+        assert "reason=aborted_by_hotkey" in content
+    finally:
+        cleanup_logger(pipeline.loggers["pipeline"])
+
+
+def test_rgb_pipeline_webodm_ui_cancel_emits_parseable_run_event(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline_log_path = temporary_path_layout.logs_dir / "pipeline-canceled-events.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+        pipeline_log_path=pipeline_log_path,
+    )
+    preflight_calls = []
+
+    pipeline.control.start_hotkeys = lambda logger: None
+    pipeline._preflight_stage = lambda stage_name: preflight_calls.append(stage_name)
+
+    def canceled_in_webodm_ui():
+        raise RuntimeError("WEBODM_TASK_CANCELED")
+
+    pipeline.stage_webodm = canceled_in_webodm_ui
+
+    try:
+        result = pipeline.run(
+            selected_stages={"webodm"},
+            force_stages={"webodm"},
+        )
+
+        assert result["success"] is False
+        assert result["canceled"] is True
+        assert result["error"] == "canceled_in_webodm_ui"
+        assert preflight_calls == ["webodm"]
+        assert repository.get_run(RUN_ID)["status"] == "paused"
+
+        stage = read_stage(
+            temporary_path_layout.database_path,
+            stage_name="webodm",
+        )
+        assert stage["status"] == "failed"
+        assert stage["error_message"] == "Canceled in WebODM UI"
+
+        content = pipeline_log_path.read_text(encoding="utf-8")
+        assert "event=run_started" in content
+        assert "event=stage_canceled" in content
+        assert "event=run_canceled reason=webodm_ui_cancel after_stage=webodm" in content
+    finally:
+        cleanup_logger(pipeline.loggers["pipeline"])
 def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
     temporary_path_layout,
     sample_dataset_dir,
+
 ):
     repository = PipelineRepo(temporary_path_layout.database_path)
     fake_webodm = FakeWebODM()

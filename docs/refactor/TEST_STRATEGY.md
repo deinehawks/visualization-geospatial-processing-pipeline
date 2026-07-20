@@ -215,7 +215,7 @@ Current tests do not provide confirmed automated coverage for:
 - Forced-rerun and authoritative-attempt semantics.
 - Survey ID concurrency.
 - Shared output ownership and publication.
-- Logger context under concurrent runs.
+- Cross-process file-handler behavior and subprocess-output attribution under future worker execution.
 - Pause, resume, abort, cancellation, and child-process cleanup.
 - Upload descriptor/memory bounds and resource cleanup.
 - Filesystem scan/copy performance and interruption.
@@ -485,3 +485,20 @@ Coverage proves that:
 - the survey summary can surface the total number of explicit events seen in logs.
 
 This remains compatible with historical regex fallbacks and does not introduce JSON logs, a database event journal, migrations, external services, or real QGIS/GDAL execution.
+
+## Phase 2 completion coverage
+
+Added on 2026-07-20, Phase 2 logging and observability coverage now exercises the acceptance criteria that were previously deferred.
+
+New coverage proves:
+
+- owned loggers can be closed through `shared.logging.close_logger()`, releasing handlers, clearing filters, and allowing same-identity reconfiguration;
+- two owned loggers writing from interleaved threads keep separate handler destinations, run IDs, stage names, and parseable event records;
+- `RGBPipeline.run()` emits `run_paused` when a pause control signal is observed before a stage;
+- `RGBPipeline.run()` emits `run_aborted` when an abort control signal is observed before a stage;
+- WebODM UI cancellation translated by `StageRunner` records a failed WebODM stage and emits `run_canceled`; and
+- the default safe test suite now collects 63 tests and passes 63/63.
+
+This closes the Phase 2 acceptance gap for in-process threaded logger context, handler lifecycle, parser compatibility, and run-control observability. Remaining coverage belongs to later phases: cross-process worker logging, subprocess-output attribution, richer WebODM branch events, QGIS branch/artifact events, and typed control-state semantics.
+
+Validation: changed Python files compiled; focused logging tests passed 8/8; focused RGBPipeline single-stage/run-event tests passed 6/6; collection found 63 tests; the full default suite passed 63/63; `git diff --check` passed with only LF-to-CRLF working-tree warnings. No external operation occurred.
