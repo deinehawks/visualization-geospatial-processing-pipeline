@@ -354,6 +354,12 @@ def test_activate_publication_replace_failure_rolls_back_published_files(tmp_pat
     assert second_target.read_text(encoding="utf-8") == "old second"
     assert not published.publication_manifest.exists()
 
+    manifest_path = activate_publication(workspace=workspace, published=published)
+
+    assert json.loads(manifest_path.read_text())["run_id"] == "run-001"
+    assert first_target.read_text(encoding="utf-8") == "new first"
+    assert second_target.read_text(encoding="utf-8") == "new second"
+
 
 def test_activate_publication_rejects_directory_artifacts_before_publishing(tmp_path):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
@@ -409,6 +415,7 @@ def test_activate_publication_rejects_tampered_staged_artifact(tmp_path):
 
     assert not published.root.exists()
 
+
 def test_activate_publication_rejects_tampered_escaping_manifest_path(tmp_path):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
     create_run_workspace(workspace)
@@ -438,3 +445,211 @@ def test_activate_publication_rejects_tampered_escaping_manifest_path(tmp_path):
 
     assert not published.root.exists()
     assert not (tmp_path / "surveys" / "2026" / "AH-026019" / "escape.tif").exists()
+
+def test_activate_publication_is_idempotent_for_an_already_published_run(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    source = workspace.webodm_ortho / "orthomosaic.tif"
+    source.write_text("published artifact", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            )
+        ],
+    )
+    manifest_path = activate_publication(workspace=workspace, published=published)
+    original_manifest = manifest_path.read_bytes()
+
+    def unexpected_operation(source_path, destination_path):
+        pytest.fail(f"Idempotent activation attempted filesystem work: {source_path}")
+
+    repeated_manifest = activate_publication(
+        workspace=workspace,
+        published=published,
+        copy_file=unexpected_operation,
+        replace_path=unexpected_operation,
+    )
+
+    assert repeated_manifest == manifest_path
+    assert repeated_manifest.read_bytes() == original_manifest
+    assert (published.ortho / "orthomosaic.tif").read_text() == "published artifact"
+
+
+def test_activate_publication_recovers_precommit_copy_interruption(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    source = workspace.webodm_ortho / "orthomosaic.tif"
+    source.write_text("new artifact", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            )
+        ],
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def interrupted_copy(source_path, destination_path):
+        destination_path.write_bytes(source_path.read_bytes())
+        raise SimulatedCrash("simulated crash during precommit copy")
+
+    with pytest.raises(SimulatedCrash, match="precommit copy"):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            copy_file=interrupted_copy,
+        )
+
+    temporary = published.ortho / ".orthomosaic.tif.run-001.publishing"
+    assert temporary.is_file()
+    assert not published.publication_manifest.exists()
+
+    manifest_path = activate_publication(workspace=workspace, published=published)
+    manifest = json.loads(manifest_path.read_text())
+
+    assert manifest["recovered_interrupted_activation"] is True
+    assert not temporary.exists()
+    assert (published.ortho / "orthomosaic.tif").read_text() == "new artifact"
+
+
+def test_activate_publication_recovers_interrupted_manifest_switch(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    target = published.ortho / "orthomosaic.tif"
+    target.parent.mkdir(parents=True)
+    target.write_text("previous artifact", encoding="utf-8")
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "previous"}\n', encoding="utf-8"
+    )
+    source = workspace.webodm_ortho / target.name
+    source.write_text("new artifact", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            )
+        ],
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    replace_count = 0
+
+    def crash_before_manifest_switch(source_path, destination_path):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 3:
+            raise SimulatedCrash("simulated crash before manifest switch")
+        source_path.replace(destination_path)
+
+    with pytest.raises(SimulatedCrash, match="manifest switch"):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_before_manifest_switch,
+        )
+
+    backup = target.with_name(".orthomosaic.tif.run-001.previous")
+    candidate = published.publication_manifest.with_name(
+        ".publication.json.run-001.publishing"
+    )
+    assert target.read_text() == "new artifact"
+    assert backup.read_text() == "previous artifact"
+    assert candidate.is_file()
+    assert json.loads(published.publication_manifest.read_text())["run_id"] == "previous"
+
+    manifest_path = activate_publication(workspace=workspace, published=published)
+    manifest = json.loads(manifest_path.read_text())
+
+    assert manifest["run_id"] == "run-001"
+    assert manifest["recovered_interrupted_activation"] is True
+    assert target.read_text() == "new artifact"
+    assert backup.read_text() == "previous artifact"
+    assert not candidate.exists()
+
+
+def test_activate_publication_refuses_recovery_after_active_manifest_changes(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    target = published.ortho / "orthomosaic.tif"
+    target.parent.mkdir(parents=True)
+    target.write_text("previous artifact", encoding="utf-8")
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "previous"}\n', encoding="utf-8"
+    )
+    source = workspace.webodm_ortho / target.name
+    source.write_text("interrupted artifact", encoding="utf-8")
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            )
+        ],
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    replace_count = 0
+
+    def crash_before_manifest_switch(source_path, destination_path):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 3:
+            raise SimulatedCrash("simulated crash before manifest switch")
+        source_path.replace(destination_path)
+
+    with pytest.raises(SimulatedCrash):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_before_manifest_switch,
+        )
+
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "another-run"}\n', encoding="utf-8"
+    )
+    backup = target.with_name(".orthomosaic.tif.run-001.previous")
+
+    with pytest.raises(RuntimeError, match="manifest changed"):
+        activate_publication(workspace=workspace, published=published)
+
+    assert json.loads(published.publication_manifest.read_text())["run_id"] == "another-run"
+    assert target.read_text() == "interrupted artifact"
+    assert backup.read_text() == "previous artifact"

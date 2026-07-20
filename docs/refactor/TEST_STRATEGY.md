@@ -701,3 +701,29 @@ Validation added or rerun for this slice:
 - `python -m pytest -q` - 103 passed
 
 The helper is not wired into `RGBPipeline`. Real survey publication, network-share behavior, large-file throughput, directory/tile activation, process-crash recovery, concurrent publisher locking, and backup retention remain outside the safe default suite.
+
+## Phase 3 file publication recovery coverage
+
+Date: 2026-07-20.
+
+`tests/test_phase3_artifact_workspace.py` now covers retry and interrupted-attempt reconciliation for the dormant file-only activation helper using pytest-owned temporary paths and tiny text files.
+
+Coverage proves that:
+
+- calling activation again for an already published run performs no copy or replacement work;
+- an interrupted temporary-file copy is detected, its run-specific temporary file is removed, and activation safely retries;
+- a simulated process interruption after a published file was replaced but before `publication.json` switched restores the prior file and then completes a fresh activation;
+- the recovered published manifest records `recovered_interrupted_activation: true`;
+- a normal caught replacement failure rolls all changed files back and a subsequent activation succeeds; and
+- recovery refuses to modify targets when the active manifest changed after the interrupted attempt, retaining the candidate and `.previous` evidence.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile shared/artifacts.py tests/test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py` - 24 passed
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 54 passed
+- `python -m pytest --collect-only -q` - 107 collected
+- `python -m pytest -q` - 107 passed
+- `git diff --check`
+
+This coverage assumes a single publisher. It does not exercise live `RGBPipeline` publication, concurrent same-survey publishers, process or host termination, network shares, large files, content hashing, directory/tile activation, or backup retention.

@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, with a tested dormant file-only publish activation boundary and manifest-aware map-export compatibility
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, and the file-only publish activation helper
-- **Current task:** The smallest safe file-only publish activation boundary is implemented and tested but intentionally not wired into the live pipeline
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning and file-only activation in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
-- **Next recommended task:** Design the first deliberately scoped RGBPipeline integration point for file publication, including same-survey ownership and crash-reconciliation requirements, before enabling the dormant helper; keep directory/tile activation separate
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, with a tested dormant file-only publish activation boundary, single-publisher crash reconciliation, and manifest-aware map-export compatibility
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, the file-only publish activation helper, and idempotent single-publisher activation recovery
+- **Current task:** File-only activation retry and crash reconciliation are implemented and tested under a single-publisher assumption; live pipeline integration remains intentionally deferred
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning, file-only activation, and activation reconciliation in shared/artifacts.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
+- **Next recommended task:** Define and approve same-survey publication ownership for the first deliberately scoped RGBPipeline file-publication stage; keep directory/tile activation separate
 
 ## Completed tasks
 
@@ -1467,3 +1467,53 @@ No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess,
 - A hard process or host crash during the multi-file replacement window requires reconciliation from retained `.previous` files; automatic recovery is not implemented yet.
 - Same-survey publication locking is deferred to Phase 4, so runtime activation must not be enabled before ownership is coordinated.
 - Backup retention and workspace cleanup remain intentionally deferred.
+
+## Phase 3 file publication retry and crash reconciliation
+
+Date: 2026-07-20.
+
+### Implemented behavior
+
+The dormant file-only `activate_publication()` boundary is now idempotent and can reconcile interrupted activation evidence under an explicit single-publisher assumption.
+
+Activation now:
+
+- treats a valid `publication.json` for the same run and identical file set as an idempotent success without copying or replacing files again;
+- verifies the active artifact paths and recorded/file sizes before accepting that idempotent success;
+- detects file copies interrupted before the activation candidate was committed, removes only validated run-specific temporary files, and retries from the staged manifest;
+- validates an interrupted activation candidate against run ID, survey ID, workspace root, published root, artifact paths, artifact sizes, and previous-manifest evidence;
+- restores retained `.previous` files when a process stopped after file replacement began but before the final manifest switch;
+- retries the activation after successful reconciliation and records `recovered_interrupted_activation: true` in the new published manifest;
+- allows retry after an ordinary caught replacement failure has already rolled its files back; and
+- fails closed without changing artifact evidence when the active publication manifest no longer matches the retained previous manifest, indicating another publisher or external change.
+
+This remains helper-only behavior. `RGBPipeline` does not call the activation helper, the current workspace-to-legacy mirrors are unchanged, and no same-survey publication lock has been introduced.
+
+### Files modified
+
+- `shared/artifacts.py`
+- `tests/test_phase3_artifact_workspace.py`
+- `docs/refactor/CURRENT_STATUS.md`
+- `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, pipeline stage ordering, retry default, operator flag, WebODM behavior, QGIS/GDAL behavior, map export behavior, dependency, network-share behavior, or dormant DEM behavior changed.
+
+### Validation
+
+- `python -m py_compile shared/artifacts.py tests/test_phase3_artifact_workspace.py` - passed.
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py` - 24 passed.
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 54 passed.
+- `python -m pytest --collect-only -q` - 107 tests collected.
+- `python -m pytest -q` - 107 passed.
+- `git diff --check` - passed.
+
+No external test, real pipeline execution, WebODM request, QGIS/GDAL subprocess, production path, production SQLite database, real survey root, network storage, git remote operation, or broad cleanup operation was used.
+
+### Remaining Phase 3 risks
+
+- Reconciliation assumes one publisher owns a survey publication target at a time; a lock or equivalent ownership contract is still required before live integration.
+- When the active manifest changed, recovery intentionally stops and retains evidence for operator diagnosis rather than guessing which run owns the target.
+- File identity is validated by paths and sizes, not content hashes; same-size external modification is not detectable by this slice.
+- Directory/tile-tree activation remains unsupported.
+- The helper is still not wired into `RGBPipeline`, and current stages still mirror workspace outputs directly to legacy paths.
+- Backup retention remains deferred.

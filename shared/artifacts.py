@@ -212,6 +212,7 @@ def prepare_publication(
     return manifest_path
 
 
+
 def activate_publication(
     *,
     workspace: RunWorkspaceLayout,
@@ -273,11 +274,39 @@ def activate_publication(
     manifest_candidate = publication_manifest.with_name(
         f".{publication_manifest.name}.{run_id}.publishing"
     )
+    manifest_candidate_temp = manifest_candidate.with_name(
+        f".{manifest_candidate.name}.tmp"
+    )
     previous_manifest = publication_manifest.with_name(
         f".{publication_manifest.name}.{run_id}.previous"
     )
 
-    reserved_paths = [manifest_candidate, previous_manifest]
+    if _active_publication_matches_staged(
+        publication_manifest=publication_manifest,
+        staged_manifest=manifest,
+        activation_entries=activation_entries,
+        published_root=published_root,
+    ):
+        return publication_manifest
+
+    recovered_interrupted_activation = _reconcile_interrupted_publication(
+        publication_manifest=publication_manifest,
+        manifest_candidate=manifest_candidate,
+        manifest_candidate_temp=manifest_candidate_temp,
+        previous_manifest=previous_manifest,
+        staged_manifest=manifest,
+        activation_entries=activation_entries,
+        workspace_root=workspace_root,
+        published_root=published_root,
+    )
+
+    if previous_manifest.exists():
+        _require_previous_manifest_matches_active(
+            previous_manifest=previous_manifest,
+            publication_manifest=publication_manifest,
+        )
+
+    reserved_paths = [manifest_candidate, manifest_candidate_temp]
     for entry in activation_entries:
         reserved_paths.extend([entry["temporary"], entry["backup"]])
     existing_reserved = [path for path in reserved_paths if path.exists()]
@@ -299,7 +328,7 @@ def activate_publication(
             if temporary.stat().st_size != entry["size_bytes"]:
                 raise OSError(f"Publication copy size mismatch: {temporary}")
 
-        if publication_manifest.is_file():
+        if publication_manifest.is_file() and not previous_manifest.exists():
             prepared_paths.append(previous_manifest)
             copy_file(publication_manifest, previous_manifest)
 
@@ -309,13 +338,19 @@ def activate_publication(
         active_manifest["previous_publication_manifest"] = (
             str(previous_manifest) if previous_manifest.is_file() else None
         )
+        active_manifest["recovered_interrupted_activation"] = (
+            recovered_interrupted_activation
+        )
         active_manifest["artifacts"] = [
             _activated_artifact_record(entry) for entry in activation_entries
         ]
         _write_json_atomic(manifest_candidate, active_manifest)
         prepared_paths.append(manifest_candidate)
     except Exception:
-        _unlink_owned_files(prepared_paths, published_root)
+        _unlink_owned_files(
+            prepared_paths + [manifest_candidate_temp],
+            published_root,
+        )
         raise
 
     activated: list[dict[str, object]] = []
@@ -346,12 +381,274 @@ def activate_publication(
                 f"{activation_error}"
             ) from rollback_error
         _unlink_owned_files(
-            [entry["temporary"] for entry in activation_entries] + [manifest_candidate],
+            [entry["temporary"] for entry in activation_entries]
+            + [manifest_candidate, manifest_candidate_temp],
             published_root,
         )
         raise
 
     return publication_manifest
+
+
+def _active_publication_matches_staged(
+    *,
+    publication_manifest: Path,
+    staged_manifest: dict[str, object],
+    activation_entries: list[dict[str, object]],
+    published_root: Path,
+) -> bool:
+    if not publication_manifest.is_file():
+        return False
+
+    active_manifest = _read_publication_manifest(
+        publication_manifest,
+        "published publication manifest",
+    )
+    if active_manifest.get("run_id") != staged_manifest.get("run_id"):
+        return False
+    if active_manifest.get("status") != "published":
+        raise ValueError("Existing publication for this run is not marked published")
+    if active_manifest.get("survey_id") != staged_manifest.get("survey_id"):
+        raise ValueError("Existing publication survey_id does not match the staged manifest")
+    if _manifest_root(active_manifest, "published_root") != published_root:
+        raise ValueError("Existing publication root does not match the published layout")
+
+    active_records = _publication_records_by_relative(active_manifest)
+    expected_paths = {
+        str(entry["record"]["published_relative_path"])
+        for entry in activation_entries
+    }
+    if set(active_records) != expected_paths:
+        raise ValueError("Existing publication artifact set does not match the staged manifest")
+
+    for entry in activation_entries:
+        relative_path = str(entry["record"]["published_relative_path"])
+        active_record = active_records[relative_path]
+        if active_record.get("kind") != "file":
+            raise ValueError("Existing publication contains a non-file artifact")
+        if _required_manifest_path(active_record, "published_path") != entry["target"]:
+            raise ValueError("Existing publication artifact target does not match")
+        if active_record.get("size_bytes") != entry["size_bytes"]:
+            raise ValueError("Existing publication artifact size record does not match")
+        target = entry["target"]
+        if not target.is_file() or target.stat().st_size != entry["size_bytes"]:
+            raise ValueError("Existing publication artifact is missing or has changed size")
+
+    return True
+
+
+def _reconcile_interrupted_publication(
+    *,
+    publication_manifest: Path,
+    manifest_candidate: Path,
+    manifest_candidate_temp: Path,
+    previous_manifest: Path,
+    staged_manifest: dict[str, object],
+    activation_entries: list[dict[str, object]],
+    workspace_root: Path,
+    published_root: Path,
+) -> bool:
+    artifact_temporaries = [entry["temporary"] for entry in activation_entries]
+    artifact_backups = [entry["backup"] for entry in activation_entries]
+
+    if manifest_candidate.is_file():
+        candidate = _read_publication_manifest(
+            manifest_candidate,
+            "publication activation candidate",
+        )
+        _validate_activation_candidate(
+            candidate=candidate,
+            staged_manifest=staged_manifest,
+            activation_entries=activation_entries,
+            previous_manifest=previous_manifest,
+            publication_manifest=publication_manifest,
+            workspace_root=workspace_root,
+            published_root=published_root,
+        )
+        candidate_records = _publication_records_by_relative(candidate)
+
+        for entry in reversed(activation_entries):
+            relative_path = str(entry["record"]["published_relative_path"])
+            candidate_record = candidate_records[relative_path]
+            previous_path = candidate_record.get("previous_published_path")
+            target = entry["target"]
+            temporary = entry["temporary"]
+            backup = entry["backup"]
+
+            if previous_path is not None:
+                if not isinstance(previous_path, str) or (
+                    Path(previous_path).resolve(strict=False) != backup
+                ):
+                    raise ValueError(
+                        "Publication candidate previous artifact path does not match"
+                    )
+                if backup.is_file():
+                    if target.exists() and not target.is_file():
+                        raise ValueError(
+                            f"Interrupted publication target is not a file: {target}"
+                        )
+                    if target.is_file():
+                        target.unlink()
+                    backup.replace(target)
+                elif temporary.is_file():
+                    if not target.is_file():
+                        raise RuntimeError(
+                            "Interrupted publication lost its previous artifact"
+                        )
+                else:
+                    raise RuntimeError(
+                        "Interrupted publication previous artifact state is ambiguous"
+                    )
+            else:
+                if backup.exists():
+                    raise RuntimeError(
+                        "Interrupted publication has an unexpected artifact backup"
+                    )
+                if temporary.is_file():
+                    if target.exists():
+                        raise RuntimeError(
+                            "Interrupted publication target changed before activation"
+                        )
+                elif target.is_file():
+                    target.unlink()
+                elif target.exists():
+                    raise ValueError(
+                        f"Interrupted publication target is not a file: {target}"
+                    )
+
+        _unlink_owned_files(
+            artifact_temporaries + [manifest_candidate, manifest_candidate_temp],
+            published_root,
+        )
+        return True
+
+    if any(path.exists() for path in artifact_backups):
+        raise RuntimeError(
+            "Publication backup exists without an activation candidate; "
+            "automatic recovery is unsafe"
+        )
+
+    if manifest_candidate_temp.exists() or any(
+        path.exists() for path in artifact_temporaries
+    ):
+        if previous_manifest.exists():
+            _require_previous_manifest_matches_active(
+                previous_manifest=previous_manifest,
+                publication_manifest=publication_manifest,
+            )
+        _unlink_owned_files(
+            artifact_temporaries + [manifest_candidate_temp],
+            published_root,
+        )
+        return True
+
+    return False
+
+
+def _validate_activation_candidate(
+    *,
+    candidate: dict[str, object],
+    staged_manifest: dict[str, object],
+    activation_entries: list[dict[str, object]],
+    previous_manifest: Path,
+    publication_manifest: Path,
+    workspace_root: Path,
+    published_root: Path,
+) -> None:
+    if candidate.get("status") != "published":
+        raise ValueError("Publication activation candidate is not marked published")
+    if candidate.get("run_id") != staged_manifest.get("run_id"):
+        raise ValueError("Publication activation candidate run_id does not match")
+    if candidate.get("survey_id") != staged_manifest.get("survey_id"):
+        raise ValueError("Publication activation candidate survey_id does not match")
+    if _manifest_root(candidate, "workspace_root") != workspace_root:
+        raise ValueError("Publication activation candidate workspace_root does not match")
+    if _manifest_root(candidate, "published_root") != published_root:
+        raise ValueError("Publication activation candidate published_root does not match")
+
+    candidate_records = _publication_records_by_relative(candidate)
+    expected_paths = {
+        str(entry["record"]["published_relative_path"])
+        for entry in activation_entries
+    }
+    if set(candidate_records) != expected_paths:
+        raise ValueError("Publication activation candidate artifact set does not match")
+
+    previous_manifest_value = candidate.get("previous_publication_manifest")
+    if previous_manifest_value is None:
+        if publication_manifest.exists() or previous_manifest.exists():
+            raise RuntimeError(
+                "Active publication changed during an interrupted activation"
+            )
+    else:
+        if not isinstance(previous_manifest_value, str) or (
+            Path(previous_manifest_value).resolve(strict=False) != previous_manifest
+        ):
+            raise ValueError(
+                "Publication activation candidate previous manifest path does not match"
+            )
+        _require_previous_manifest_matches_active(
+            previous_manifest=previous_manifest,
+            publication_manifest=publication_manifest,
+        )
+
+    for entry in activation_entries:
+        relative_path = str(entry["record"]["published_relative_path"])
+        record = candidate_records[relative_path]
+        if record.get("kind") != "file":
+            raise ValueError("Publication activation candidate contains a non-file artifact")
+        if _required_manifest_path(record, "staged_path") != entry["staged"]:
+            raise ValueError("Publication activation candidate staged path does not match")
+        if _required_manifest_path(record, "published_path") != entry["target"]:
+            raise ValueError("Publication activation candidate target does not match")
+        if record.get("size_bytes") != entry["size_bytes"]:
+            raise ValueError("Publication activation candidate size does not match")
+
+
+def _publication_records_by_relative(
+    manifest: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    records = manifest.get("artifacts")
+    if not isinstance(records, list) or not records:
+        raise ValueError("Publication manifest must contain at least one artifact")
+
+    by_relative: dict[str, dict[str, object]] = {}
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("Publication artifact record must be a JSON object")
+        relative_value = record.get("published_relative_path")
+        if not isinstance(relative_value, str) or not relative_value:
+            raise ValueError("Publication artifact published_relative_path is required")
+        relative_path = _validate_relative_path(Path(relative_value)).as_posix()
+        if relative_path in by_relative:
+            raise ValueError(f"Duplicate published artifact path: {relative_path}")
+        by_relative[relative_path] = record
+    return by_relative
+
+
+def _require_previous_manifest_matches_active(
+    *,
+    previous_manifest: Path,
+    publication_manifest: Path,
+) -> None:
+    if not previous_manifest.is_file() or not publication_manifest.is_file():
+        raise RuntimeError(
+            "Previous publication manifest cannot be reconciled with the active manifest"
+        )
+    if previous_manifest.read_bytes() != publication_manifest.read_bytes():
+        raise RuntimeError(
+            "Active publication manifest changed; automatic recovery is unsafe"
+        )
+
+
+def _read_publication_manifest(path: Path, label: str) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Unable to read {label}: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"{label.capitalize()} must contain a JSON object")
+    return payload
 
 
 def _read_staged_publication_manifest(path: Path) -> dict[str, object]:
