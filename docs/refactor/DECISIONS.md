@@ -199,3 +199,37 @@ ADR-001, ADR-002, ADR-003, ADR-013, and ADR-014 are accepted. ADR-004 through AD
   - The future database/state refactor can promote this event vocabulary into durable attempt/state tables instead of inventing a second model.
   - Rollback is documentation-only until implementation begins; future implementation rollback should remove added helper calls without data migration.
 - **Related files or issues:** Phase 2; `shared/logging.py`; `shared/stage_runner.py`; `pipelines/rgb_pipeline.py`; `query_survey_stats.py`; future ADRs for database/state phases.
+
+### ADR-015 - Activate large directory publications through exact hidden same-filesystem staging
+
+- **Decision ID:** ADR-015
+- **Date:** 2026-07-27
+- **Status:** Accepted
+- **Approval context:** The user explicitly requested an optimized dormant tile publication protocol that avoids copying millions of small tile files twice and keeps live QGIS/RGBPipeline integration deferred.
+- **Context:**
+  - QGIS tile outputs can contain thousands or millions of small files, making generate-elsewhere, copy-to-staging, validate, and activate prohibitively expensive.
+  - Publication must still validate a complete tree, retain the previous visible version, preserve crash evidence, and commit metadata only after activation.
+  - Same-filesystem directory rename is the practical fast visibility switch on the target filesystem, subject to Windows handle contention and unvalidated SMB behavior.
+- **Decision:**
+  - Define the only zero-copy source as `.activation/<run-id>/<published-name>.tmp` beside the final directory, returned by `publication_activation_path()`.
+  - When the staged directory is anywhere else inside the approved run workspace, copy it once into that exact path before validation.
+  - Validate file count and total bytes in one independent scan before rename; use only lightweight existence and declared required-path checks after rename.
+  - Journal `prepared`, `previous_moved`, `activated`, `committed`, `rolled_back`, and `failed` states in the run-specific activation workspace.
+  - Preserve an existing final directory in `.previous/<published-name>.<run-id>` and keep backup deletion outside the critical path.
+  - Use bounded retries with backoff around directory rename operations.
+  - Commit `publication.json` last and treat it as the marker of a fully published version.
+  - Keep the primitive dormant and support one directory artifact per activation until restart reconciliation and multi-artifact semantics are separately approved.
+- **Alternatives considered:**
+  - Always copy workspace output into hidden staging: simpler ownership, but duplicates the dominant million-file operation and defeats the performance objective.
+  - Activate directly from any hidden-looking path: faster but unsafe because an arbitrary path could bypass ownership and containment rules.
+  - Recount after rename: stronger repeated verification but needlessly rescans millions of files after a same-filesystem metadata operation.
+  - Delete the old directory during activation: saves space sooner but puts a potentially hours-long recursive deletion in the critical path and weakens rollback.
+  - Content hashes: stronger identity checking but materially increases scan cost and is not required for this initial directory boundary.
+- **Consequences:**
+  - Future QGIS integration can generate directly into the exact activation path and avoid a second full tree copy.
+  - Compatibility callers can still supply a workspace-staged directory at the cost of one copy into the activation filesystem.
+  - Interrupted states remain diagnosable, but automatic restart reconciliation and stale-lock recovery are separate required decisions before live integration.
+  - Old large backups consume space until a separate retention/cleanup policy is implemented.
+  - Real Windows SMB rename, disconnect, open-handle, and atomicity behavior remains unvalidated by hermetic tests.
+  - No schema migration, dependency, live pipeline behavior, or operator default changes in this dormant slice.
+- **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `tests/test_phase3_artifact_workspace.py`; Phase 3; ADR-003; ADR-014.

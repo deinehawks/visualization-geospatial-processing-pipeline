@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, with a tested dormant file-only publish activation boundary, crash reconciliation, fail-closed publication ownership, and manifest-aware map-export compatibility
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, the file-only publish activation helper, idempotent activation recovery, and a dormant same-survey publication lock
-- **Current task:** The dormant same-survey publication lock is implemented and tested; lock/activation integration and live RGBPipeline wiring remain intentionally deferred
-- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning, file-only activation, and activation reconciliation in shared/artifacts.py, fail-closed publication ownership in shared/publication_lock.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
-- **Next recommended task:** Wrap dormant file activation in exception-safe publication-lock ownership, still without calling it from RGBPipeline; keep directory/tile activation and stale-lock recovery separate
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, with tested dormant file and directory publish activation boundaries, crash evidence, fail-closed publication ownership, lock-owned activation composition, and manifest-aware map-export compatibility
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, file and directory publish activation helpers, file activation recovery, a dormant same-survey publication lock, and dormant exception-safe lock-owned activation composition
+- **Current task:** Dormant recoverable directory/tile activation supports compatibility-copy and exact-path zero-copy modes; live QGIS and RGBPipeline wiring remains intentionally deferred
+- **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning, file and directory activation, activation journaling/reconciliation, and lock-owned activation composition in shared/artifacts.py, fail-closed publication ownership in shared/publication_lock.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
+- **Next recommended task:** Review the dormant directory activation contract, then design explicit restart reconciliation for `previous_moved` and `activated` evidence before any live QGIS/RGBPipeline wiring; keep stale-lock recovery and cleanup separate
 
 ## Completed tasks
 
@@ -1562,3 +1562,97 @@ No database schema, dependency, pipeline stage, retry default, operator workflow
 - The read-verify-unlink release sequence cannot prevent every hostile or external replacement race without a stronger shared coordination service.
 - Real Windows SMB atomic exclusive-create, disconnect, reconnect, caching, and failover behavior is not covered by the hermetic suite.
 - Directory/tile activation, content hashes, backup retention, workspace cleanup, and live RGBPipeline integration remain deferred.
+## Phase 3 dormant lock-owned file publication activation
+
+Date: 2026-07-27.
+
+### Implemented behavior
+
+`shared/artifacts.py` now provides `activate_publication_with_lock()`, a dormant coordinator that composes the existing staged file activation helper with the fail-closed publication ownership helper.
+
+The coordinator now:
+
+- reads the staged publication manifest to identify the run and survey before claiming ownership;
+- acquires `.publication.lock` under the published survey `rgb` root before activation starts;
+- calls the existing file-only `activate_publication()` behavior unchanged while ownership is held;
+- releases only the acquired lock in a `finally` block after success or activation failure; and
+- fails before copying or replacing artifacts when another owner or malformed lock evidence is present.
+
+This slice intentionally remains helper-only. It does not call the coordinator from `RGBPipeline`, does not change the current workspace-to-legacy mirroring behavior, does not activate directory/tile artifacts, and does not add stale-lock takeover or cleanup behavior.
+
+### Files modified
+
+- Modified: `shared/artifacts.py`
+- Modified: `tests/test_phase3_artifact_workspace.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+
+No database schema, dependency, pipeline stage, retry default, operator workflow, WebODM behavior, QGIS/GDAL behavior, map-export behavior, network-share behavior, or existing publication behavior changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_with_lock"` - 3 passed, 24 deselected.
+
+### Remaining Phase 3 risks
+
+- The lock-owned activation coordinator is still not wired into `RGBPipeline`; stages continue their legacy compatibility mirrors.
+- Directory/tile activation was deferred at this milestone and is implemented by the later dormant zero-copy directory activation milestone below.
+- A crash after acquiring the lock still leaves a fail-closed lock that requires explicit operator recovery.
+- Real Windows SMB atomic-create, reconnect, rename, and copy semantics remain outside hermetic coverage.
+- Content hashes, backup retention, workspace cleanup, and broader survey/resource locking remain deferred.
+
+## Phase 3 dormant zero-copy directory/tile publication activation
+
+Date: 2026-07-27.
+
+### Implemented behavior
+
+`shared/artifacts.py` now extends the dormant `activate_publication()` boundary with one-directory activation while preserving the existing multi-file path unchanged.
+
+The directory path now:
+
+- exposes `publication_activation_path()` for the exact run-specific hidden generation path beside the final directory;
+- lets `prepare_publication()` record that exact generated directory in place when generation-tracked count/byte totals are supplied, avoiding a staging copy and preliminary recount;
+- copies a workspace-staged directory into `.activation/<run-id>/<name>.tmp` for generic compatibility;
+- skips `copytree` only when the staged directory exactly matches that approved hidden path;
+- validates file count and total bytes with one independent pre-activation scan;
+- rejects escaping paths, unsafe nesting, symlinks, Windows reparse points, and undeclared/missing required paths;
+- records `prepared`, `previous_moved`, `activated`, `committed`, `rolled_back`, and `failed` states in `activation.json`;
+- retries directory renames with bounded exponential backoff for transient Windows handle contention;
+- preserves an existing final directory under `.previous/<name>.<run-id>` and restores it when activation fails after the move;
+- performs only lightweight existence and required-path checks after the same-filesystem rename; and
+- writes `publication.json` after successful activation validation, then marks the journal committed.
+
+`PublicationArtifact` can carry generation-tracked expected file count/bytes and optional required paths, avoiding a preliminary manifest-building scan when future generators already know those metrics. Content hashes remain intentionally out of scope.
+
+This slice supports exactly one directory artifact per activation. Mixed file/directory and multi-directory transactions are rejected so cross-artifact rollback semantics are not guessed. The helper remains dormant: QGIS and `RGBPipeline` still use their current workspace-to-legacy compatibility behavior.
+
+### Files modified
+
+- Modified: `shared/artifacts.py`
+- Modified: `tests/test_phase3_artifact_workspace.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+- Modified: `docs/refactor/DECISIONS.md`
+
+No database schema, dependency, pipeline stage, operator default, WebODM behavior, QGIS/GDAL invocation, map-export behavior, network-share behavior, or live publication call site changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "directory or zero_copy or arbitrary_hidden"` - 13 passed, 26 deselected.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 39 passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_publication_lock.py tests\test_map_export_manifest_resolution.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 75 passed.
+- `python -m pytest --collect-only -q` - 128 tests collected.
+- `python -m pytest -q` - 128 passed.
+- `git diff --check` - passed.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, survey root, network share, external service, or destructive production operation was used.
+
+### Remaining Phase 3 risks
+
+- Automatic restart reconciliation is intentionally not implemented. `previous_moved` and `activated` journal states preserve sufficient evidence for a separately designed recovery slice but currently require diagnosis.
+- A process or host crash can still leave the fail-closed publication lock and requires the separately planned stale-lock recovery policy.
+- Real large-tree throughput, Windows SMB rename atomicity, antivirus/indexer interference, open tile-server handles, and disconnect behavior remain unvalidated outside the hermetic suite.
+- Content hashes, multi-directory transactions, backup retention/cleanup, workspace garbage collection, and live QGIS/RGBPipeline integration remain deferred.

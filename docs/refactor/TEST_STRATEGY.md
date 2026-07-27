@@ -752,3 +752,52 @@ Validation added for this slice:
 - `python -m pytest -q` - 113 passed
 
 This is hermetic helper-level coverage. It does not wire lock ownership into `activate_publication()` or `RGBPipeline`, terminate a real process, exercise stale-lock operator recovery, access network shares, validate Windows SMB atomicity, run the real pipeline, contact WebODM, execute QGIS/GDAL, or touch production storage.
+## Phase 3 lock-owned activation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `activate_publication_with_lock()` coordinator using only pytest-owned temporary workspace and survey roots with tiny placeholder files.
+
+Coverage proves that:
+
+- successful lock-owned activation publishes the file artifact and releases `.publication.lock`;
+- activation failure releases `.publication.lock` while leaving the previous published artifact unchanged; and
+- an existing owner blocks activation before any copy or replace operation starts.
+
+Validation added for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_with_lock"` - 3 passed
+
+This is hermetic helper-level coverage. It does not wire publication into `RGBPipeline`, run the real pipeline, contact WebODM, execute QGIS/GDAL, access network shares, validate Windows SMB lock behavior, activate directory/tile artifacts, or touch production storage.
+
+## Phase 3 zero-copy directory activation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant directory/tile activation primitive using only pytest-owned paths and tiny directory trees.
+
+Coverage proves that:
+
+- an external workspace-staged directory is copied once into the exact hidden activation path and activated;
+- `prepare_publication()` records an exact `.activation/<run-id>/<name>.tmp` source without invoking `copytree` when generation metrics are supplied, and activation also avoids `copytree`;
+- a merely hidden-looking path does not qualify for zero-copy mode;
+- existing final directories are retained under the run-specific `.previous` path;
+- copy, manifest validation, final-to-backup rename, and temp-to-final rename failures do not commit `publication.json`;
+- a temp-to-final failure restores the previous final directory;
+- journal transitions occur in order and `publication.json` is written after the `activated` state but before `committed`;
+- an independent directory recount runs exactly once and post-rename validation remains lightweight;
+- rename retries are bounded and use injected backoff;
+- symlink/reparse-point directory entries are rejected;
+- process-interruption simulations retain unambiguous `previous_moved` or `activated` evidence without falsely claiming commitment; and
+- all existing file activation, recovery, and lock-composition tests continue to pass.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 39 passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_publication_lock.py tests\test_map_export_manifest_resolution.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 75 passed
+- `python -m pytest --collect-only -q` - 128 collected
+- `python -m pytest -q` - 128 passed
+
+The suite does not generate real tiles, invoke QGIS/GDAL, access network shares, exercise SMB semantics, scan a million-file fixture, wire `RGBPipeline`, perform automatic restart recovery, clean old backups, or touch production storage.

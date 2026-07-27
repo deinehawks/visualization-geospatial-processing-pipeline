@@ -1,15 +1,21 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import stat
+import time
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Callable, Iterable, Literal
+
+from shared.publication_lock import acquire_publication_lock, release_publication_lock
 
 
 ArtifactKind = Literal["file", "directory"]
 
 PUBLICATION_MANIFEST_NAME = "publication.json"
+ACTIVATION_JOURNAL_NAME = "activation.json"
 
 
 @dataclass(frozen=True)
@@ -66,6 +72,9 @@ class PublicationArtifact:
     source_path: Path
     published_relative_path: Path
     kind: ArtifactKind
+    required_paths: tuple[str, ...] = ()
+    expected_file_count: int | None = None
+    expected_total_bytes: int | None = None
 
 
 def describe_run_workspace(layout: RunWorkspaceLayout) -> dict[str, str]:
@@ -148,16 +157,17 @@ def prepare_publication(
     published: PublishedSurveyLayout,
     artifacts: Iterable[PublicationArtifact],
     copy_file: Callable[[Path, Path], object] = shutil.copy2,
-    copy_tree: Callable[[Path, Path], object] = shutil.copytree,
+    copy_tree: Callable[[Path, Path], object] | None = None,
 ) -> Path:
     """Stage a complete publish set inside the run workspace.
 
-    This function intentionally does not modify the published survey tree. It
-    prepares a validated, manifest-backed publish set that a later activation
-    step can make visible under the legacy-compatible survey paths.
+    This function prepares a validated, manifest-backed publish set for later
+    activation. Directory output already generated at the exact run-specific
+    hidden activation path is recorded in place without copying it again.
     """
 
     workspace_root = workspace.root.resolve()
+    tree_copier = copy_tree or _copy_directory_tree
     staging_dir = workspace.publish / "staged"
     staging_resolved = staging_dir.resolve(strict=False)
     _require_within(staging_resolved, workspace_root)
@@ -177,21 +187,32 @@ def prepare_publication(
         else:
             raise ValueError(f"Unsupported artifact kind: {artifact.kind}")
 
-        destination = staging_dir / relative_path
-        _require_within(destination.resolve(strict=False), staging_resolved)
-        destination.parent.mkdir(parents=True, exist_ok=True)
-
-        if artifact.kind == "file":
-            copy_file(source_path, destination)
+        published_path = published.root / relative_path
+        direct_activation_source = (
+            artifact.kind == "directory"
+            and source_path.resolve(strict=False)
+            == publication_activation_path(
+                published_path=published_path,
+                run_id=run_id,
+            ).resolve(strict=False)
+        )
+        if direct_activation_source:
+            staged_path = source_path
         else:
-            copy_tree(source_path, destination)
+            staged_path = staging_dir / relative_path
+            _require_within(staged_path.resolve(strict=False), staging_resolved)
+            staged_path.parent.mkdir(parents=True, exist_ok=True)
+            if artifact.kind == "file":
+                copy_file(source_path, staged_path)
+            else:
+                tree_copier(source_path, staged_path)
 
         artifact_records.append(
             _artifact_record(
                 artifact=artifact,
                 source_path=source_path,
-                staged_path=destination,
-                published_path=published.root / relative_path,
+                staged_path=staged_path,
+                published_path=published_path,
                 relative_path=relative_path,
             )
         )
@@ -213,7 +234,77 @@ def prepare_publication(
 
 
 
+def publication_activation_path(*, published_path: Path, run_id: str) -> Path:
+    """Return the exact hidden same-filesystem directory activation path."""
+
+    run_component = _safe_path_component(run_id, "run_id")
+    final_path = Path(published_path).resolve(strict=False)
+    _reject_filesystem_root(final_path)
+    return (
+        final_path.parent
+        / ".activation"
+        / run_component
+        / f"{final_path.name}.tmp"
+    )
+
+
 def activate_publication(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    copy_file: Callable[[Path, Path], object] = shutil.copy2,
+    copy_tree: Callable[[Path, Path], object] | None = None,
+    replace_path: Callable[[Path, Path], object] | None = None,
+    directory_scan: Callable[[Path], tuple[int, int]] | None = None,
+    rename_attempts: int = 3,
+    rename_backoff_seconds: float = 0.05,
+    sleep: Callable[[float], object] = time.sleep,
+) -> Path:
+    """Activate a staged file set or one directory and commit metadata last.
+
+    File activation preserves its existing multi-file recovery behavior.
+    Directory activation supports a compatibility copy into the exact hidden
+    activation path and a zero-copy path when generation already occurred
+    there. Mixed file/directory publications remain intentionally unsupported.
+    """
+
+    manifest = _read_staged_publication_manifest(
+        workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME
+    )
+    records = manifest.get("artifacts")
+    if not isinstance(records, list) or not records:
+        raise ValueError("Publication manifest must contain at least one artifact")
+    kinds = {
+        record.get("kind") if isinstance(record, dict) else None
+        for record in records
+    }
+    if kinds == {"file"}:
+        return _activate_file_publication(
+            workspace=workspace,
+            published=published,
+            copy_file=copy_file,
+            replace_path=replace_path,
+        )
+    if kinds == {"directory"} and len(records) == 1:
+        return _activate_directory_publication(
+            workspace=workspace,
+            published=published,
+            manifest=manifest,
+            record=records[0],
+            copy_tree=copy_tree or _copy_directory_tree,
+            replace_path=replace_path or _replace_path,
+            directory_scan=directory_scan or _scan_directory_tree,
+            rename_attempts=rename_attempts,
+            rename_backoff_seconds=rename_backoff_seconds,
+            sleep=sleep,
+        )
+    raise ValueError(
+        "Directory publication currently supports exactly one directory "
+        "artifact and no mixed artifacts"
+    )
+
+
+def _activate_file_publication(
     *,
     workspace: RunWorkspaceLayout,
     published: PublishedSurveyLayout,
@@ -388,6 +479,534 @@ def activate_publication(
         raise
 
     return publication_manifest
+
+
+
+def _activate_directory_publication(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    manifest: dict[str, object],
+    record: object,
+    copy_tree: Callable[[Path, Path], object],
+    replace_path: Callable[[Path, Path], object],
+    directory_scan: Callable[[Path], tuple[int, int]],
+    rename_attempts: int,
+    rename_backoff_seconds: float,
+    sleep: Callable[[float], object],
+) -> Path:
+    """Activate one directory through a journaled same-filesystem rename."""
+
+    if rename_attempts < 1:
+        raise ValueError("rename_attempts must be at least 1")
+    if rename_backoff_seconds < 0:
+        raise ValueError("rename_backoff_seconds must be non-negative")
+
+    entry = _plan_directory_activation(
+        workspace=workspace,
+        published=published,
+        manifest=manifest,
+        record=record,
+    )
+    publication_manifest = published.publication_manifest.resolve(strict=False)
+    _require_within(publication_manifest, entry["published_root"])
+    if publication_manifest.exists() and not publication_manifest.is_file():
+        raise ValueError("Published publication manifest path must be a file")
+
+    if _active_directory_publication_matches(
+        publication_manifest=publication_manifest,
+        manifest=manifest,
+        entry=entry,
+    ):
+        return publication_manifest
+
+    source = entry["staged"]
+    source_lexical = entry["staged_lexical"]
+    temporary = entry["temporary"]
+    target = entry["target"]
+    backup = entry["backup"]
+    journal_path = entry["journal"]
+    activation_root = journal_path.parent
+    zero_copy = source == temporary
+
+    activation_root.mkdir(parents=True, exist_ok=True)
+    journal = {
+        "journal_version": 1,
+        "run_id": entry["run_id"],
+        "output_type": "directory",
+        "source": str(source),
+        "temporary": str(temporary),
+        "final": str(target),
+        "previous": str(backup),
+        "zero_copy": zero_copy,
+        "expected_file_count": entry["file_count"],
+        "expected_total_bytes": entry["size_bytes"],
+    }
+
+    try:
+        _reject_reparse_path(source_lexical, "Directory publication source")
+        if not source.is_dir():
+            raise FileNotFoundError(source)
+        if not zero_copy:
+            if temporary.exists():
+                raise FileExistsError(
+                    f"Directory activation temporary path already exists: {temporary}"
+                )
+            copy_tree(source, temporary)
+        if not temporary.is_dir():
+            raise OSError(
+                f"Directory activation copy did not create a directory: {temporary}"
+            )
+
+        actual_file_count, actual_total_bytes = directory_scan(temporary)
+        if actual_file_count != entry["file_count"]:
+            raise ValueError(
+                "Staged directory file count mismatch: "
+                f"expected {entry['file_count']}, got {actual_file_count}"
+            )
+        if actual_total_bytes != entry["size_bytes"]:
+            raise ValueError(
+                "Staged directory total size mismatch: "
+                f"expected {entry['size_bytes']}, got {actual_total_bytes}"
+            )
+        _validate_required_paths(temporary, entry["required_paths"])
+        _write_activation_journal(journal_path, journal, "prepared")
+    except Exception as exc:
+        _write_activation_journal(journal_path, journal, "failed", exc)
+        raise
+
+    had_previous = target.is_dir()
+    if backup.exists():
+        error = FileExistsError(
+            f"Directory activation backup path already exists: {backup}"
+        )
+        _write_activation_journal(journal_path, journal, "failed", error)
+        raise error
+
+    if had_previous:
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            _replace_with_retry(
+                target,
+                backup,
+                replace_path=replace_path,
+                attempts=rename_attempts,
+                backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+            )
+        except Exception as exc:
+            _write_activation_journal(journal_path, journal, "failed", exc)
+            raise
+
+    try:
+        _write_activation_journal(journal_path, journal, "previous_moved")
+        _replace_with_retry(
+            temporary,
+            target,
+            replace_path=replace_path,
+            attempts=rename_attempts,
+            backoff_seconds=rename_backoff_seconds,
+            sleep=sleep,
+        )
+        _write_activation_journal(journal_path, journal, "activated")
+        _lightweight_directory_check(
+            final_path=target,
+            temporary_path=temporary,
+            required_paths=entry["required_paths"],
+            publication_manifest=publication_manifest,
+            expected_run_id=entry["run_id"],
+        )
+
+        active_manifest = dict(manifest)
+        active_manifest["status"] = "published"
+        active_manifest["staged_manifest"] = str(entry["staged_manifest"])
+        active_manifest["previous_publication_manifest"] = None
+        active_record = dict(entry["record"])
+        active_record["published_path"] = str(target)
+        active_record["previous_published_path"] = (
+            str(backup) if had_previous else None
+        )
+        active_record["zero_copy_activation"] = zero_copy
+        active_manifest["artifacts"] = [active_record]
+        _write_json_atomic(publication_manifest, active_manifest)
+    except Exception as activation_error:
+        try:
+            _rollback_directory_activation(
+                target=target,
+                temporary=temporary,
+                backup=backup,
+                had_previous=had_previous,
+                replace_path=replace_path,
+                attempts=rename_attempts,
+                backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+            )
+            _unlink_owned_files(
+                [publication_manifest.with_name(f".{publication_manifest.name}.tmp")],
+                entry["published_root"],
+            )
+            _write_activation_journal(
+                journal_path,
+                journal,
+                "rolled_back",
+                activation_error,
+            )
+        except Exception as rollback_error:
+            _write_activation_journal(
+                journal_path,
+                journal,
+                "failed",
+                rollback_error,
+            )
+            raise RuntimeError(
+                "Directory publication activation failed and rollback was incomplete: "
+                f"{activation_error}"
+            ) from rollback_error
+        raise
+
+    try:
+        _write_activation_journal(journal_path, journal, "committed")
+    except Exception as exc:
+        raise RuntimeError(
+            "Directory publication committed but its activation journal could not "
+            "be marked committed"
+        ) from exc
+    return publication_manifest
+
+
+def _plan_directory_activation(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    manifest: dict[str, object],
+    record: object,
+) -> dict[str, object]:
+    if not isinstance(record, dict):
+        raise ValueError("Publication artifact record must be a JSON object")
+    if record.get("kind") != "directory":
+        raise ValueError("Directory activation requires a directory artifact")
+    if manifest.get("status") != "staged":
+        raise ValueError("Publication manifest status must be 'staged'")
+
+    workspace_root = workspace.root.resolve()
+    published_root = published.root.resolve(strict=False)
+    _reject_filesystem_root(workspace_root)
+    _reject_filesystem_root(published_root)
+    if _manifest_root(manifest, "workspace_root") != workspace_root:
+        raise ValueError("Publication manifest workspace_root does not match the workspace")
+    if _manifest_root(manifest, "published_root") != published_root:
+        raise ValueError("Publication manifest published_root does not match the published layout")
+
+    run_id = _safe_path_component(str(manifest.get("run_id", "")), "run_id")
+    relative_value = record.get("published_relative_path")
+    if not isinstance(relative_value, str) or not relative_value:
+        raise ValueError("Publication artifact published_relative_path is required")
+    relative_path = _validate_relative_path(Path(relative_value))
+    target = (published_root / relative_path).resolve(strict=False)
+    _require_within(target, published_root)
+    if target.exists() and not target.is_dir():
+        raise ValueError(f"Published directory target must be a directory: {target}")
+
+    staged_value = record.get("staged_path")
+    if not isinstance(staged_value, str) or not staged_value:
+        raise ValueError("Publication artifact staged_path is required")
+    staged_lexical = Path(os.path.abspath(staged_value))
+    staged = staged_lexical.resolve(strict=False)
+    temporary = publication_activation_path(published_path=target, run_id=run_id)
+    temporary = temporary.resolve(strict=False)
+    backup = (
+        target.parent / ".previous" / f"{target.name}.{run_id}"
+    ).resolve(strict=False)
+    journal = temporary.parent / ACTIVATION_JOURNAL_NAME
+
+    _require_within(temporary, published_root)
+    _require_within(backup, published_root)
+    _require_within(journal.resolve(strict=False), published_root)
+    if staged != temporary:
+        _require_within(staged, workspace_root)
+    _reject_directory_overlap(staged, target)
+    if staged != temporary:
+        _reject_directory_overlap(staged, temporary)
+
+    if _required_manifest_path(record, "published_path") != target:
+        raise ValueError("Publication artifact published_path does not match its relative path")
+    file_count = _required_non_negative_int(record, "file_count", "directory")
+    size_bytes = _required_non_negative_int(record, "size_bytes", "directory")
+    if "total_bytes" in record:
+        total_bytes = _required_non_negative_int(record, "total_bytes", "directory")
+        if total_bytes != size_bytes:
+            raise ValueError("Directory artifact total_bytes must match size_bytes")
+    required_paths = _manifest_required_paths(record)
+
+    _reject_reparse_components(
+        target.parent,
+        Path(os.path.abspath(published.root)),
+        "Published directory path",
+    )
+    _reject_reparse_components(
+        Path(os.path.abspath(temporary)),
+        Path(os.path.abspath(published.root)),
+        "Directory activation temporary path",
+    )
+    _reject_reparse_components(
+        Path(os.path.abspath(backup)),
+        Path(os.path.abspath(published.root)),
+        "Directory activation backup path",
+    )
+    _reject_reparse_components(
+        staged_lexical,
+        (
+            Path(os.path.abspath(published.root))
+            if staged == temporary
+            else Path(os.path.abspath(workspace.root))
+        ),
+        "Directory publication source",
+    )
+
+    return {
+        "record": dict(record),
+        "run_id": run_id,
+        "workspace_root": workspace_root,
+        "published_root": published_root,
+        "staged_manifest": (workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME).resolve(strict=False),
+        "staged": staged,
+        "staged_lexical": staged_lexical,
+        "target": target,
+        "temporary": temporary,
+        "backup": backup,
+        "journal": journal,
+        "file_count": file_count,
+        "size_bytes": size_bytes,
+        "required_paths": required_paths,
+    }
+
+
+def _active_directory_publication_matches(
+    *,
+    publication_manifest: Path,
+    manifest: dict[str, object],
+    entry: dict[str, object],
+) -> bool:
+    if not publication_manifest.is_file():
+        return False
+    active = _read_publication_manifest(
+        publication_manifest,
+        "published publication manifest",
+    )
+    if active.get("run_id") != manifest.get("run_id"):
+        return False
+    if active.get("status") != "published":
+        raise ValueError("Existing publication for this run is not marked published")
+    if active.get("survey_id") != manifest.get("survey_id"):
+        raise ValueError("Existing publication survey_id does not match the staged manifest")
+    if _manifest_root(active, "published_root") != entry["published_root"]:
+        raise ValueError("Existing publication root does not match the published layout")
+    records = active.get("artifacts")
+    if not isinstance(records, list) or len(records) != 1 or not isinstance(records[0], dict):
+        raise ValueError("Existing directory publication artifact set does not match")
+    active_record = records[0]
+    if active_record.get("kind") != "directory":
+        raise ValueError("Existing publication artifact is not a directory")
+    if _required_manifest_path(active_record, "published_path") != entry["target"]:
+        raise ValueError("Existing publication directory target does not match")
+    if active_record.get("file_count") != entry["file_count"]:
+        raise ValueError("Existing publication directory file count record does not match")
+    if active_record.get("size_bytes") != entry["size_bytes"]:
+        raise ValueError("Existing publication directory size record does not match")
+    if not entry["target"].is_dir():
+        raise ValueError("Existing publication directory is missing")
+    _validate_required_paths(entry["target"], entry["required_paths"])
+    return True
+
+
+def _rollback_directory_activation(
+    *,
+    target: Path,
+    temporary: Path,
+    backup: Path,
+    had_previous: bool,
+    replace_path: Callable[[Path, Path], object],
+    attempts: int,
+    backoff_seconds: float,
+    sleep: Callable[[float], object],
+) -> None:
+    if target.is_dir():
+        if temporary.exists():
+            raise RuntimeError(
+                "Directory rollback temporary path is already occupied"
+            )
+        _replace_with_retry(
+            target,
+            temporary,
+            replace_path=replace_path,
+            attempts=attempts,
+            backoff_seconds=backoff_seconds,
+            sleep=sleep,
+        )
+    elif target.exists():
+        raise RuntimeError("Directory rollback target is not a directory")
+    if had_previous:
+        if not backup.is_dir():
+            raise RuntimeError("Directory rollback lost the previous publication")
+        _replace_with_retry(
+            backup,
+            target,
+            replace_path=replace_path,
+            attempts=attempts,
+            backoff_seconds=backoff_seconds,
+            sleep=sleep,
+        )
+
+
+def _replace_with_retry(
+    source: Path,
+    destination: Path,
+    *,
+    replace_path: Callable[[Path, Path], object],
+    attempts: int,
+    backoff_seconds: float,
+    sleep: Callable[[float], object],
+) -> None:
+    for attempt in range(attempts):
+        try:
+            replace_path(source, destination)
+            return
+        except OSError:
+            if attempt + 1 >= attempts:
+                raise
+            sleep(backoff_seconds * (2 ** attempt))
+
+
+def _write_activation_journal(
+    journal_path: Path,
+    journal: dict[str, object],
+    status: str,
+    error: Exception | None = None,
+) -> None:
+    payload = dict(journal)
+    payload["status"] = status
+    if error is not None:
+        payload["error_type"] = type(error).__name__
+        payload["error_message"] = str(error)
+    _write_json_atomic(journal_path, payload)
+
+
+def _lightweight_directory_check(
+    *,
+    final_path: Path,
+    temporary_path: Path,
+    required_paths: tuple[Path, ...],
+    publication_manifest: Path,
+    expected_run_id: str,
+) -> None:
+    if not final_path.is_dir():
+        raise OSError(f"Activated directory is missing: {final_path}")
+    if temporary_path.exists():
+        raise OSError(
+            f"Directory activation temporary path still exists: {temporary_path}"
+        )
+    _validate_required_paths(final_path, required_paths)
+    if publication_manifest.is_file():
+        active = _read_publication_manifest(
+            publication_manifest,
+            "published publication manifest",
+        )
+        if active.get("run_id") == expected_run_id:
+            raise RuntimeError("Publication manifest was committed before validation")
+
+
+def _manifest_required_paths(record: dict[str, object]) -> tuple[Path, ...]:
+    value = record.get("required_paths", [])
+    if not isinstance(value, list):
+        raise ValueError("Directory artifact required_paths must be a list")
+    required: list[Path] = []
+    for item in value:
+        if not isinstance(item, str) or not item:
+            raise ValueError("Directory artifact required_paths entries must be strings")
+        required.append(_validate_relative_path(Path(item)))
+    return tuple(required)
+
+
+def _validate_required_paths(root: Path, required_paths: tuple[Path, ...]) -> None:
+    for relative_path in required_paths:
+        candidate = root / relative_path
+        _require_within(candidate.resolve(strict=False), root.resolve(strict=False))
+        _reject_reparse_components(
+            Path(os.path.abspath(candidate)),
+            Path(os.path.abspath(root)),
+            "Required directory publication path",
+        )
+        if not candidate.exists():
+            raise ValueError(
+                f"Required directory publication path is missing: {relative_path.as_posix()}"
+            )
+
+
+def _required_non_negative_int(
+    record: dict[str, object],
+    field_name: str,
+    artifact_label: str,
+) -> int:
+    value = record.get(field_name)
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(
+            f"Publication {artifact_label} artifact {field_name} must be a non-negative integer"
+        )
+    return value
+
+
+def _reject_directory_overlap(source: Path, destination: Path) -> None:
+    if source == destination:
+        raise ValueError("Directory publication source and destination must differ")
+    if _path_is_within(source, destination) or _path_is_within(destination, source):
+        raise ValueError("Directory publication source and destination must not be nested")
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def activate_publication_with_lock(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    copy_file: Callable[[Path, Path], object] = shutil.copy2,
+    replace_path: Callable[[Path, Path], object] | None = None,
+    owner_token: str | None = None,
+    created_at: str | None = None,
+) -> Path:
+    """Activate a staged publication while holding survey publication ownership.
+
+    This helper composes the existing dormant file activation and fail-closed
+    publication lock. It remains dormant until a later RGBPipeline integration
+    slice calls it.
+    """
+
+    staged_manifest = _read_staged_publication_manifest(
+        workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME
+    )
+    run_id = _required_manifest_text(staged_manifest, "run_id")
+    survey_id = _required_manifest_text(staged_manifest, "survey_id")
+    lock = acquire_publication_lock(
+        published_root=published.root,
+        run_id=run_id,
+        survey_id=survey_id,
+        owner_token=owner_token,
+        created_at=created_at,
+    )
+    try:
+        return activate_publication(
+            workspace=workspace,
+            published=published,
+            copy_file=copy_file,
+            replace_path=replace_path,
+        )
+    finally:
+        release_publication_lock(lock)
 
 
 def _active_publication_matches_staged(
@@ -670,6 +1289,13 @@ def _manifest_root(manifest: dict[str, object], field_name: str) -> Path:
     return Path(value).resolve(strict=False)
 
 
+def _required_manifest_text(manifest: dict[str, object], field_name: str) -> str:
+    value = manifest.get(field_name)
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"Publication manifest {field_name} is required")
+    return value
+
+
 def _plan_file_activation(
     *,
     record: object,
@@ -760,6 +1386,97 @@ def _replace_path(source: Path, destination: Path) -> None:
     source.replace(destination)
 
 
+def _copy_directory_tree(source: Path, destination: Path) -> None:
+    """Copy a directory without following symlinks or Windows reparse points."""
+
+    source = Path(source)
+    destination = Path(destination)
+    _reject_reparse_path(source, "Directory publication source")
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    if destination.exists():
+        raise FileExistsError(destination)
+    destination.mkdir(parents=False)
+
+    def copy_entries(source_dir: Path, destination_dir: Path) -> None:
+        with os.scandir(source_dir) as entries:
+            for entry in entries:
+                entry_stat = _safe_directory_entry_stat(entry)
+                source_entry = Path(entry.path)
+                destination_entry = destination_dir / entry.name
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    destination_entry.mkdir()
+                    copy_entries(source_entry, destination_entry)
+                elif stat.S_ISREG(entry_stat.st_mode):
+                    shutil.copy2(source_entry, destination_entry)
+                else:
+                    raise ValueError(
+                        f"Unsupported directory publication entry: {source_entry}"
+                    )
+
+    copy_entries(source, destination)
+
+
+def _scan_directory_tree(root: Path) -> tuple[int, int]:
+    """Perform one independent count/size scan and reject unsafe entries."""
+
+    root = Path(root)
+    _reject_reparse_path(root, "Directory publication root")
+    if not root.is_dir():
+        raise FileNotFoundError(root)
+    file_count = 0
+    total_bytes = 0
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                entry_stat = _safe_directory_entry_stat(entry)
+                if stat.S_ISDIR(entry_stat.st_mode):
+                    pending.append(Path(entry.path))
+                elif stat.S_ISREG(entry_stat.st_mode):
+                    file_count += 1
+                    total_bytes += entry_stat.st_size
+                else:
+                    raise ValueError(
+                        f"Unsupported directory publication entry: {entry.path}"
+                    )
+    return file_count, total_bytes
+
+
+def _safe_directory_entry_stat(entry: os.DirEntry[str]) -> os.stat_result:
+    entry_stat = entry.stat(follow_symlinks=False)
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(entry_stat, "st_file_attributes", 0)
+    if stat.S_ISLNK(entry_stat.st_mode) or file_attributes & reparse_flag:
+        raise ValueError(
+            f"Directory publication does not support symlinks or reparse points: {entry.path}"
+        )
+    return entry_stat
+
+
+def _reject_reparse_path(path: Path, label: str) -> None:
+    try:
+        path_stat = Path(path).lstat()
+    except FileNotFoundError:
+        return
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    file_attributes = getattr(path_stat, "st_file_attributes", 0)
+    if stat.S_ISLNK(path_stat.st_mode) or file_attributes & reparse_flag:
+        raise ValueError(f"{label} must not be a symlink or reparse point: {path}")
+
+
+def _reject_reparse_components(path: Path, owner_root: Path, label: str) -> None:
+    path = Path(os.path.abspath(path))
+    owner_root = Path(os.path.abspath(owner_root))
+    _require_within(path, owner_root)
+    current = owner_root
+    _reject_reparse_path(current, label)
+    for part in path.relative_to(owner_root).parts:
+        current = current / part
+        _reject_reparse_path(current, label)
+
+
 def _artifact_record(
     *,
     artifact: PublicationArtifact,
@@ -779,9 +1496,32 @@ def _artifact_record(
     if artifact.kind == "file":
         record["size_bytes"] = staged_path.stat().st_size
     else:
-        files = [path for path in staged_path.rglob("*") if path.is_file()]
-        record["file_count"] = len(files)
-        record["size_bytes"] = sum(path.stat().st_size for path in files)
+        expected_count = artifact.expected_file_count
+        expected_bytes = artifact.expected_total_bytes
+        if (expected_count is None) != (expected_bytes is None):
+            raise ValueError(
+                "Directory artifacts must provide both expected_file_count and "
+                "expected_total_bytes, or neither"
+            )
+        if expected_count is None:
+            expected_count, expected_bytes = _scan_directory_tree(staged_path)
+        if (
+            isinstance(expected_count, bool)
+            or not isinstance(expected_count, int)
+            or expected_count < 0
+            or isinstance(expected_bytes, bool)
+            or not isinstance(expected_bytes, int)
+            or expected_bytes < 0
+        ):
+            raise ValueError("Directory artifact expected metrics must be non-negative integers")
+        required_paths = tuple(
+            _validate_relative_path(Path(value)) for value in artifact.required_paths
+        )
+        _validate_required_paths(staged_path, required_paths)
+        record["file_count"] = expected_count
+        record["size_bytes"] = expected_bytes
+        record["total_bytes"] = expected_bytes
+        record["required_paths"] = [path.as_posix() for path in required_paths]
     return record
 
 
