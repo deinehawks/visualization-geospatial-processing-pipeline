@@ -866,3 +866,47 @@ Validation for the acceptance gate:
 - `git diff --check` - passed
 
 Distinct-volume, Windows SMB, real large-tree, live pipeline, QGIS/GDAL, WebODM, and production-storage validation remain excluded and must be explicitly authorized in a controlled environment.
+## Phase 3 mixed publication-set activation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `activate_publication_set_with_lock()` coordinator using only pytest-owned roots, tiny files, tiny directory trees, injected copy/replace callables, and the existing publication lock helper.
+
+Coverage proves that:
+
+- one lock-owned activation can publish a mixed file plus directory/tile artifact set and commit one authoritative `publication.json`;
+- the set-level journal reaches `committed` only after the manifest switch;
+- a caught failure during the final manifest switch rolls both file and directory targets back to the previous visible publication;
+- repeated activation for an already committed mixed set is idempotent and performs no copy/replace work; and
+- an existing publication owner blocks mixed activation before any artifact mutation starts.
+
+The original `activate_publication()` mixed-set rejection remains covered so older primitive contracts cannot silently expand.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_set"` - 4 passed, 52 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 56 passed
+
+This coverage does not run the real pipeline, generate real tiles, invoke QGIS/GDAL, contact WebODM, access SMB/network shares, validate real Windows rename behavior, reconcile an interrupted mixed-set journal, clean backups, or touch production storage.
+## Phase 3 mixed publication-set reconciliation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `reconcile_publication_set()` helper using pytest-owned roots, tiny file/directory artifacts, injected replace behavior, and simulated `BaseException` process interruptions.
+
+Coverage proves that:
+
+- a prepared mixed-set journal can roll back a partial artifact activation when `publication.json` still names the previous run;
+- an activated mixed-set journal can roll back all visible candidates when the authoritative manifest did not switch;
+- an activated mixed-set journal is finalized as committed when `publication.json` already names the current run;
+- changed active manifests fail closed without moving evidence; and
+- the existing mixed activation, lock ownership, and old mixed-set rejection tests continue to pass.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_set"` - 8 passed, 52 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 60 passed
+
+This coverage does not terminate a real process, recover a real stale lock, generate real tiles, invoke QGIS/GDAL, contact WebODM, access SMB/network shares, validate real Windows rename semantics, clean backups, or touch production storage.

@@ -73,7 +73,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, ADR-013, and ADR-014 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, and ADR-018 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -302,20 +302,30 @@ ADR-001, ADR-002, ADR-003, ADR-013, and ADR-014 are accepted. ADR-004 through AD
 
 - **Decision ID:** ADR-018
 - **Date:** 2026-07-27
-- **Status:** Pending
+- **Status:** Accepted
+- **Approval context:** After the publication-protocol acceptance review identified mixed file/directory activation as the blocker before live RGBPipeline wiring, the user approved resolving that prerequisite first.
 - **Context:**
   - The accepted file protocol commits multiple files atomically enough for its recovery model, while the accepted directory protocol commits exactly one large directory through a journaled rename.
   - A real RGB run produces both kinds plus multiple logical artifact families.
-  - Each current activation writes `publication.json` from its own staged manifest, so independent subset activation can discard previously listed artifacts or expose a mixed-run view.
-  - Live RGBPipeline integration must not begin until the complete run-level publication authority and crash semantics are unambiguous.
-- **Decision:** Pending. Select one complete publication-set model and specify its journal states, manifest authority, rollback/reconciliation rules, locking order, compatibility behavior, and opt-in rollout before implementation.
+  - Each old activation writes `publication.json` from its own staged manifest, so independent subset activation can discard previously listed artifacts or expose a mixed-run view.
+  - Live RGBPipeline integration must not begin until one complete run-level publication authority exists.
+- **Decision:**
+  - Add a separate dormant `activate_publication_set_with_lock()` coordinator for complete publication generations instead of broadening `activate_publication()`.
+  - Acquire the existing survey publication lock before any mixed-set mutation and release it in a `finally` block.
+  - Validate the complete staged manifest and all artifact targets up front, including duplicate/nested target rejection.
+  - Stage file artifacts to target-adjacent temporary files and directory artifacts to the exact hidden same-filesystem activation path unless generation already placed them there.
+  - Write one set-level journal at `.activation/<run-id>/publication-set.json` and write one authoritative `publication.json` only after every artifact target has been activated.
+  - Roll back all activated artifacts on caught activation failure before the final manifest switch, restoring the prior visible targets and leaving the prior manifest authoritative.
+  - Treat any existing non-committed publication-set journal as requiring explicit reconciliation before retrying activation.
+  - Reconcile interrupted mixed-set journals by treating `publication.json` as authoritative: finalize when it names the current run, otherwise roll physical moves back to the prior committed view using only exact recorded paths.
+  - Keep current RGBPipeline workspace-to-legacy mirrors as the production default until cleanup and controlled filesystem validation are complete.
 - **Alternatives considered:**
-  - One journaled mixed file/directory transaction that stages file siblings and a directory generation before a single manifest commit.
-  - One versioned generation directory containing the complete artifact set, made active through one pointer or directory switch.
-  - Incremental per-artifact activation with manifest merge; currently not accepted because a crash can expose a mixed-run or incomplete manifest without an additional transaction model.
+  - One versioned generation directory containing the complete artifact set, made active through one pointer or directory switch. Stronger atomicity, but broader because legacy consumers expect stable concrete file and directory paths.
+  - Incremental per-artifact activation with manifest merge. Rejected because a crash can expose a mixed-run or incomplete manifest without an additional transaction model.
+  - Broadening `activate_publication()` directly. Rejected to preserve the existing constrained file-only and one-directory contracts while the new set coordinator matures.
 - **Consequences:**
-  - Live publication wiring remains blocked while this decision is pending.
-  - Existing workspace-to-legacy mirrors remain the default compatibility behavior.
-  - The accepted dormant primitives remain valid building blocks and should not be broadened speculatively.
-  - Retention/cleanup and real filesystem validation remain separate follow-up requirements.
-- **Related files or issues:** R02, R07, R10; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `docs/refactor/PHASE3_PUBLICATION_ACCEPTANCE_REVIEW.md`; ADR-003; ADR-015; ADR-016; ADR-017; Phase 3.
+  - The mixed file/directory publication authority now has one lock, one journal, and one final manifest commit in dormant code.
+  - Existing publication primitives and live pipeline behavior remain backward compatible.
+  - Interrupted mixed-set journals can now be reconciled by the dormant helper, while malformed, changed, failed, or ambiguous evidence still fails closed.
+  - Retention/cleanup, real Windows/SMB validation, and live RGBPipeline activation remain separate follow-up requirements.
+- **Related files or issues:** R02, R07, R10; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `docs/refactor/PHASE3_PUBLICATION_ACCEPTANCE_REVIEW.md`; ADR-003; ADR-014; ADR-015; ADR-016; ADR-017; Phase 3.

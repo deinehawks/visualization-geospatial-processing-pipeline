@@ -1359,6 +1359,860 @@ def activate_publication_with_lock(
         release_publication_lock(lock)
 
 
+def activate_publication_set_with_lock(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    copy_file: Callable[[Path, Path], object] = shutil.copy2,
+    copy_tree: Callable[[Path, Path], object] | None = None,
+    replace_path: Callable[[Path, Path], object] | None = None,
+    directory_scan: Callable[[Path], tuple[int, int]] | None = None,
+    rename_attempts: int = 3,
+    rename_backoff_seconds: float = 0.05,
+    sleep: Callable[[float], object] = time.sleep,
+    owner_token: str | None = None,
+    created_at: str | None = None,
+) -> Path:
+    """Activate a complete mixed file/directory publication under one lock.
+
+    This dormant Phase 3 coordinator publishes one complete staged manifest as
+    a single generation. It supports mixed file and directory artifacts, writes
+    one set-level activation journal, replaces all visible artifacts before
+    committing one authoritative publication manifest, and releases publication
+    ownership in a finally block.
+    """
+
+    staged_manifest = _read_staged_publication_manifest(
+        workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME
+    )
+    run_id = _required_manifest_text(staged_manifest, "run_id")
+    survey_id = _required_manifest_text(staged_manifest, "survey_id")
+    lock = acquire_publication_lock(
+        published_root=published.root,
+        run_id=run_id,
+        survey_id=survey_id,
+        owner_token=owner_token,
+        created_at=created_at,
+    )
+    try:
+        return _activate_publication_set(
+            workspace=workspace,
+            published=published,
+            manifest=staged_manifest,
+            copy_file=copy_file,
+            copy_tree=copy_tree or _copy_directory_tree,
+            replace_path=replace_path or _replace_path,
+            directory_scan=directory_scan or _scan_directory_tree,
+            rename_attempts=rename_attempts,
+            rename_backoff_seconds=rename_backoff_seconds,
+            sleep=sleep,
+        )
+    finally:
+        release_publication_lock(lock)
+
+
+def _activate_publication_set(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    manifest: dict[str, object],
+    copy_file: Callable[[Path, Path], object],
+    copy_tree: Callable[[Path, Path], object],
+    replace_path: Callable[[Path, Path], object],
+    directory_scan: Callable[[Path], tuple[int, int]],
+    rename_attempts: int,
+    rename_backoff_seconds: float,
+    sleep: Callable[[float], object],
+) -> Path:
+    if rename_attempts < 1:
+        raise ValueError("rename_attempts must be at least 1")
+    if rename_backoff_seconds < 0:
+        raise ValueError("rename_backoff_seconds must be non-negative")
+
+    workspace_root = workspace.root.resolve()
+    published_root = published.root.resolve(strict=False)
+    staged_root = (workspace.publish / "staged").resolve(strict=False)
+    _reject_filesystem_root(workspace_root)
+    _reject_filesystem_root(published_root)
+    _require_within(staged_root, workspace_root)
+    if manifest.get("status") != "staged":
+        raise ValueError("Publication manifest status must be 'staged'")
+    if _manifest_root(manifest, "workspace_root") != workspace_root:
+        raise ValueError("Publication manifest workspace_root does not match the workspace")
+    if _manifest_root(manifest, "published_root") != published_root:
+        raise ValueError("Publication manifest published_root does not match the published layout")
+
+    records = manifest.get("artifacts")
+    if not isinstance(records, list) or not records:
+        raise ValueError("Publication manifest must contain at least one artifact")
+
+    run_id = _safe_path_component(str(manifest.get("run_id", "")), "run_id")
+    entries: list[dict[str, object]] = []
+    seen_targets: set[Path] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("Publication artifact record must be a JSON object")
+        kind = record.get("kind")
+        if kind == "file":
+            entry = _plan_file_activation(
+                record=record,
+                run_id=run_id,
+                staged_root=staged_root,
+                published_root=published_root,
+            )
+        elif kind == "directory":
+            entry = _plan_directory_activation(
+                workspace=workspace,
+                published=published,
+                manifest=manifest,
+                record=record,
+            )
+        else:
+            raise ValueError(f"Unsupported publication artifact kind: {kind}")
+        entry["kind"] = kind
+        target = entry["target"]
+        if target in seen_targets:
+            raise ValueError(f"Duplicate published artifact path: {target}")
+        for existing in seen_targets:
+            if _path_is_within(target, existing) or _path_is_within(existing, target):
+                raise ValueError("Published artifact targets must not be nested")
+        seen_targets.add(target)
+        entries.append(entry)
+
+    publication_manifest = published.publication_manifest.resolve(strict=False)
+    _require_within(publication_manifest, published_root)
+    if publication_manifest.exists() and not publication_manifest.is_file():
+        raise ValueError("Published publication manifest path must be a file")
+
+    if _active_publication_set_matches(
+        publication_manifest=publication_manifest,
+        manifest=manifest,
+        entries=entries,
+        published_root=published_root,
+    ):
+        return publication_manifest
+
+    activation_root = published_root / ".activation" / run_id
+    journal_path = activation_root / "publication-set.json"
+    previous_manifest = publication_manifest.with_name(
+        f".{publication_manifest.name}.{run_id}.previous"
+    )
+    manifest_candidate = publication_manifest.with_name(
+        f".{publication_manifest.name}.{run_id}.publishing"
+    )
+    manifest_candidate_temp = manifest_candidate.with_name(
+        f".{manifest_candidate.name}.tmp"
+    )
+    if journal_path.exists():
+        existing_journal = _read_activation_journal(journal_path)
+        if existing_journal.get("status") != "committed":
+            raise RuntimeError("Mixed publication-set journal requires reconciliation")
+    reserved_paths = [previous_manifest, manifest_candidate, manifest_candidate_temp]
+    for entry in entries:
+        temporary = entry["temporary"]
+        backup = entry["backup"]
+        if entry["kind"] == "directory" and temporary == entry["staged"]:
+            reserved_paths.append(backup)
+        else:
+            reserved_paths.extend([temporary, backup])
+    for path in reserved_paths:
+        if path.exists():
+            raise FileExistsError(f"Publication set activation path already exists: {path}")
+
+    previous_publication_run_id = _active_publication_run_id(publication_manifest)
+    for entry in entries:
+        entry["had_previous_at_start"] = (
+            entry["target"].is_file()
+            if entry["kind"] == "file"
+            else entry["target"].is_dir()
+        )
+    journal = {
+        "journal_version": 1,
+        "run_id": run_id,
+        "survey_id": manifest.get("survey_id"),
+        "output_type": "publication_set",
+        "previous_publication_run_id": previous_publication_run_id,
+        "publication_manifest": str(publication_manifest),
+        "previous_publication_manifest": str(previous_manifest),
+        "artifacts": [_publication_set_journal_record(entry) for entry in entries],
+    }
+    activation_root.mkdir(parents=True, exist_ok=True)
+
+    try:
+        for entry in entries:
+            if entry["kind"] == "file":
+                entry["target"].parent.mkdir(parents=True, exist_ok=True)
+                copy_file(entry["staged"], entry["temporary"])
+                if not entry["temporary"].is_file():
+                    raise OSError(
+                        f"Publication copy did not create a file: {entry['temporary']}"
+                    )
+                if entry["temporary"].stat().st_size != entry["size_bytes"]:
+                    raise OSError(
+                        f"Publication copy size mismatch: {entry['temporary']}"
+                    )
+            else:
+                _prepare_publication_set_directory(
+                    entry=entry,
+                    copy_tree=copy_tree,
+                    directory_scan=directory_scan,
+                )
+        _write_activation_journal(journal_path, journal, "prepared")
+        if publication_manifest.is_file():
+            copy_file(publication_manifest, previous_manifest)
+
+        active_manifest = dict(manifest)
+        active_manifest["status"] = "published"
+        active_manifest["staged_manifest"] = str(
+            workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME
+        )
+        active_manifest["previous_publication_manifest"] = (
+            str(previous_manifest) if previous_manifest.is_file() else None
+        )
+        active_manifest["activation_journal"] = str(journal_path)
+        active_manifest["artifacts"] = [
+            _publication_set_active_record(entry) for entry in entries
+        ]
+        _write_json_atomic(manifest_candidate, active_manifest)
+    except Exception as exc:
+        _write_activation_journal(journal_path, journal, "failed", exc)
+        _cleanup_publication_set_prepared_paths(
+            entries=entries,
+            paths=[previous_manifest, manifest_candidate, manifest_candidate_temp],
+            published_root=published_root,
+        )
+        raise
+
+    activated: list[dict[str, object]] = []
+    try:
+        for entry in entries:
+            target = entry["target"]
+            backup = entry["backup"]
+            had_previous = bool(entry["had_previous_at_start"])
+            if target.exists() and (
+                (entry["kind"] == "file" and not target.is_file())
+                or (entry["kind"] == "directory" and not target.is_dir())
+            ):
+                raise ValueError(f"Published artifact target has the wrong type: {target}")
+            if had_previous:
+                if entry["kind"] == "directory":
+                    backup.parent.mkdir(parents=True, exist_ok=True)
+                    _replace_with_retry(
+                        target,
+                        backup,
+                        replace_path=replace_path,
+                        attempts=rename_attempts,
+                        backoff_seconds=rename_backoff_seconds,
+                        sleep=sleep,
+                    )
+                else:
+                    replace_path(target, backup)
+            state = {
+                "entry": entry,
+                "had_previous": had_previous,
+                "installed": False,
+            }
+            activated.append(state)
+            if entry["kind"] == "directory":
+                _replace_with_retry(
+                    entry["temporary"],
+                    target,
+                    replace_path=replace_path,
+                    attempts=rename_attempts,
+                    backoff_seconds=rename_backoff_seconds,
+                    sleep=sleep,
+                )
+                _validate_required_paths(target, entry["required_paths"])
+            else:
+                replace_path(entry["temporary"], target)
+            state["installed"] = True
+        _write_activation_journal(journal_path, journal, "activated")
+        replace_path(manifest_candidate, publication_manifest)
+    except Exception as activation_error:
+        try:
+            _rollback_publication_set_activation(
+                activated=activated,
+                replace_path=replace_path,
+                rename_attempts=rename_attempts,
+                rename_backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+                published_root=published_root,
+            )
+            _cleanup_publication_set_prepared_paths(
+                entries=entries,
+                paths=[manifest_candidate, manifest_candidate_temp],
+                published_root=published_root,
+            )
+            _write_activation_journal(
+                journal_path,
+                journal,
+                "rolled_back",
+                activation_error,
+            )
+        except Exception as rollback_error:
+            _write_activation_journal(journal_path, journal, "failed", rollback_error)
+            raise RuntimeError(
+                "Publication set activation failed and rollback was incomplete: "
+                f"{activation_error}"
+            ) from rollback_error
+        raise
+
+    _write_activation_journal(journal_path, journal, "committed")
+    return publication_manifest
+
+
+def _prepare_publication_set_directory(
+    *,
+    entry: dict[str, object],
+    copy_tree: Callable[[Path, Path], object],
+    directory_scan: Callable[[Path], tuple[int, int]],
+) -> None:
+    source = entry["staged"]
+    temporary = entry["temporary"]
+    _reject_reparse_path(entry["staged_lexical"], "Directory publication source")
+    if not source.is_dir():
+        raise FileNotFoundError(source)
+    if source != temporary:
+        if temporary.exists():
+            raise FileExistsError(
+                f"Directory activation temporary path already exists: {temporary}"
+            )
+        temporary.parent.mkdir(parents=True, exist_ok=True)
+        copy_tree(source, temporary)
+    if not temporary.is_dir():
+        raise OSError(
+            f"Directory activation copy did not create a directory: {temporary}"
+        )
+    actual_file_count, actual_total_bytes = directory_scan(temporary)
+    if actual_file_count != entry["file_count"]:
+        raise ValueError(
+            "Staged directory file count mismatch: "
+            f"expected {entry['file_count']}, got {actual_file_count}"
+        )
+    if actual_total_bytes != entry["size_bytes"]:
+        raise ValueError(
+            "Staged directory total size mismatch: "
+            f"expected {entry['size_bytes']}, got {actual_total_bytes}"
+        )
+    _validate_required_paths(temporary, entry["required_paths"])
+
+
+def _publication_set_journal_record(entry: dict[str, object]) -> dict[str, object]:
+    return {
+        "kind": entry["kind"],
+        "published_relative_path": entry["record"]["published_relative_path"],
+        "staged": str(entry["staged"]),
+        "temporary": str(entry["temporary"]),
+        "final": str(entry["target"]),
+        "previous": str(entry["backup"]),
+        "file_count": entry.get("file_count"),
+        "size_bytes": entry["size_bytes"],
+        "required_paths": [
+            path.as_posix() for path in entry.get("required_paths", ())
+        ],
+        "zero_copy": entry["kind"] == "directory" and entry["staged"] == entry["temporary"],
+        "had_previous": bool(entry.get("had_previous_at_start", False)),
+    }
+
+
+def _publication_set_active_record(entry: dict[str, object]) -> dict[str, object]:
+    record = dict(entry["record"])
+    record["published_path"] = str(entry["target"])
+    record["previous_published_path"] = (
+        str(entry["backup"]) if entry["target"].exists() else None
+    )
+    if entry["kind"] == "directory":
+        record["zero_copy_activation"] = entry["staged"] == entry["temporary"]
+    return record
+
+
+def _active_publication_set_matches(
+    *,
+    publication_manifest: Path,
+    manifest: dict[str, object],
+    entries: list[dict[str, object]],
+    published_root: Path,
+) -> bool:
+    if not publication_manifest.is_file():
+        return False
+    active_manifest = _read_publication_manifest(
+        publication_manifest,
+        "published publication manifest",
+    )
+    if active_manifest.get("run_id") != manifest.get("run_id"):
+        return False
+    if active_manifest.get("status") != "published":
+        raise ValueError("Existing publication for this run is not marked published")
+    if active_manifest.get("survey_id") != manifest.get("survey_id"):
+        raise ValueError("Existing publication survey_id does not match the staged manifest")
+    if _manifest_root(active_manifest, "published_root") != published_root:
+        raise ValueError("Existing publication root does not match the published layout")
+    active_records = _publication_records_by_relative(active_manifest)
+    expected_paths = {
+        str(entry["record"]["published_relative_path"])
+        for entry in entries
+    }
+    if set(active_records) != expected_paths:
+        raise ValueError("Existing publication artifact set does not match the staged manifest")
+    for entry in entries:
+        active_record = active_records[str(entry["record"]["published_relative_path"])]
+        if active_record.get("kind") != entry["kind"]:
+            raise ValueError("Existing publication artifact kind does not match")
+        if _required_manifest_path(active_record, "published_path") != entry["target"]:
+            raise ValueError("Existing publication artifact target does not match")
+        if active_record.get("size_bytes") != entry["size_bytes"]:
+            raise ValueError("Existing publication artifact size record does not match")
+        if entry["kind"] == "file":
+            if not entry["target"].is_file() or entry["target"].stat().st_size != entry["size_bytes"]:
+                raise ValueError("Existing publication artifact is missing or has changed size")
+        else:
+            if active_record.get("file_count") != entry["file_count"]:
+                raise ValueError("Existing publication directory file count record does not match")
+            if not entry["target"].is_dir():
+                raise ValueError("Existing publication directory is missing")
+            _validate_required_paths(entry["target"], entry["required_paths"])
+    return True
+
+
+def _cleanup_publication_set_prepared_paths(
+    *,
+    entries: list[dict[str, object]],
+    paths: Iterable[Path],
+    published_root: Path,
+) -> None:
+    _unlink_owned_files(paths, published_root)
+    for entry in entries:
+        temporary = entry["temporary"]
+        if entry["kind"] == "file":
+            _unlink_owned_files([temporary], published_root)
+
+
+
+def _rollback_publication_set_activation(
+    *,
+    activated: list[dict[str, object]],
+    replace_path: Callable[[Path, Path], object],
+    rename_attempts: int,
+    rename_backoff_seconds: float,
+    sleep: Callable[[float], object],
+    published_root: Path,
+) -> None:
+    for state in reversed(activated):
+        entry = state["entry"]
+        target = entry["target"]
+        backup = entry["backup"]
+        temporary = entry["temporary"]
+        _require_within(target.resolve(strict=False), published_root)
+        _require_within(backup.resolve(strict=False), published_root)
+        _require_within(temporary.resolve(strict=False), published_root)
+        if entry["kind"] == "file":
+            if state["installed"] and target.is_file():
+                target.unlink()
+            if state["had_previous"] and backup.is_file():
+                backup.replace(target)
+        else:
+            if state["installed"] and target.is_dir():
+                if temporary.exists():
+                    raise RuntimeError(
+                        "Directory rollback temporary path is already occupied"
+                    )
+                _replace_with_retry(
+                    target,
+                    temporary,
+                    replace_path=replace_path,
+                    attempts=rename_attempts,
+                    backoff_seconds=rename_backoff_seconds,
+                    sleep=sleep,
+                )
+            if state["had_previous"]:
+                if not backup.is_dir():
+                    raise RuntimeError("Directory rollback lost the previous publication")
+                _replace_with_retry(
+                    backup,
+                    target,
+                    replace_path=replace_path,
+                    attempts=rename_attempts,
+                    backoff_seconds=rename_backoff_seconds,
+                    sleep=sleep,
+                )
+
+def reconcile_publication_set(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    replace_path: Callable[[Path, Path], object] | None = None,
+    rename_attempts: int = 3,
+    rename_backoff_seconds: float = 0.05,
+    sleep: Callable[[float], object] = time.sleep,
+) -> Path:
+    """Reconcile an interrupted mixed publication-set activation.
+
+    ``publication.json`` is authoritative. If it names the current run, the
+    set journal can be finalized as committed. Otherwise, recorded artifact
+    moves are rolled back to the previous committed view. The caller must hold
+    exclusive publication ownership.
+    """
+
+    if rename_attempts < 1:
+        raise ValueError("rename_attempts must be at least 1")
+    if rename_backoff_seconds < 0:
+        raise ValueError("rename_backoff_seconds must be non-negative")
+
+    manifest = _read_staged_publication_manifest(
+        workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME
+    )
+    entries = _plan_publication_set_entries(
+        workspace=workspace,
+        published=published,
+        manifest=manifest,
+    )
+    run_id = _safe_path_component(str(manifest.get("run_id", "")), "run_id")
+    published_root = published.root.resolve(strict=False)
+    publication_manifest = published.publication_manifest.resolve(strict=False)
+    journal_path = published_root / ".activation" / run_id / "publication-set.json"
+    journal = _read_activation_journal(journal_path)
+    _validate_publication_set_journal(journal=journal, entries=entries, manifest=manifest)
+
+    active_run_id = _active_publication_run_id(publication_manifest)
+    status = journal["status"]
+    if active_run_id == run_id:
+        if status not in {"activated", "committed"}:
+            raise RuntimeError(
+                "Publication manifest names the interrupted run but the mixed-set "
+                f"journal status is {status!r}"
+            )
+        if not _active_publication_set_matches(
+            publication_manifest=publication_manifest,
+            manifest=manifest,
+            entries=entries,
+            published_root=published_root,
+        ):
+            raise RuntimeError("Committed mixed publication set could not be validated")
+        if status == "activated":
+            recovered = dict(journal)
+            recovered["recovered_interrupted_activation"] = True
+            recovered["recovered_from_status"] = "activated"
+            _write_activation_journal(journal_path, recovered, "committed")
+        return journal_path
+
+    previous_run_id = journal["previous_publication_run_id"]
+    if active_run_id != previous_run_id:
+        raise RuntimeError(
+            "Active publication changed after mixed publication-set evidence was written"
+        )
+    if status == "committed":
+        raise RuntimeError(
+            "Mixed publication-set journal claims committed but publication.json names another run"
+        )
+    if status == "failed":
+        raise RuntimeError("Failed mixed publication-set evidence requires explicit diagnosis")
+
+    if status == "rolled_back":
+        _validate_publication_set_rolled_back(entries)
+        return journal_path
+    if status not in {"prepared", "activated"}:
+        raise ValueError(f"Unsupported mixed publication-set journal status: {status}")
+
+    replace = replace_path or _replace_path
+    try:
+        for entry in reversed(entries):
+            _rollback_publication_set_entry_for_reconciliation(
+                entry=entry,
+                replace_path=replace,
+                rename_attempts=rename_attempts,
+                rename_backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+                published_root=published_root,
+            )
+    except Exception as exc:
+        failed = dict(journal)
+        failed["reconciliation_status"] = "failed"
+        failed["reconciliation_error_type"] = type(exc).__name__
+        failed["reconciliation_error_message"] = str(exc)
+        _write_json_atomic(journal_path, failed)
+        raise
+
+    recovered = dict(journal)
+    recovered["recovered_interrupted_activation"] = True
+    recovered["recovered_from_status"] = status
+    recovered.pop("reconciliation_status", None)
+    recovered.pop("reconciliation_error_type", None)
+    recovered.pop("reconciliation_error_message", None)
+    _write_activation_journal(journal_path, recovered, "rolled_back")
+    return journal_path
+
+
+def _plan_publication_set_entries(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    manifest: dict[str, object],
+) -> list[dict[str, object]]:
+    workspace_root = workspace.root.resolve()
+    published_root = published.root.resolve(strict=False)
+    staged_root = (workspace.publish / "staged").resolve(strict=False)
+    _reject_filesystem_root(workspace_root)
+    _reject_filesystem_root(published_root)
+    _require_within(staged_root, workspace_root)
+    if manifest.get("status") != "staged":
+        raise ValueError("Publication manifest status must be 'staged'")
+    if _manifest_root(manifest, "workspace_root") != workspace_root:
+        raise ValueError("Publication manifest workspace_root does not match the workspace")
+    if _manifest_root(manifest, "published_root") != published_root:
+        raise ValueError("Publication manifest published_root does not match the published layout")
+
+    records = manifest.get("artifacts")
+    if not isinstance(records, list) or not records:
+        raise ValueError("Publication manifest must contain at least one artifact")
+    run_id = _safe_path_component(str(manifest.get("run_id", "")), "run_id")
+    entries: list[dict[str, object]] = []
+    seen_targets: set[Path] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            raise ValueError("Publication artifact record must be a JSON object")
+        kind = record.get("kind")
+        if kind == "file":
+            entry = _plan_file_activation(
+                record=record,
+                run_id=run_id,
+                staged_root=staged_root,
+                published_root=published_root,
+            )
+        elif kind == "directory":
+            entry = _plan_directory_activation(
+                workspace=workspace,
+                published=published,
+                manifest=manifest,
+                record=record,
+            )
+        else:
+            raise ValueError(f"Unsupported publication artifact kind: {kind}")
+        entry["kind"] = kind
+        target = entry["target"]
+        if target in seen_targets:
+            raise ValueError(f"Duplicate published artifact path: {target}")
+        for existing in seen_targets:
+            if _path_is_within(target, existing) or _path_is_within(existing, target):
+                raise ValueError("Published artifact targets must not be nested")
+        seen_targets.add(target)
+        entries.append(entry)
+    return entries
+
+
+def _validate_publication_set_journal(
+    *,
+    journal: dict[str, object],
+    entries: list[dict[str, object]],
+    manifest: dict[str, object],
+) -> None:
+    if journal.get("journal_version") != 1:
+        raise ValueError("Unsupported mixed publication-set journal version")
+    if journal.get("output_type") != "publication_set":
+        raise ValueError("Mixed publication-set journal output_type must be 'publication_set'")
+    if journal.get("run_id") != manifest.get("run_id"):
+        raise ValueError("Mixed publication-set journal run_id does not match")
+    if journal.get("survey_id") != manifest.get("survey_id"):
+        raise ValueError("Mixed publication-set journal survey_id does not match")
+    previous_run_id = journal.get("previous_publication_run_id")
+    if previous_run_id is not None:
+        if not isinstance(previous_run_id, str):
+            raise ValueError(
+                "Mixed publication-set journal previous_publication_run_id must be a string or null"
+            )
+        _safe_path_component(previous_run_id, "previous_publication_run_id")
+    if journal.get("status") not in {
+        "prepared",
+        "activated",
+        "committed",
+        "rolled_back",
+        "failed",
+    }:
+        raise ValueError(f"Unsupported mixed publication-set journal status: {journal.get('status')}")
+
+    records = journal.get("artifacts")
+    if not isinstance(records, list) or len(records) != len(entries):
+        raise ValueError("Mixed publication-set journal artifact set does not match")
+    for record, entry in zip(records, entries):
+        if not isinstance(record, dict):
+            raise ValueError("Mixed publication-set journal artifact must be an object")
+        expected = _publication_set_journal_record(entry)
+        for field_name in (
+            "kind",
+            "published_relative_path",
+            "staged",
+            "temporary",
+            "final",
+            "previous",
+            "file_count",
+            "size_bytes",
+            "required_paths",
+            "zero_copy",
+        ):
+            if record.get(field_name) != expected[field_name]:
+                raise ValueError(
+                    f"Mixed publication-set journal artifact {field_name} does not match"
+                )
+        had_previous = record.get("had_previous")
+        if not isinstance(had_previous, bool):
+            raise ValueError("Mixed publication-set journal had_previous must be a boolean")
+        entry["had_previous_at_start"] = had_previous
+
+
+def _validate_publication_set_rolled_back(entries: list[dict[str, object]]) -> None:
+    for entry in entries:
+        target = entry["target"]
+        backup = entry["backup"]
+        had_previous = bool(entry["had_previous_at_start"])
+        if entry["kind"] == "file":
+            if had_previous:
+                if not target.is_file() or backup.exists():
+                    raise RuntimeError("Rolled-back mixed file evidence is ambiguous")
+            elif target.exists() or backup.exists():
+                raise RuntimeError("Rolled-back mixed file evidence is ambiguous")
+        else:
+            if had_previous:
+                if not target.is_dir() or backup.exists():
+                    raise RuntimeError("Rolled-back mixed directory evidence is ambiguous")
+            elif target.exists() or backup.exists():
+                raise RuntimeError("Rolled-back mixed directory evidence is ambiguous")
+
+
+def _rollback_publication_set_entry_for_reconciliation(
+    *,
+    entry: dict[str, object],
+    replace_path: Callable[[Path, Path], object],
+    rename_attempts: int,
+    rename_backoff_seconds: float,
+    sleep: Callable[[float], object],
+    published_root: Path,
+) -> None:
+    target = entry["target"]
+    temporary = entry["temporary"]
+    backup = entry["backup"]
+    had_previous = bool(entry["had_previous_at_start"])
+    _require_within(target.resolve(strict=False), published_root)
+    _require_within(temporary.resolve(strict=False), published_root)
+    _require_within(backup.resolve(strict=False), published_root)
+    if entry["kind"] == "file":
+        _rollback_publication_set_file_for_reconciliation(
+            target=target,
+            temporary=temporary,
+            backup=backup,
+            had_previous=had_previous,
+            expected_size=entry["size_bytes"],
+            replace_path=replace_path,
+        )
+    else:
+        _rollback_publication_set_directory_for_reconciliation(
+            target=target,
+            temporary=temporary,
+            backup=backup,
+            had_previous=had_previous,
+            required_paths=entry["required_paths"],
+            replace_path=replace_path,
+            rename_attempts=rename_attempts,
+            rename_backoff_seconds=rename_backoff_seconds,
+            sleep=sleep,
+        )
+
+
+def _rollback_publication_set_file_for_reconciliation(
+    *,
+    target: Path,
+    temporary: Path,
+    backup: Path,
+    had_previous: bool,
+    expected_size: int,
+    replace_path: Callable[[Path, Path], object],
+) -> None:
+    if temporary.exists() and not temporary.is_file():
+        raise RuntimeError("Mixed file temporary path is ambiguous")
+    if target.exists() and not target.is_file():
+        raise RuntimeError("Mixed file target path is ambiguous")
+    if backup.exists() and not backup.is_file():
+        raise RuntimeError("Mixed file backup path is ambiguous")
+    if temporary.is_file() and temporary.stat().st_size != expected_size:
+        raise ValueError("Mixed file temporary size does not match")
+    if target.is_file() and not backup.exists() and not had_previous:
+        if target.stat().st_size != expected_size:
+            raise ValueError("Mixed file target candidate size does not match")
+        if temporary.exists():
+            raise RuntimeError("Mixed file rollback candidate state is ambiguous")
+        replace_path(target, temporary)
+        return
+    if had_previous:
+        if backup.is_file():
+            if target.is_file():
+                if temporary.exists():
+                    raise RuntimeError("Mixed file rollback candidate state is ambiguous")
+                replace_path(target, temporary)
+            replace_path(backup, target)
+            return
+        if target.is_file():
+            return
+        raise RuntimeError("Mixed file rollback lost the previous publication")
+    if backup.exists():
+        raise RuntimeError("Mixed file rollback has an unexpected backup")
+
+
+def _rollback_publication_set_directory_for_reconciliation(
+    *,
+    target: Path,
+    temporary: Path,
+    backup: Path,
+    had_previous: bool,
+    required_paths: tuple[Path, ...],
+    replace_path: Callable[[Path, Path], object],
+    rename_attempts: int,
+    rename_backoff_seconds: float,
+    sleep: Callable[[float], object],
+) -> None:
+    temporary_state = _directory_path_state(temporary, "Mixed directory temporary path")
+    target_state = _directory_path_state(target, "Mixed directory target path")
+    backup_state = _directory_path_state(backup, "Mixed directory backup path")
+    if temporary_state == "directory":
+        _validate_required_paths(temporary, required_paths)
+    if target_state == "directory" and backup_state == "missing" and not had_previous:
+        if temporary_state != "missing":
+            raise RuntimeError("Mixed directory rollback candidate state is ambiguous")
+        _replace_with_retry(
+            target,
+            temporary,
+            replace_path=replace_path,
+            attempts=rename_attempts,
+            backoff_seconds=rename_backoff_seconds,
+            sleep=sleep,
+        )
+        return
+    if had_previous:
+        if backup_state == "directory":
+            if target_state == "directory":
+                if temporary_state != "missing":
+                    raise RuntimeError("Mixed directory rollback candidate state is ambiguous")
+                _replace_with_retry(
+                    target,
+                    temporary,
+                    replace_path=replace_path,
+                    attempts=rename_attempts,
+                    backoff_seconds=rename_backoff_seconds,
+                    sleep=sleep,
+                )
+            _replace_with_retry(
+                backup,
+                target,
+                replace_path=replace_path,
+                attempts=rename_attempts,
+                backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+            )
+            return
+        if backup_state == "missing" and target_state == "directory":
+            return
+        raise RuntimeError("Mixed directory rollback lost the previous publication")
+    if backup_state != "missing":
+        raise RuntimeError("Mixed directory rollback has an unexpected backup")
+
+
 def _active_publication_matches_staged(
     *,
     publication_manifest: Path,

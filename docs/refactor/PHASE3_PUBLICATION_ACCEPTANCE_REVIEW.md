@@ -89,3 +89,10 @@ Resolve the complete publication-set decision before wiring any live pipeline st
 - Full safe default suite: 154 passed.
 - git diff --check: passed.
 - No external service, production database, real survey root, network share, QGIS/GDAL executable, or live pipeline was used.
+## ADR-018 follow-up
+
+Date: 2026-07-27.
+
+The mixed-artifact publication-set blocker identified by this review is now partially resolved by dormant code: `activate_publication_set_with_lock()` validates a complete staged file/directory generation, holds one publication lock, writes one set-level journal, activates all artifacts before a single authoritative `publication.json` commit, and rolls back caught pre-commit activation failures.
+
+This does not approve live RGBPipeline wiring yet. The remaining live-integration prerequisites are mixed-set restart reconciliation for interrupted non-committed journals, retention/cleanup policy, and controlled local/SMB filesystem validation.

@@ -9,6 +9,7 @@ from shared.artifacts import (
     PublicationArtifact,
     activate_publication,
     activate_publication_with_lock,
+    activate_publication_set_with_lock,
     create_run_workspace,
     describe_published_survey,
     describe_run_workspace,
@@ -17,6 +18,7 @@ from shared.artifacts import (
     plan_run_workspace,
     publication_activation_path,
     reconcile_directory_publication,
+    reconcile_publication_set,
     prepare_publication,
 )
 from shared.publication_lock import (
@@ -468,6 +470,316 @@ def test_activate_publication_rejects_mixed_set_without_changing_active_manifest
     assert published.publication_manifest.read_bytes() == original_manifest
     assert not (published.root / "ortho" / "orthomosaic.tif").exists()
     assert not published.tiles_ortho_round.exists()
+
+def _prepare_mixed_publication_set(tmp_path, *, existing_final=False):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    ortho_source = workspace.webodm_ortho / "orthomosaic.tif"
+    ortho_source.write_text("new-ortho", encoding="utf-8")
+    tiles_source = workspace.qgis_tiles_round
+    (tiles_source / "metadata.json").write_text("meta", encoding="utf-8")
+    (tiles_source / "11" / "0").mkdir(parents=True)
+    (tiles_source / "11" / "0" / "tile.png").write_bytes(b"new-tile")
+    if existing_final:
+        (published.ortho).mkdir(parents=True)
+        (published.ortho / "orthomosaic.tif").write_text("old-ortho", encoding="utf-8")
+        (published.tiles_ortho_round / "11" / "0").mkdir(parents=True)
+        (published.tiles_ortho_round / "metadata.json").write_text(
+            "old-meta", encoding="utf-8"
+        )
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").write_bytes(
+            b"old-tile"
+        )
+        published.publication_manifest.write_text(
+            '{"status": "published", "run_id": "old-run"}\n',
+            encoding="utf-8",
+        )
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                ortho_source,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            ),
+            PublicationArtifact(
+                "round_tiles",
+                tiles_source,
+                Path("tiles/ortho/round-corners"),
+                "directory",
+                required_paths=("metadata.json", "11"),
+            ),
+        ],
+    )
+    return workspace, published
+
+
+def test_activate_publication_set_with_lock_publishes_mixed_artifacts_once(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path)
+
+    manifest_path = activate_publication_set_with_lock(
+        workspace=workspace,
+        published=published,
+        owner_token="owner-001",
+        created_at="2026-07-27T10:00:00+00:00",
+    )
+
+    assert manifest_path == published.publication_manifest.resolve(strict=False)
+    assert (
+        (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8")
+        == "new-ortho"
+    )
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"new-tile"
+    )
+    assert not (published.root / PUBLICATION_LOCK_NAME).exists()
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "published"
+    assert manifest["run_id"] == "run-001"
+    assert [record["kind"] for record in manifest["artifacts"]] == [
+        "file",
+        "directory",
+    ]
+    assert Path(manifest["activation_journal"]).is_file()
+    journal = json.loads(
+        Path(manifest["activation_journal"]).read_text(encoding="utf-8")
+    )
+    assert journal["status"] == "committed"
+    assert journal["output_type"] == "publication_set"
+
+
+def test_activate_publication_set_with_lock_rolls_back_mixed_targets_before_manifest_commit(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path, existing_final=True)
+    replace_calls = 0
+
+    def fail_before_manifest_commit(source_path, destination_path):
+        nonlocal replace_calls
+        replace_calls += 1
+        if destination_path == published.publication_manifest.resolve(strict=False):
+            raise OSError("simulated manifest switch failure")
+        source_path.replace(destination_path)
+
+    with pytest.raises(OSError, match="simulated manifest switch failure"):
+        activate_publication_set_with_lock(
+            workspace=workspace,
+            published=published,
+            replace_path=fail_before_manifest_commit,
+            owner_token="owner-001",
+        )
+
+    assert replace_calls > 0
+    assert (
+        (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8")
+        == "old-ortho"
+    )
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
+    assert (
+        json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"]
+        == "old-run"
+    )
+    assert not (published.root / PUBLICATION_LOCK_NAME).exists()
+    journal = json.loads(
+        (published.root / ".activation" / "run-001" / "publication-set.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert journal["status"] == "rolled_back"
+
+
+def test_activate_publication_set_with_lock_is_idempotent_after_commit(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path)
+    manifest_path = activate_publication_set_with_lock(
+        workspace=workspace,
+        published=published,
+        owner_token="owner-001",
+    )
+    original_manifest = manifest_path.read_bytes()
+
+    def unexpected_copy(source_path, destination_path):
+        pytest.fail(f"Idempotent mixed publication attempted copy: {source_path}")
+
+    repeated = activate_publication_set_with_lock(
+        workspace=workspace,
+        published=published,
+        copy_file=unexpected_copy,
+        copy_tree=unexpected_copy,
+        replace_path=unexpected_copy,
+        owner_token="owner-002",
+    )
+
+    assert repeated == manifest_path
+    assert repeated.read_bytes() == original_manifest
+    assert not (published.root / PUBLICATION_LOCK_NAME).exists()
+
+
+def test_activate_publication_set_with_lock_fails_before_mutation_when_locked(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path)
+    competing_lock = acquire_publication_lock(
+        published_root=published.root,
+        run_id="run-002",
+        survey_id="AH-026019",
+        owner_token="owner-002",
+    )
+
+    def unexpected_operation(source_path, destination_path):
+        pytest.fail("mixed activation should not start while another owner holds the lock")
+
+    try:
+        with pytest.raises(PublicationLockedError, match="already locked"):
+            activate_publication_set_with_lock(
+                workspace=workspace,
+                published=published,
+                copy_file=unexpected_operation,
+                copy_tree=unexpected_operation,
+                replace_path=unexpected_operation,
+                owner_token="owner-001",
+            )
+    finally:
+        release_publication_lock(competing_lock)
+
+    assert not published.publication_manifest.exists()
+    assert not (published.ortho / "orthomosaic.tif").exists()
+    assert not published.tiles_ortho_round.exists()
+
+
+def test_reconcile_publication_set_rolls_back_prepared_partial_activation(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path, existing_final=True)
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    replace_calls = 0
+
+    def crash_after_first_candidate_install(source_path, destination_path):
+        nonlocal replace_calls
+        replace_calls += 1
+        if replace_calls == 3:
+            source_path.replace(destination_path)
+            raise SimulatedCrash("simulated crash after first mixed artifact install")
+        source_path.replace(destination_path)
+
+    with pytest.raises(SimulatedCrash, match="first mixed artifact"):
+        activate_publication_set_with_lock(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_after_first_candidate_install,
+            owner_token="owner-001",
+        )
+
+    assert json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"] == "old-run"
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "new-ortho"
+
+    journal_path = reconcile_publication_set(workspace=workspace, published=published)
+
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "old-ortho"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"] == "old-run"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "rolled_back"
+    assert journal["recovered_from_status"] == "prepared"
+
+
+def test_reconcile_publication_set_rolls_back_activated_without_manifest_commit(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path, existing_final=True)
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_before_manifest_switch(source_path, destination_path):
+        if destination_path == published.publication_manifest.resolve(strict=False):
+            raise SimulatedCrash("simulated crash before mixed manifest switch")
+        source_path.replace(destination_path)
+
+    with pytest.raises(SimulatedCrash, match="mixed manifest switch"):
+        activate_publication_set_with_lock(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_before_manifest_switch,
+            owner_token="owner-001",
+        )
+
+    assert json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"] == "old-run"
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "new-ortho"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+
+    journal_path = reconcile_publication_set(workspace=workspace, published=published)
+
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "old-ortho"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"] == "old-run"
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "rolled_back"
+    assert journal["recovered_from_status"] == "activated"
+
+
+def test_reconcile_publication_set_finalizes_manifest_committed_before_journal(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path, existing_final=True)
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after_manifest_switch(source_path, destination_path):
+        source_path.replace(destination_path)
+        if destination_path == published.publication_manifest.resolve(strict=False):
+            raise SimulatedCrash("simulated crash after mixed manifest switch")
+
+    with pytest.raises(SimulatedCrash, match="after mixed manifest switch"):
+        activate_publication_set_with_lock(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_after_manifest_switch,
+            owner_token="owner-001",
+        )
+
+    assert json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"] == "run-001"
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "new-ortho"
+
+    journal_path = reconcile_publication_set(workspace=workspace, published=published)
+
+    journal = json.loads(journal_path.read_text(encoding="utf-8"))
+    assert journal["status"] == "committed"
+    assert journal["recovered_from_status"] == "activated"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+
+
+def test_reconcile_publication_set_fails_closed_when_active_manifest_changed(tmp_path):
+    workspace, published = _prepare_mixed_publication_set(tmp_path, existing_final=True)
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_before_manifest_switch(source_path, destination_path):
+        if destination_path == published.publication_manifest.resolve(strict=False):
+            raise SimulatedCrash("simulated crash before mixed manifest switch")
+        source_path.replace(destination_path)
+
+    with pytest.raises(SimulatedCrash):
+        activate_publication_set_with_lock(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_before_manifest_switch,
+            owner_token="owner-001",
+        )
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "another-run"}\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(RuntimeError, match="Active publication changed"):
+        reconcile_publication_set(workspace=workspace, published=published)
+
+    assert json.loads(published.publication_manifest.read_text(encoding="utf-8"))["run_id"] == "another-run"
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "new-ortho"
+
 
 def test_activate_publication_rejects_tampered_staged_artifact(tmp_path):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
@@ -945,7 +1257,10 @@ def test_activate_publication_zero_copy_reuses_exact_activation_path(tmp_path):
     assert result == published.publication_manifest.resolve(strict=False)
     assert scan_calls == 1
     assert not expected.exists()
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"new-tile"
+    )
     active = json.loads(result.read_text())
     assert active["artifacts"][0]["zero_copy_activation"] is True
 
@@ -992,7 +1307,10 @@ def test_directory_activation_preserves_existing_final_as_previous(tmp_path):
         / "round-corners.run-001"
     )
     assert (backup / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"new-tile"
+    )
 
 
 def test_directory_copy_failure_leaves_existing_final_untouched(tmp_path):
@@ -1012,7 +1330,10 @@ def test_directory_copy_failure_leaves_existing_final_untouched(tmp_path):
             copy_tree=failing_copytree,
         )
 
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert json.loads(published.publication_manifest.read_text())["run_id"] == "old-run"
     journal = json.loads(
         (
@@ -1036,7 +1357,10 @@ def test_directory_manifest_validation_failure_leaves_final_untouched(tmp_path):
     with pytest.raises(ValueError, match="file count mismatch"):
         activate_publication(workspace=workspace, published=published)
 
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert json.loads(published.publication_manifest.read_text())["run_id"] == "old-run"
 
 
@@ -1056,7 +1380,10 @@ def test_directory_failure_moving_final_records_failure_without_activation(tmp_p
             rename_attempts=1,
         )
 
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     journal = json.loads(
         (
             published.tiles_ortho_round.parent
@@ -1089,7 +1416,10 @@ def test_directory_failure_moving_temp_restores_previous(tmp_path):
             rename_attempts=1,
         )
 
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert not (
         published.tiles_ortho_round.parent
         / ".previous"
@@ -1189,7 +1519,10 @@ def test_directory_activation_rejects_symlink_entries(tmp_path):
     with pytest.raises(ValueError, match="symlinks or reparse points"):
         activate_publication(workspace=workspace, published=published)
 
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
 
 
 
@@ -1276,7 +1609,10 @@ def test_directory_interruption_after_activated_does_not_claim_commit(
     )
     assert journal["status"] == "activated"
     assert backup.is_dir()
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"new-tile"
+    )
     assert json.loads(published.publication_manifest.read_text())["run_id"] == "old-run"
 
 
@@ -1342,7 +1678,10 @@ def test_directory_reconciliation_retains_valid_prepared_candidate(tmp_path):
     assert journal["status"] == "prepared"
     assert journal["had_previous"] is True
     assert journal["previous_publication_run_id"] == "old-run"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert Path(journal["temporary"]).is_dir()
 
 
@@ -1385,7 +1724,10 @@ def test_directory_reconciliation_restores_backup_when_prepared_journal_lags(
     journal = json.loads(journal_path.read_text())
     assert journal["status"] == "rolled_back"
     assert journal["recovered_from_status"] == "prepared"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert not Path(journal["previous"]).exists()
 
 
@@ -1401,7 +1743,10 @@ def test_directory_reconciliation_rolls_back_previous_moved(tmp_path):
     assert journal["status"] == "rolled_back"
     assert journal["recovered_interrupted_activation"] is True
     assert journal["recovered_from_status"] == "previous_moved"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert Path(journal["temporary"]).is_dir()
     assert not Path(journal["previous"]).exists()
     assert json.loads(published.publication_manifest.read_text())["run_id"] == "old-run"
@@ -1446,7 +1791,10 @@ def test_directory_reconciliation_handles_rename_ahead_of_previous_moved_journal
     journal = json.loads(journal_path.read_text())
     assert journal["status"] == "rolled_back"
     assert journal["recovered_from_status"] == "previous_moved"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert Path(journal["temporary"]).is_dir()
 
 
@@ -1479,7 +1827,10 @@ def test_directory_reconciliation_rolls_back_activated_state(tmp_path, monkeypat
     journal = json.loads(journal_path.read_text())
     assert journal["status"] == "rolled_back"
     assert journal["recovered_from_status"] == "activated"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
     assert Path(journal["temporary"]).is_dir()
 
 
@@ -1567,7 +1918,10 @@ def test_directory_reconciliation_finalizes_manifest_committed_before_journal(
     assert journal["status"] == "committed"
     assert journal["recovered_from_status"] == "activated"
     assert json.loads(published.publication_manifest.read_text())["run_id"] == "run-001"
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"new-tile"
+    )
 
 
 def test_directory_reconciliation_is_idempotent_after_rollback(tmp_path):
@@ -1589,7 +1943,10 @@ def test_directory_reconciliation_is_idempotent_after_rollback(tmp_path):
 
     assert repeated == journal_path
     assert repeated.read_bytes() == first_result
-    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert (
+        (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes()
+        == b"old-tile"
+    )
 
 
 def test_directory_reconciliation_fails_closed_when_active_manifest_changed(tmp_path):

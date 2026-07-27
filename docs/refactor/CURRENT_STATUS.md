@@ -3,11 +3,11 @@
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
-- **Current phase:** Phase 3 - Run-scoped workspace ownership, with tested dormant file and directory publish activation boundaries, directory restart reconciliation, explicit operator-authorized stale-lock recovery, fail-closed publication ownership, lock-owned activation composition, and manifest-aware map-export compatibility
-- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, file and directory publish activation helpers, file activation recovery, directory restart reconciliation, a dormant same-survey publication lock, explicit operator-authorized stale-lock diagnosis/recovery, and dormant exception-safe lock-owned activation composition
-- **Current task:** The Phase 3 publication-protocol acceptance review conditionally accepts the isolated primitives but blocks live integration until complete mixed file/directory publication-set semantics are defined
+- **Current phase:** Phase 3 - Run-scoped workspace ownership, with tested dormant file, directory, and mixed publication-set activation boundaries, directory and mixed publication-set restart reconciliation, explicit operator-authorized stale-lock recovery, fail-closed publication ownership, lock-owned activation composition, and manifest-aware map-export compatibility
+- **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, file and directory publish activation helpers, file activation recovery, directory restart reconciliation, a dormant same-survey publication lock, explicit operator-authorized stale-lock diagnosis/recovery, dormant exception-safe lock-owned activation composition, dormant lock-owned mixed file/directory publication-set activation, and dormant mixed publication-set restart reconciliation
+- **Current task:** Mixed publication-set restart reconciliation is now implemented as a dormant helper; live RGBPipeline wiring remains deferred until retention/cleanup policy and controlled filesystem validation are complete
 - **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning, file and directory activation, activation journaling/reconciliation, and lock-owned activation composition in shared/artifacts.py, fail-closed publication ownership and explicit stale-lock recovery in shared/publication_lock.py, the operator recovery command in tools/publication_lock_recovery.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
-- **Next recommended task:** Resolve ADR-018 by designing and testing one coherent mixed file/directory publication generation under one lock and one authoritative manifest; keep live RGBPipeline wiring and cleanup deferred
+- **Next recommended task:** Design the backup retention/workspace cleanup policy and prepare controlled local/SMB filesystem validation before any live RGBPipeline publication wiring
 
 ## Completed tasks
 
@@ -1781,3 +1781,87 @@ The next prerequisite is ADR-018: define one coherent publication-set model, one
 - `git diff --check` - passed.
 
 No real pipeline, WebODM, QGIS/GDAL, production database, survey root, network share, external service, or destructive production operation was used.
+## Phase 3 dormant mixed publication-set activation
+
+Date: 2026-07-27.
+
+### Implemented behavior
+
+`shared/artifacts.py` now provides `activate_publication_set_with_lock()`, a dormant coordinator for one complete staged publication generation that can contain both file artifacts and directory/tile artifacts.
+
+The coordinator now:
+
+- acquires the existing `.publication.lock` before any mixed-set mutation and releases it in a `finally` block;
+- validates one complete staged manifest up front, including duplicate and nested published target rejection;
+- stages file artifacts to target-adjacent temporary files;
+- stages directory artifacts to exact hidden same-filesystem activation paths unless generation already placed them there;
+- writes one set-level activation journal at `.activation/<run-id>/publication-set.json`;
+- activates all visible artifacts before writing the authoritative `publication.json`;
+- rolls back all activated artifacts on caught failure before the manifest switch; and
+- treats an existing non-committed mixed-set journal as fail-closed evidence requiring explicit reconciliation instead of guessing.
+
+The existing `activate_publication()` helper still intentionally rejects mixed file/directory sets, preserving its earlier file-only and one-directory contracts. This slice is helper-only and is not wired into `RGBPipeline`.
+
+### Files modified
+
+- Modified: `shared/artifacts.py`
+- Modified: `tests/test_phase3_artifact_workspace.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+- Modified: `docs/refactor/DECISIONS.md`
+- Modified: `docs/refactor/PHASE3_PUBLICATION_ACCEPTANCE_REVIEW.md`
+
+No database schema, dependency, pipeline stage, operator default, WebODM behavior, QGIS/GDAL invocation, map-export behavior, network-share behavior, cleanup policy, or live publication call site changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_set"` - 4 passed, 52 deselected.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 56 passed.
+
+### Remaining Phase 3 risks
+
+- Mixed publication-set restart reconciliation is now implemented by the later dormant reconciliation milestone below.
+- Live `RGBPipeline` activation remains deferred; current stages still use workspace-to-legacy compatibility mirrors.
+- Backup retention/cleanup, workspace garbage collection, real large-tree throughput, Windows SMB rename/lock behavior, disconnect/reconnect behavior, antivirus/indexer interference, and cross-volume behavior remain unvalidated outside the hermetic suite.
+## Phase 3 dormant mixed publication-set restart reconciliation
+
+Date: 2026-07-27.
+
+### Implemented behavior
+
+`shared/artifacts.py` now provides `reconcile_publication_set()`, a dormant helper that reconciles interrupted mixed file/directory publication-set evidence while treating `publication.json` as the authoritative committed state.
+
+The reconciler now:
+
+- validates the staged manifest, set-level journal identity, per-artifact temp/final/backup paths, artifact kinds, sizes, directory required paths, previous-publication run ID, and per-artifact previous-target evidence before moving anything;
+- finalizes an `activated` journal as `committed` when `publication.json` already names the current run;
+- rolls back `prepared` evidence when a process stopped after only some artifact moves completed;
+- rolls back `activated` evidence when all artifacts became visible but the authoritative manifest still names the previous run;
+- preserves candidate evidence by moving visible candidates back to their recorded temporary paths where possible instead of deleting directory trees;
+- treats changed active manifests, failed journals, committed journals that disagree with `publication.json`, malformed journals, and ambiguous physical evidence as fail-closed; and
+- records reconciliation failure details in the journal if a rollback rename fails.
+
+This slice remains helper-only. It does not acquire or recover `.publication.lock` by itself, does not call `RGBPipeline`, and does not change current workspace-to-legacy mirroring behavior.
+
+### Files modified
+
+- Modified: `shared/artifacts.py`
+- Modified: `tests/test_phase3_artifact_workspace.py`
+- Modified: `docs/refactor/CURRENT_STATUS.md`
+- Modified: `docs/refactor/TEST_STRATEGY.md`
+- Modified: `docs/refactor/DECISIONS.md`
+
+No database schema, dependency, pipeline stage, operator default, WebODM behavior, QGIS/GDAL invocation, map-export behavior, network-share behavior, cleanup policy, or live publication call site changed.
+
+### Validation
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_set"` - 8 passed, 52 deselected.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 60 passed.
+
+### Remaining Phase 3 risks
+
+- The mixed publication-set reconciler assumes its caller already has exclusive publication ownership. Stale-lock recovery remains manual and separate.
+- Real process termination, host loss, large-tree scan time, Windows SMB rename/lock behavior, open handles, disconnect/reconnect behavior, antivirus/indexer interference, and cross-volume behavior remain unvalidated outside the hermetic suite.
+- Backup retention/cleanup, workspace garbage collection, controlled filesystem validation, and live `RGBPipeline` publication wiring remain deferred.
