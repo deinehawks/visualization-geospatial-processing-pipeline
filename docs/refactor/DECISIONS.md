@@ -233,3 +233,89 @@ ADR-001, ADR-002, ADR-003, ADR-013, and ADR-014 are accepted. ADR-004 through AD
   - Real Windows SMB rename, disconnect, open-handle, and atomicity behavior remains unvalidated by hermetic tests.
   - No schema migration, dependency, live pipeline behavior, or operator default changes in this dormant slice.
 - **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `tests/test_phase3_artifact_workspace.py`; Phase 3; ADR-003; ADR-014.
+
+### ADR-016 - Treat publication metadata as authoritative during directory restart reconciliation
+
+- **Decision ID:** ADR-016
+- **Date:** 2026-07-27
+- **Status:** Accepted
+- **Approval context:** After accepting the dormant zero-copy directory activation protocol, the user approved implementing the next recommended restart-reconciliation safety slice before live QGIS/RGBPipeline integration.
+- **Context:**
+  - A process can stop after the previous directory moved, after the candidate became final, or after `publication.json` committed but before the journal advanced.
+  - The filesystem and activation journal can therefore legitimately differ by one atomic rename or one atomic metadata write.
+  - Recovery must not mistake an uncommitted visible directory for a committed publication or overwrite evidence when another run changed the active manifest.
+- **Decision:**
+  - Treat `publication.json` as the authoritative marker of a committed publication.
+  - Record whether a previous final directory existed and the previous publication run ID in every new directory activation journal.
+  - When `publication.json` names the current run, validate the current publication and finalize an `activated` journal as committed.
+  - When `publication.json` still names the prior run or is absent as recorded, roll `previous_moved` and `activated` physical states back to that prior committed view.
+  - Retain a valid `prepared` candidate when the committed view is still intact; restore the previous backup when its rename completed before the journal advanced.
+  - Infer rename progress only from the exact validated temp/final/backup locations and reject any ambiguous combination.
+  - Preserve candidates and backups; do not delete evidence during reconciliation.
+  - Require exclusive ownership from the caller and keep stale-lock authorization/recovery as a separate decision.
+- **Alternatives considered:**
+  - Always roll forward the visible candidate: rejected because the candidate may not have passed metadata commitment and would make a partial attempt authoritative.
+  - Trust only the journal status: rejected because a process can stop between an atomic rename and the following journal write.
+  - Delete temp/backup evidence and restart: rejected because large-tree deletion is expensive and destroys diagnostic and rollback evidence.
+  - Automatically clear stale publication locks: rejected as a separate ownership/authorization problem that can create two publishers.
+- **Consequences:**
+  - Interrupted directory activation can return to the last committed publication without copying or deleting the large tree.
+  - A crash after metadata commit can be finalized idempotently without a second full directory scan.
+  - Tampered, changed, or incomplete evidence blocks recovery and remains available for diagnosis.
+  - Legacy previous-directory content identity remains limited without hashes or historical metrics.
+  - Live integration still requires an explicit stale-lock diagnosis and operator recovery workflow.
+  - No database migration, dependency, live pipeline behavior, or operator default changes in this dormant slice.
+- **Related files or issues:** R02, R04, R07, R10, R11; `shared/artifacts.py`; `tests/test_phase3_artifact_workspace.py`; Phase 3; ADR-014; ADR-015.
+
+### ADR-017 - Require snapshot-bound operator authorization for stale publication-lock recovery
+
+- **Decision ID:** ADR-017
+- **Date:** 2026-07-27
+- **Status:** Accepted
+- **Approval context:** The user approved the next prerequisite after dormant directory restart reconciliation, before any live QGIS/RGBPipeline publication wiring.
+- **Context:**
+  - Fail-closed publication locks prevent two publishers, but a process or host crash can leave ownership evidence after the owner has stopped.
+  - File age alone cannot distinguish a dead owner from a legitimate long-running publication, especially across workstations and SMB reconnects.
+  - Deleting a lock destroys diagnostic evidence and an operator can otherwise approve one snapshot while a different owner replaces it.
+- **Decision:**
+  - Separate read-only diagnosis from mutation.
+  - Report timestamp validity and age as diagnostic information only; never declare a lock stale or recover it automatically by age.
+  - Bind recovery approval to the exact SHA-256 lock snapshot and, when parseable, its survey/run identity through an exact confirmation phrase.
+  - Require a non-empty operator reason and an explicit command acknowledgement.
+  - Re-read the lock immediately before mutation and fail closed if any identity or byte evidence changed.
+  - Archive the original lock bytes under a unique recovery ID and write a separate audit record instead of deleting evidence.
+  - Permit malformed but readable evidence to use the same explicit archive workflow because it otherwise cannot be safely released through owner-token matching.
+  - Do not infer owner liveness, terminate processes, acquire a replacement lock, reconcile publication state, or invoke recovery automatically from the pipeline.
+- **Alternatives considered:**
+  - Timeout/age-based automatic stealing: rejected because a legitimate long-running operation can exceed any guessed timeout.
+  - Process-ID probing: insufficient across hosts, restarts, containers, and SMB clients, and PID reuse can produce false ownership.
+  - Delete-after-confirmation: rejected because it removes the exact evidence needed for incident review and rollback diagnosis.
+  - Recovery embedded in pipeline resume: rejected because resume must not silently convert ambiguous ownership into a new publisher.
+- **Consequences:**
+  - Operators can recover a verified abandoned or malformed lock without losing evidence or allowing a changed snapshot to reuse prior approval.
+  - The workflow is intentionally manual and requires an independent liveness check outside this helper.
+  - Real SMB consistency and rename behavior still require controlled environment validation before live activation becomes the default.
+  - No schema migration, dependency, or live pipeline behavior changes.
+- **Related files or issues:** R04, R07, R11; `shared/publication_lock.py`; `tools/publication_lock_recovery.py`; `tests/test_publication_lock_recovery.py`; Phase 3; ADR-014; ADR-016.
+
+### ADR-018 - Define complete mixed-artifact publication-set semantics
+
+- **Decision ID:** ADR-018
+- **Date:** 2026-07-27
+- **Status:** Pending
+- **Context:**
+  - The accepted file protocol commits multiple files atomically enough for its recovery model, while the accepted directory protocol commits exactly one large directory through a journaled rename.
+  - A real RGB run produces both kinds plus multiple logical artifact families.
+  - Each current activation writes `publication.json` from its own staged manifest, so independent subset activation can discard previously listed artifacts or expose a mixed-run view.
+  - Live RGBPipeline integration must not begin until the complete run-level publication authority and crash semantics are unambiguous.
+- **Decision:** Pending. Select one complete publication-set model and specify its journal states, manifest authority, rollback/reconciliation rules, locking order, compatibility behavior, and opt-in rollout before implementation.
+- **Alternatives considered:**
+  - One journaled mixed file/directory transaction that stages file siblings and a directory generation before a single manifest commit.
+  - One versioned generation directory containing the complete artifact set, made active through one pointer or directory switch.
+  - Incremental per-artifact activation with manifest merge; currently not accepted because a crash can expose a mixed-run or incomplete manifest without an additional transaction model.
+- **Consequences:**
+  - Live publication wiring remains blocked while this decision is pending.
+  - Existing workspace-to-legacy mirrors remain the default compatibility behavior.
+  - The accepted dormant primitives remain valid building blocks and should not be broadened speculatively.
+  - Retention/cleanup and real filesystem validation remain separate follow-up requirements.
+- **Related files or issues:** R02, R07, R10; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `docs/refactor/PHASE3_PUBLICATION_ACCEPTANCE_REVIEW.md`; ADR-003; ADR-015; ADR-016; ADR-017; Phase 3.

@@ -482,6 +482,353 @@ def _activate_file_publication(
 
 
 
+
+def reconcile_directory_publication(
+    *,
+    workspace: RunWorkspaceLayout,
+    published: PublishedSurveyLayout,
+    replace_path: Callable[[Path, Path], object] | None = None,
+    directory_scan: Callable[[Path], tuple[int, int]] | None = None,
+    rename_attempts: int = 3,
+    rename_backoff_seconds: float = 0.05,
+    sleep: Callable[[float], object] = time.sleep,
+) -> Path:
+    """Reconcile one interrupted directory activation to committed state.
+
+    ``publication.json`` is authoritative. If it already names this run, the
+    journal is finalized as committed. Otherwise incomplete rename states are
+    rolled back to the prior committed view. The caller must provide exclusive
+    publication ownership; stale-lock recovery remains a separate concern.
+    """
+
+    if rename_attempts < 1:
+        raise ValueError("rename_attempts must be at least 1")
+    if rename_backoff_seconds < 0:
+        raise ValueError("rename_backoff_seconds must be non-negative")
+
+    staged_manifest = _read_staged_publication_manifest(
+        workspace.publish / "staged" / PUBLICATION_MANIFEST_NAME
+    )
+    records = staged_manifest.get("artifacts")
+    if not isinstance(records, list) or len(records) != 1:
+        raise ValueError(
+            "Directory reconciliation requires exactly one staged artifact"
+        )
+    record = records[0]
+    if not isinstance(record, dict) or record.get("kind") != "directory":
+        raise ValueError(
+            "Directory reconciliation requires exactly one directory artifact"
+        )
+
+    entry = _plan_directory_activation(
+        workspace=workspace,
+        published=published,
+        manifest=staged_manifest,
+        record=record,
+    )
+    journal_path = entry["journal"]
+    journal = _read_activation_journal(journal_path)
+    _validate_directory_activation_journal(journal=journal, entry=entry)
+
+    publication_manifest = published.publication_manifest.resolve(strict=False)
+    active_run_id = _active_publication_run_id(publication_manifest)
+    current_run_id = entry["run_id"]
+    status = journal["status"]
+
+    if active_run_id == current_run_id:
+        if status not in {"activated", "committed"}:
+            raise RuntimeError(
+                "Publication manifest names the interrupted run but the activation "
+                f"journal status is {status!r}"
+            )
+        if not _active_directory_publication_matches(
+            publication_manifest=publication_manifest,
+            manifest=staged_manifest,
+            entry=entry,
+        ):
+            raise RuntimeError("Committed directory publication could not be validated")
+        if status == "activated":
+            recovered = dict(journal)
+            recovered["recovered_interrupted_activation"] = True
+            recovered["recovered_from_status"] = "activated"
+            _write_activation_journal(
+                journal_path,
+                recovered,
+                "committed",
+            )
+        return journal_path
+
+    previous_run_id = journal["previous_publication_run_id"]
+    if active_run_id != previous_run_id:
+        raise RuntimeError(
+            "Active publication changed after directory activation evidence was written"
+        )
+    if status == "committed":
+        raise RuntimeError(
+            "Activation journal claims committed but publication.json names another run"
+        )
+    if status == "failed":
+        raise RuntimeError(
+            "Failed directory activation evidence requires explicit diagnosis"
+        )
+
+    temporary = entry["temporary"]
+    target = entry["target"]
+    backup = entry["backup"]
+    had_previous = journal["had_previous"]
+    temporary_state = _directory_path_state(
+        temporary,
+        "Directory activation temporary path",
+    )
+    target_state = _directory_path_state(
+        target,
+        "Published directory path",
+    )
+    backup_state = _directory_path_state(
+        backup,
+        "Directory activation backup path",
+    )
+    scan = directory_scan or _scan_directory_tree
+    replace = replace_path or _replace_path
+
+    if status == "prepared":
+        _validate_reconciliation_candidate(temporary, temporary_state, entry, scan)
+        if had_previous and target_state == "directory" and backup_state == "missing":
+            return journal_path
+        if not had_previous and target_state == "missing" and backup_state == "missing":
+            return journal_path
+        if had_previous and target_state == "missing" and backup_state == "directory":
+            try:
+                _replace_with_retry(
+                    backup,
+                    target,
+                    replace_path=replace,
+                    attempts=rename_attempts,
+                    backoff_seconds=rename_backoff_seconds,
+                    sleep=sleep,
+                )
+            except Exception as exc:
+                _record_reconciliation_failure(journal_path, journal, exc)
+                raise
+            _write_reconciled_rollback(journal_path, journal, "prepared")
+            return journal_path
+        raise RuntimeError("Prepared directory activation evidence is ambiguous")
+
+    if status == "rolled_back":
+        _validate_reconciliation_candidate(temporary, temporary_state, entry, scan)
+        if had_previous:
+            if target_state != "directory" or backup_state != "missing":
+                raise RuntimeError("Rolled-back directory activation evidence is ambiguous")
+        elif target_state != "missing" or backup_state != "missing":
+            raise RuntimeError("Rolled-back directory activation evidence is ambiguous")
+        return journal_path
+
+    if status not in {"previous_moved", "activated"}:
+        raise ValueError(f"Unsupported directory activation journal status: {status}")
+
+    if had_previous and backup_state == "missing":
+        if temporary_state == "directory" and target_state == "directory":
+            _validate_reconciliation_candidate(temporary, temporary_state, entry, scan)
+            _write_reconciled_rollback(journal_path, journal, status)
+            return journal_path
+        raise RuntimeError("Interrupted directory activation lost its previous backup")
+    if had_previous and backup_state != "directory":
+        raise RuntimeError("Interrupted directory activation backup is ambiguous")
+    if not had_previous and backup_state != "missing":
+        raise RuntimeError("Interrupted directory activation has an unexpected backup")
+
+    if temporary_state == "directory" and target_state == "missing":
+        candidate = temporary
+    elif temporary_state == "missing" and target_state == "directory":
+        candidate = target
+    else:
+        raise RuntimeError("Interrupted directory activation rename state is ambiguous")
+    _validate_reconciliation_candidate(
+        candidate,
+        "directory",
+        entry,
+        scan,
+    )
+
+    try:
+        if candidate == target:
+            _replace_with_retry(
+                target,
+                temporary,
+                replace_path=replace,
+                attempts=rename_attempts,
+                backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+            )
+        if had_previous:
+            _replace_with_retry(
+                backup,
+                target,
+                replace_path=replace,
+                attempts=rename_attempts,
+                backoff_seconds=rename_backoff_seconds,
+                sleep=sleep,
+            )
+    except Exception as exc:
+        _record_reconciliation_failure(journal_path, journal, exc)
+        raise
+
+    _write_reconciled_rollback(journal_path, journal, status)
+    return journal_path
+
+
+def _read_activation_journal(path: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Unable to read directory activation journal: {path}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("Directory activation journal must contain a JSON object")
+    return payload
+
+
+def _validate_directory_activation_journal(
+    *,
+    journal: dict[str, object],
+    entry: dict[str, object],
+) -> None:
+    if journal.get("journal_version") != 1:
+        raise ValueError("Unsupported directory activation journal version")
+    if journal.get("output_type") != "directory":
+        raise ValueError("Activation journal output_type must be 'directory'")
+    if journal.get("run_id") != entry["run_id"]:
+        raise ValueError("Activation journal run_id does not match")
+
+    expected_paths = {
+        "source": entry["staged"],
+        "temporary": entry["temporary"],
+        "final": entry["target"],
+        "previous": entry["backup"],
+    }
+    for field_name, expected_path in expected_paths.items():
+        value = journal.get(field_name)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"Activation journal {field_name} is required")
+        if Path(value).resolve(strict=False) != expected_path:
+            raise ValueError(f"Activation journal {field_name} path does not match")
+
+    zero_copy = journal.get("zero_copy")
+    if not isinstance(zero_copy, bool) or zero_copy != (
+        entry["staged"] == entry["temporary"]
+    ):
+        raise ValueError("Activation journal zero_copy value does not match")
+    journal_file_count = journal.get("expected_file_count")
+    if (
+        isinstance(journal_file_count, bool)
+        or not isinstance(journal_file_count, int)
+        or journal_file_count != entry["file_count"]
+    ):
+        raise ValueError("Activation journal expected_file_count does not match")
+    journal_total_bytes = journal.get("expected_total_bytes")
+    if (
+        isinstance(journal_total_bytes, bool)
+        or not isinstance(journal_total_bytes, int)
+        or journal_total_bytes != entry["size_bytes"]
+    ):
+        raise ValueError("Activation journal expected_total_bytes does not match")
+    if not isinstance(journal.get("had_previous"), bool):
+        raise ValueError("Activation journal had_previous must be a boolean")
+
+    previous_run_id = journal.get("previous_publication_run_id")
+    if previous_run_id is not None:
+        if not isinstance(previous_run_id, str):
+            raise ValueError(
+                "Activation journal previous_publication_run_id must be a string or null"
+            )
+        _safe_path_component(previous_run_id, "previous_publication_run_id")
+
+    status = journal.get("status")
+    if status not in {
+        "prepared",
+        "previous_moved",
+        "activated",
+        "committed",
+        "rolled_back",
+        "failed",
+    }:
+        raise ValueError(f"Unsupported directory activation journal status: {status}")
+
+
+def _active_publication_run_id(publication_manifest: Path) -> str | None:
+    if not publication_manifest.exists():
+        return None
+    if not publication_manifest.is_file():
+        raise ValueError("Published publication manifest path must be a file")
+    manifest = _read_publication_manifest(
+        publication_manifest,
+        "published publication manifest",
+    )
+    if manifest.get("status") != "published":
+        raise ValueError("Existing publication manifest is not marked published")
+    return _safe_path_component(
+        _required_manifest_text(manifest, "run_id"),
+        "published run_id",
+    )
+
+
+def _directory_path_state(path: Path, label: str) -> str:
+    _reject_reparse_path(path, label)
+    if not path.exists():
+        return "missing"
+    if path.is_dir():
+        return "directory"
+    raise ValueError(f"{label} must be a directory when present: {path}")
+
+
+def _validate_reconciliation_candidate(
+    candidate: Path,
+    candidate_state: str,
+    entry: dict[str, object],
+    directory_scan: Callable[[Path], tuple[int, int]],
+) -> None:
+    if candidate_state != "directory":
+        raise RuntimeError("Interrupted directory activation candidate is missing")
+    file_count, total_bytes = directory_scan(candidate)
+    if file_count != entry["file_count"]:
+        raise ValueError("Interrupted directory activation file count does not match")
+    if total_bytes != entry["size_bytes"]:
+        raise ValueError("Interrupted directory activation total size does not match")
+    _validate_required_paths(candidate, entry["required_paths"])
+
+
+def _write_reconciled_rollback(
+    journal_path: Path,
+    journal: dict[str, object],
+    recovered_from_status: str,
+) -> None:
+    recovered = dict(journal)
+    recovered["recovered_interrupted_activation"] = True
+    recovered["recovered_from_status"] = recovered_from_status
+    recovered.pop("reconciliation_status", None)
+    recovered.pop("reconciliation_error_type", None)
+    recovered.pop("reconciliation_error_message", None)
+    _write_activation_journal(journal_path, recovered, "rolled_back")
+
+
+def _record_reconciliation_failure(
+    journal_path: Path,
+    journal: dict[str, object],
+    error: Exception,
+) -> None:
+    failed = dict(journal)
+    failed["reconciliation_status"] = "failed"
+    failed["reconciliation_error_type"] = type(error).__name__
+    failed["reconciliation_error_message"] = str(error)
+    try:
+        _write_json_atomic(journal_path, failed)
+    except Exception as journal_error:
+        raise RuntimeError(
+            "Directory reconciliation failed and its journal could not be updated"
+        ) from journal_error
+
+
 def _activate_directory_publication(
     *,
     workspace: RunWorkspaceLayout,
@@ -520,6 +867,7 @@ def _activate_directory_publication(
     ):
         return publication_manifest
 
+    previous_publication_run_id = _active_publication_run_id(publication_manifest)
     source = entry["staged"]
     source_lexical = entry["staged_lexical"]
     temporary = entry["temporary"]
@@ -530,6 +878,7 @@ def _activate_directory_publication(
     zero_copy = source == temporary
 
     activation_root.mkdir(parents=True, exist_ok=True)
+    had_previous = target.is_dir()
     journal = {
         "journal_version": 1,
         "run_id": entry["run_id"],
@@ -541,6 +890,8 @@ def _activate_directory_publication(
         "zero_copy": zero_copy,
         "expected_file_count": entry["file_count"],
         "expected_total_bytes": entry["size_bytes"],
+        "had_previous": had_previous,
+        "previous_publication_run_id": previous_publication_run_id,
     }
 
     try:
@@ -575,7 +926,6 @@ def _activate_directory_publication(
         _write_activation_journal(journal_path, journal, "failed", exc)
         raise
 
-    had_previous = target.is_dir()
     if backup.exists():
         error = FileExistsError(
             f"Directory activation backup path already exists: {backup}"

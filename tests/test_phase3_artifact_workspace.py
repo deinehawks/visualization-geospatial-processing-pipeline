@@ -16,6 +16,7 @@ from shared.artifacts import (
     plan_published_survey_from_rgb_path,
     plan_run_workspace,
     publication_activation_path,
+    reconcile_directory_publication,
     prepare_publication,
 )
 from shared.publication_lock import (
@@ -420,6 +421,53 @@ def test_activate_publication_activates_external_staged_directory(tmp_path):
     assert journal["status"] == "committed"
     assert journal["expected_file_count"] == 2
     assert journal["expected_total_bytes"] == 12
+
+def test_activate_publication_rejects_mixed_set_without_changing_active_manifest(
+    tmp_path,
+):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    source_file = tmp_path / "source" / "orthomosaic.tif"
+    source_file.parent.mkdir(parents=True)
+    source_file.write_bytes(b"new-ortho")
+    source_tiles = tmp_path / "source" / "tiles"
+    (source_tiles / "11" / "0").mkdir(parents=True)
+    (source_tiles / "11" / "0" / "tile.png").write_bytes(b"new-tile")
+    published.root.mkdir(parents=True)
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "old-run"}\n',
+        encoding="utf-8",
+    )
+    original_manifest = published.publication_manifest.read_bytes()
+
+    prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "orthomosaic",
+                source_file,
+                Path("ortho/orthomosaic.tif"),
+                "file",
+            ),
+            PublicationArtifact(
+                "tiles",
+                source_tiles,
+                Path("tiles/ortho/round-corners"),
+                "directory",
+            ),
+        ],
+    )
+
+    with pytest.raises(ValueError, match="no mixed artifacts"):
+        activate_publication(workspace=workspace, published=published)
+
+    assert published.publication_manifest.read_bytes() == original_manifest
+    assert not (published.root / "ortho" / "orthomosaic.tif").exists()
+    assert not published.tiles_ortho_round.exists()
 
 def test_activate_publication_rejects_tampered_staged_artifact(tmp_path):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
@@ -1230,3 +1278,410 @@ def test_directory_interruption_after_activated_does_not_claim_commit(
     assert backup.is_dir()
     assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
     assert json.loads(published.publication_manifest.read_text())["run_id"] == "old-run"
+
+
+
+def _interrupt_directory_with_previous_moved(tmp_path):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(
+        tmp_path,
+        existing_final=True,
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    replace_count = 0
+
+    def crash_before_temp_activation(source, destination):
+        nonlocal replace_count
+        replace_count += 1
+        if replace_count == 2:
+            raise SimulatedCrash("simulated previous_moved interruption")
+        source.replace(destination)
+
+    with pytest.raises(SimulatedCrash, match="previous_moved"):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_before_temp_activation,
+            rename_attempts=1,
+        )
+    return workspace, published
+
+
+def test_directory_reconciliation_retains_valid_prepared_candidate(tmp_path):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(
+        tmp_path,
+        existing_final=True,
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_before_any_rename(source, destination):
+        raise SimulatedCrash("simulated prepared interruption")
+
+    with pytest.raises(SimulatedCrash, match="prepared"):
+        activate_publication(
+            workspace=workspace,
+            published=published,
+            replace_path=crash_before_any_rename,
+            rename_attempts=1,
+        )
+
+    def unexpected_replace(source, destination):
+        pytest.fail("prepared reconciliation attempted a rename")
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+        replace_path=unexpected_replace,
+    )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "prepared"
+    assert journal["had_previous"] is True
+    assert journal["previous_publication_run_id"] == "old-run"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert Path(journal["temporary"]).is_dir()
+
+
+def test_directory_reconciliation_restores_backup_when_prepared_journal_lags(
+    tmp_path, monkeypatch
+):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(
+        tmp_path,
+        existing_final=True,
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    original_write_journal = artifacts_module._write_activation_journal
+
+    def crash_before_previous_moved_journal(path, journal, status, error=None):
+        if status == "previous_moved":
+            raise SimulatedCrash("journal still prepared")
+        return original_write_journal(path, journal, status, error)
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_write_activation_journal",
+        crash_before_previous_moved_journal,
+    )
+    with pytest.raises(SimulatedCrash, match="still prepared"):
+        activate_publication(workspace=workspace, published=published)
+    monkeypatch.setattr(
+        artifacts_module,
+        "_write_activation_journal",
+        original_write_journal,
+    )
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "rolled_back"
+    assert journal["recovered_from_status"] == "prepared"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert not Path(journal["previous"]).exists()
+
+
+def test_directory_reconciliation_rolls_back_previous_moved(tmp_path):
+    workspace, published = _interrupt_directory_with_previous_moved(tmp_path)
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "rolled_back"
+    assert journal["recovered_interrupted_activation"] is True
+    assert journal["recovered_from_status"] == "previous_moved"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert Path(journal["temporary"]).is_dir()
+    assert not Path(journal["previous"]).exists()
+    assert json.loads(published.publication_manifest.read_text())["run_id"] == "old-run"
+
+
+def test_directory_reconciliation_handles_rename_ahead_of_previous_moved_journal(
+    tmp_path, monkeypatch
+):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(
+        tmp_path,
+        existing_final=True,
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    original_write_journal = artifacts_module._write_activation_journal
+
+    def crash_before_activated_journal(path, journal, status, error=None):
+        if status == "activated":
+            raise SimulatedCrash("journal still previous_moved")
+        return original_write_journal(path, journal, status, error)
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_write_activation_journal",
+        crash_before_activated_journal,
+    )
+    with pytest.raises(SimulatedCrash, match="previous_moved"):
+        activate_publication(workspace=workspace, published=published)
+    monkeypatch.setattr(
+        artifacts_module,
+        "_write_activation_journal",
+        original_write_journal,
+    )
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "rolled_back"
+    assert journal["recovered_from_status"] == "previous_moved"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert Path(journal["temporary"]).is_dir()
+
+
+def test_directory_reconciliation_rolls_back_activated_state(tmp_path, monkeypatch):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(
+        tmp_path,
+        existing_final=True,
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after_activated(**kwargs):
+        raise SimulatedCrash("simulated activated interruption")
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_lightweight_directory_check",
+        crash_after_activated,
+    )
+    with pytest.raises(SimulatedCrash, match="activated"):
+        activate_publication(workspace=workspace, published=published)
+    monkeypatch.undo()
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "rolled_back"
+    assert journal["recovered_from_status"] == "activated"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+    assert Path(journal["temporary"]).is_dir()
+
+
+def test_directory_reconciliation_rolls_back_activation_without_previous(tmp_path, monkeypatch):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(tmp_path)
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    def crash_after_activated(**kwargs):
+        raise SimulatedCrash("simulated first activation interruption")
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_lightweight_directory_check",
+        crash_after_activated,
+    )
+    with pytest.raises(SimulatedCrash, match="first activation"):
+        activate_publication(workspace=workspace, published=published)
+    monkeypatch.undo()
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "rolled_back"
+    assert journal["had_previous"] is False
+    assert not published.tiles_ortho_round.exists()
+    assert Path(journal["temporary"]).is_dir()
+    assert not published.publication_manifest.exists()
+
+
+def test_directory_reconciliation_finalizes_manifest_committed_before_journal(
+    tmp_path, monkeypatch
+):
+    workspace, published, _, _ = _prepare_tiles_directory_publication(
+        tmp_path,
+        existing_final=True,
+    )
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    original_write_journal = artifacts_module._write_activation_journal
+
+    def crash_before_committed_journal(path, journal, status, error=None):
+        if status == "committed":
+            raise SimulatedCrash("publication committed before journal")
+        return original_write_journal(path, journal, status, error)
+
+    monkeypatch.setattr(
+        artifacts_module,
+        "_write_activation_journal",
+        crash_before_committed_journal,
+    )
+    with pytest.raises(SimulatedCrash, match="committed before journal"):
+        activate_publication(workspace=workspace, published=published)
+    monkeypatch.setattr(
+        artifacts_module,
+        "_write_activation_journal",
+        original_write_journal,
+    )
+
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+    first_result = journal_path.read_bytes()
+
+    def unexpected_operation(*args, **kwargs):
+        pytest.fail("committed reconciliation attempted filesystem work")
+
+    repeated = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+        replace_path=unexpected_operation,
+        directory_scan=unexpected_operation,
+    )
+
+    journal = json.loads(first_result)
+    assert repeated == journal_path
+    assert repeated.read_bytes() == first_result
+    assert journal["status"] == "committed"
+    assert journal["recovered_from_status"] == "activated"
+    assert json.loads(published.publication_manifest.read_text())["run_id"] == "run-001"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+
+
+def test_directory_reconciliation_is_idempotent_after_rollback(tmp_path):
+    workspace, published = _interrupt_directory_with_previous_moved(tmp_path)
+    journal_path = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+    )
+    first_result = journal_path.read_bytes()
+
+    def unexpected_replace(source, destination):
+        pytest.fail("rolled-back reconciliation attempted another rename")
+
+    repeated = reconcile_directory_publication(
+        workspace=workspace,
+        published=published,
+        replace_path=unexpected_replace,
+    )
+
+    assert repeated == journal_path
+    assert repeated.read_bytes() == first_result
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"old-tile"
+
+
+def test_directory_reconciliation_fails_closed_when_active_manifest_changed(tmp_path):
+    workspace, published = _interrupt_directory_with_previous_moved(tmp_path)
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "another-run"}\n',
+        encoding="utf-8",
+    )
+    backup = (
+        published.tiles_ortho_round.parent
+        / ".previous"
+        / "round-corners.run-001"
+    )
+
+    with pytest.raises(RuntimeError, match="Active publication changed"):
+        reconcile_directory_publication(
+            workspace=workspace,
+            published=published,
+        )
+
+    assert backup.is_dir()
+    assert not published.tiles_ortho_round.exists()
+    assert json.loads(published.publication_manifest.read_text())["run_id"] == "another-run"
+
+
+def test_directory_reconciliation_rejects_tampered_journal_without_moving(tmp_path):
+    workspace, published = _interrupt_directory_with_previous_moved(tmp_path)
+    journal_path = (
+        published.tiles_ortho_round.parent
+        / ".activation"
+        / "run-001"
+        / "activation.json"
+    )
+    journal = json.loads(journal_path.read_text())
+    journal["temporary"] = str(journal_path.parent / "other.tmp")
+    journal_path.write_text(json.dumps(journal), encoding="utf-8")
+    backup = Path(journal["previous"])
+
+    with pytest.raises(ValueError, match="temporary path does not match"):
+        reconcile_directory_publication(
+            workspace=workspace,
+            published=published,
+        )
+
+    assert backup.is_dir()
+    assert not published.tiles_ortho_round.exists()
+
+
+def test_directory_reconciliation_fails_closed_when_previous_backup_is_missing(tmp_path):
+    workspace, published = _interrupt_directory_with_previous_moved(tmp_path)
+    backup = (
+        published.tiles_ortho_round.parent
+        / ".previous"
+        / "round-corners.run-001"
+    )
+    displaced_backup = backup.with_name("round-corners.displaced")
+    backup.replace(displaced_backup)
+
+    with pytest.raises(RuntimeError, match="lost its previous backup"):
+        reconcile_directory_publication(
+            workspace=workspace,
+            published=published,
+        )
+
+    assert displaced_backup.is_dir()
+    assert not published.tiles_ortho_round.exists()
+
+
+def test_directory_reconciliation_rename_failure_preserves_retryable_evidence(tmp_path):
+    workspace, published = _interrupt_directory_with_previous_moved(tmp_path)
+
+    def failing_replace(source, destination):
+        raise OSError("simulated reconciliation rename failure")
+
+    with pytest.raises(OSError, match="reconciliation rename failure"):
+        reconcile_directory_publication(
+            workspace=workspace,
+            published=published,
+            replace_path=failing_replace,
+            rename_attempts=1,
+        )
+
+    journal_path = (
+        published.tiles_ortho_round.parent
+        / ".activation"
+        / "run-001"
+        / "activation.json"
+    )
+    journal = json.loads(journal_path.read_text())
+    assert journal["status"] == "previous_moved"
+    assert journal["reconciliation_status"] == "failed"
+    assert journal["reconciliation_error_type"] == "OSError"
+    assert Path(journal["previous"]).is_dir()
+    assert Path(journal["temporary"]).is_dir()
+    assert not published.tiles_ortho_round.exists()

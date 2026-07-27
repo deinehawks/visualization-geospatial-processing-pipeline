@@ -801,3 +801,68 @@ Validation for this slice:
 - `python -m pytest -q` - 128 passed
 
 The suite does not generate real tiles, invoke QGIS/GDAL, access network shares, exercise SMB semantics, scan a million-file fixture, wire `RGBPipeline`, perform automatic restart recovery, clean old backups, or touch production storage.
+
+## Phase 3 directory restart reconciliation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers dormant directory activation restart reconciliation using only pytest-owned roots, tiny directory trees, injected filesystem operations, and simulated `BaseException` process interruptions.
+
+Coverage proves that:
+
+- valid `prepared` evidence retains the validated candidate and untouched prior final without a rename;
+- a backup move that completed before the `prepared` journal advanced is detected and restored;
+- `previous_moved` is rolled back when the candidate is still temporary;
+- `previous_moved` is also rolled back when the candidate rename reached the final path before the journal advanced;
+- `activated` is rolled back to the publication named by the older `publication.json`;
+- first activation with no prior directory returns to no published final;
+- a current-run `publication.json` finalizes an `activated` journal as committed without moving or rescanning the directory;
+- committed and rolled-back reconciliation are idempotent;
+- changed active publication, tampered journal paths, and missing previous backups fail closed without moving evidence; and
+- injected reconciliation rename failure preserves the original activation status and records explicit retryable failure details.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k reconciliation` - 12 passed, 39 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 51 passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_publication_lock.py tests\test_map_export_manifest_resolution.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 87 passed
+- `python -m pytest --collect-only -q` - 140 collected
+- `python -m pytest -q` - 140 passed
+
+The suite does not terminate a real process, recover a real stale lock, generate tiles, invoke QGIS/GDAL, access SMB/network shares, scan million-file fixtures, wire `RGBPipeline`, delete backups, or touch production storage.
+
+## Phase 3 stale publication-lock recovery coverage
+
+Date: 2026-07-27.
+
+`tests/test_publication_lock_recovery.py` covers the dormant diagnosis helper, explicit recovery helper, and operator CLI using only pytest-owned temporary roots and injected filesystem races.
+
+Coverage proves that diagnosis is read-only; age is diagnostic only; invalid timestamps never produce trusted age; exact confirmation and a non-empty reason are mandatory; changed evidence fails closed; valid and malformed evidence is archived byte-for-byte; audit records omit the raw owner token; recovery-ID collisions retain the active lock; a mutation during quarantine is detected and restored; missing and linked lock paths are rejected; and the CLI requires both the diagnosed digest and explicit `--allow-recovery` acknowledgement.
+
+The suite does not determine real process liveness, terminate processes, recover production locks, access network shares, validate SMB cache/rename semantics, invoke QGIS/GDAL, contact WebODM, or run the pipeline.
+
+Validation for this slice:
+
+- `python -m py_compile shared\publication_lock.py tools\publication_lock_recovery.py tests\test_publication_lock.py tests\test_publication_lock_recovery.py`
+- `python -m pytest tests\test_publication_lock.py tests\test_publication_lock_recovery.py -q` - 19 passed
+- relevant Phase 3 and pipeline tests - 100 passed
+- collection-only - 153 collected
+- full safe default suite - 153 passed
+- `git diff --check` - passed
+## Phase 3 publication-protocol acceptance coverage
+
+Date: 2026-07-27.
+
+The acceptance review adds a focused regression proving that a staged mixed file/directory set is rejected before any published artifact or active manifest changes. This preserves the known composition boundary while ADR-018 remains pending and prevents a future live call site from silently treating a partial subset as a complete publication.
+
+Validation for the acceptance gate:
+
+- compile checks for publication helpers, operator tool, and tests - passed
+- focused mixed-set/lock/reconciliation selection - 16 passed, 36 deselected
+- relevant publication and pipeline suite - 101 passed
+- collection-only - 154 collected
+- full safe default suite - 154 passed
+- `git diff --check` - passed
+
+Distinct-volume, Windows SMB, real large-tree, live pipeline, QGIS/GDAL, WebODM, and production-storage validation remain excluded and must be explicitly authorized in a controlled environment.
