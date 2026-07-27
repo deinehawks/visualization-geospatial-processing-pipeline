@@ -2039,3 +2039,25 @@ SMB disposable validation:
 - Representative large tile-tree count/rename timing remains unmeasured.
 - Open-handle behavior, antivirus/indexer contention, interrupted delete, process crash, host loss, SMB disconnect/reconnect, and cross-volume behavior remain unvalidated.
 - Live `RGBPipeline` publication wiring remains deferred until those remaining risks are accepted or separately validated.
+
+## Phase 3 large-tree SMB filesystem validation evidence
+
+Date: 2026-07-27.
+
+The ADR-021 validator now supports an optional `large_tree_rename` check for representative tile-directory behavior. The check creates a disposable tile-like directory tree under the validation run root, renames an existing final directory to backup, renames the candidate tree into place, counts the final tree, records timings, and then removes the disposable run directory by default.
+
+Manual SMB validation was run against the previously approved disposable root:
+
+- Root: `Z:\__pipeline_validation\filesystem-validation-001`
+- Resolved root: `\\192.168.10.5\Visualization\__pipeline_validation\filesystem-validation-001`
+- Validation ID: `smb-large-tree-001`
+- Report: `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-large-tree-001.json`
+- Result: passed
+- Checks passed: `exclusive_create`, `file_replace`, `directory_rename`, `large_tree_rename`, and `json_visibility`
+- Large-tree file count: 1,000 requested and 1,000 observed after rename
+- Timings: create 2.725071s, rename 0.008864s, recount 0.028313s
+- Disposable run directory cleanup: passed; `.filesystem-validation-runs\smb-large-tree-001` was removed
+- Sentinel/report intentionally retained for audit review
+- Production survey data touched: no; validation stayed outside `Z:\surveys`
+
+Remaining validation gaps are reduced but not eliminated: this proves a 1,000-file disposable SMB tree, not a full production-scale tile set. Cross-volume behavior, open-handle behavior, antivirus/indexer contention, interrupted operations, process crash, host loss, and SMB disconnect/reconnect behavior remain unvalidated before live publication activation is wired into `RGBPipeline`.

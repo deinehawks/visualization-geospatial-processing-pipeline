@@ -125,3 +125,11 @@ Date: 2026-07-27.
 The ADR-021 validator was run against disposable local and SMB roots. Both passed `exclusive_create`, `file_replace`, `directory_rename`, and `json_visibility`. The SMB report is retained at `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-001.json` and the validator cleaned its disposable run directory.
 
 No real survey root, production output, QGIS/GDAL command, WebODM service, or live pipeline was used.
+
+## ADR-021 large-tree SMB validation follow-up
+
+Date: 2026-07-27.
+
+The controlled filesystem validation prerequisite now has additional SMB evidence for a disposable 1,000-file tile-like directory tree. `tools/filesystem_validation.py --large-tree-files 1000` passed on `Z:\__pipeline_validation\filesystem-validation-001`, with the report retained at `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-large-tree-001.json`. The validator observed all 1,000 files after the candidate-to-final directory rename and cleaned its disposable run directory.
+
+This improves confidence in the publication activation primitives on the current SMB share, but does not fully clear Phase 3 for live RGBPipeline wiring. Full production-scale tile counts, cross-volume behavior, open handles, antivirus/indexer contention, interrupted operations, process crash, host loss, and SMB disconnect/reconnect scenarios remain outside the evidence gathered so far.

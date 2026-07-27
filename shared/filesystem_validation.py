@@ -42,10 +42,11 @@ def validate_publication_filesystem(
     replace_path: Callable[[Path, Path], object] = os.replace,
     rename_path: Callable[[Path, Path], object] = os.rename,
     remove_tree: Callable[[Path], object] = shutil.rmtree,
+    large_tree_files: int = 0,
 ) -> FilesystemValidationResult:
     """Validate publication filesystem primitives under an explicit disposable root.
 
-    The validator creates, renames, replaces, and deletes tiny disposable files
+    The validator creates, renames, replaces, and deletes disposable files
     beneath ``root/.filesystem-validation-runs/<validation-id>``. It refuses to
     run unless the caller provides explicit destructive authorization and the
     root contains the validation sentinel.
@@ -55,6 +56,8 @@ def validate_publication_filesystem(
     _reject_filesystem_root(resolved_root)
     if not allow_destructive_validation:
         raise ValueError("filesystem validation requires allow_destructive_validation=True")
+    if large_tree_files < 0:
+        raise ValueError("large_tree_files must be non-negative")
     sentinel_component = _safe_path_component(sentinel_name, "sentinel_name")
     sentinel = resolved_root / sentinel_component
     if not sentinel.is_file():
@@ -72,6 +75,14 @@ def validate_publication_filesystem(
         checks.append(_check_exclusive_create(run_root))
         checks.append(_check_file_replace(run_root, replace_path=replace_path))
         checks.append(_check_directory_rename(run_root, rename_path=rename_path))
+        if large_tree_files:
+            checks.append(
+                _check_large_tree_rename(
+                    run_root,
+                    file_count=large_tree_files,
+                    rename_path=rename_path,
+                )
+            )
         checks.append(_check_json_visibility(run_root))
     finally:
         if not keep_workdir:
@@ -228,6 +239,82 @@ def _check_directory_rename(
             details,
             f"{type(exc).__name__}: {exc}",
         )
+
+
+def _check_large_tree_rename(
+    run_root: Path,
+    *,
+    file_count: int,
+    rename_path: Callable[[Path, Path], object],
+) -> FilesystemValidationCheck:
+    final = run_root / "large-round-corners"
+    backup = run_root / ".previous" / "large-round-corners.validation"
+    candidate = run_root / ".activation" / "validation" / "large-round-corners.tmp"
+    details: dict[str, object] = {
+        "file_count": file_count,
+        "final": str(final),
+        "backup": str(backup),
+        "candidate": str(candidate),
+    }
+    try:
+        if file_count <= 0:
+            raise ValueError("file_count must be positive")
+        (final / "11" / "0").mkdir(parents=True)
+        (final / "11" / "0" / "old.png").write_bytes(b"old")
+        create_started = time.perf_counter()
+        for index in range(file_count):
+            zoom = 11 + (index % 4)
+            column = index // 256
+            row = index % 256
+            tile = candidate / str(zoom) / str(column) / f"{row}.png"
+            tile.parent.mkdir(parents=True, exist_ok=True)
+            tile.write_bytes(b"x")
+        details["create_elapsed_seconds"] = round(time.perf_counter() - create_started, 6)
+        backup.parent.mkdir(parents=True, exist_ok=True)
+        rename_started = time.perf_counter()
+        rename_path(final, backup)
+        rename_path(candidate, final)
+        details["rename_elapsed_seconds"] = round(time.perf_counter() - rename_started, 6)
+        count_started = time.perf_counter()
+        observed_count = _count_files(final)
+        details["count_elapsed_seconds"] = round(time.perf_counter() - count_started, 6)
+        details["observed_file_count"] = observed_count
+        if observed_count != file_count:
+            return FilesystemValidationCheck(
+                "large_tree_rename",
+                "failed",
+                details,
+                f"expected {file_count} files after rename, observed {observed_count}",
+            )
+        if not (backup / "11" / "0" / "old.png").is_file():
+            return FilesystemValidationCheck(
+                "large_tree_rename",
+                "failed",
+                details,
+                "backup directory did not contain prior content",
+            )
+        if candidate.exists():
+            return FilesystemValidationCheck(
+                "large_tree_rename",
+                "failed",
+                details,
+                "candidate directory still exists after rename",
+            )
+        return FilesystemValidationCheck("large_tree_rename", "passed", details)
+    except Exception as exc:
+        return FilesystemValidationCheck(
+            "large_tree_rename",
+            "failed",
+            details,
+            f"{type(exc).__name__}: {exc}",
+        )
+
+
+def _count_files(root: Path) -> int:
+    total = 0
+    for _directory, _dirs, files in os.walk(root):
+        total += len(files)
+    return total
 
 
 def _check_json_visibility(run_root: Path) -> FilesystemValidationCheck:

@@ -24,6 +24,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, required=True)
     parser.add_argument("--validation-id", required=True)
     parser.add_argument("--report-path", type=Path)
+    parser.add_argument("--large-tree-files", type=int, default=0)
     parser.add_argument(
         "--keep-workdir",
         action="store_true",
@@ -48,6 +49,7 @@ def main(argv: list[str] | None = None) -> int:
             validation_id=args.validation_id,
             allow_destructive_validation=args.allow_destructive_validation,
             keep_workdir=args.keep_workdir,
+            large_tree_files=args.large_tree_files,
         )
         if args.report_path is not None:
             write_filesystem_validation_report(result, args.report_path)

@@ -988,3 +988,13 @@ Validated disposable targets:
 The SMB report is retained at `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-001.json`. The validation run directory was removed by the tool; the sentinel and report remain.
 
 This manual evidence is not part of the safe default suite. It did not run the real pipeline, access `Z:\surveys`, invoke QGIS/GDAL, contact WebODM, or touch production survey outputs. Large-tree, open-handle, disconnect/reconnect, and cross-volume behavior remain manual validation gaps.
+
+## Phase 3 large-tree SMB filesystem validation evidence
+
+Date: 2026-07-27.
+
+The controlled filesystem validator now includes an opt-in `large_tree_rename` check, covered by `tests/test_filesystem_validation.py`, plus CLI coverage for `--large-tree-files`. The safe default suite still uses pytest-owned temporary roots and tiny counts only.
+
+Manual opt-in validation was run against the disposable SMB root `Z:\__pipeline_validation\filesystem-validation-001` with `--large-tree-files 1000`. The result passed all checks, observed 1,000 files after rename, recorded create/rename/count timings, wrote `reports\smb-large-tree-001.json`, and removed its disposable run directory. No production survey path, real pipeline, QGIS/GDAL, WebODM, or `Z:\surveys` data was touched.
+
+This manual evidence is intentionally outside normal pytest. It is useful for accepting the Phase 3 filesystem primitive on the current SMB share at small representative scale, but it does not replace future validation for full tile counts, cross-volume behavior, open handles, interrupted operations, disconnect/reconnect behavior, or host-loss scenarios.
