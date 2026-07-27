@@ -73,7 +73,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, and ADR-018 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, and ADR-021 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -329,3 +329,90 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, and ADR-
   - Interrupted mixed-set journals can now be reconciled by the dormant helper, while malformed, changed, failed, or ambiguous evidence still fails closed.
   - Retention/cleanup, real Windows/SMB validation, and live RGBPipeline activation remain separate follow-up requirements.
 - **Related files or issues:** R02, R07, R10; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `docs/refactor/PHASE3_PUBLICATION_ACCEPTANCE_REVIEW.md`; ADR-003; ADR-014; ADR-015; ADR-016; ADR-017; Phase 3.
+### ADR-019 - Use a non-destructive cleanup planner before any artifact deletion
+
+- **Decision ID:** ADR-019
+- **Date:** 2026-07-27
+- **Status:** Accepted
+- **Approval context:** After mixed publication-set activation and reconciliation were implemented as dormant helpers, the user approved tackling backup retention and workspace cleanup policy before live RGBPipeline publication wiring.
+- **Context:**
+  - Phase 3 publication now intentionally retains activation journals, previous manifests, previous file artifacts, previous directory artifacts, and run workspaces as recovery and diagnostic evidence.
+  - Large tile directories and run workspaces can consume significant storage if retained forever.
+  - Cleanup is destructive by nature and must not race an active publisher, remove active artifacts, remove unresolved recovery evidence, or operate on production paths during normal tests.
+- **Decision:**
+  - Introduce cleanup as a two-step workflow: first produce a read-only plan, then use a separately approved executor later.
+  - The planner must protect the active `publication.json` run ID and caller-provided preserved run IDs.
+  - Any existing `.publication.lock` blocks cleanup planning for that published root.
+  - Only terminal publication evidence, currently `committed` or `rolled_back`, may produce cleanup candidates.
+  - Non-terminal, failed, malformed, changed, or unknown journal evidence blocks cleanup instead of producing candidates.
+  - Candidates must resolve under an explicit owner root, be old enough according to an explicit minimum age, and carry a reason, kind, run ID, and owner root.
+  - The planner may report terminal activation directories, previous publication manifests, previous artifact backups referenced by terminal journals, and run workspace directories not protected by active/preserved run IDs.
+  - The planner must not delete, move, truncate, or overwrite anything.
+- **Alternatives considered:**
+  - Immediate cleanup during activation: rejected because it lengthens the critical path, risks deleting rollback evidence too early, and is dangerous for million-file tile trees.
+  - Time-based background deletion: rejected because age alone cannot prove a publication is safe to remove, especially around SMB disconnects and long-running jobs.
+  - Manual filesystem cleanup only: safe in the short term but untraceable and error-prone once run workspaces and retained backups accumulate.
+- **Consequences:**
+  - Operators and future tooling can inspect exactly what would be cleaned before any deletion feature exists.
+  - Live RGBPipeline wiring remains blocked on a later executor/approval flow and controlled filesystem validation.
+  - Storage usage still grows until a deletion executor is approved and implemented.
+  - No schema migration, dependency, live pipeline behavior, or destructive operation is introduced by this decision.
+- **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `tests/test_phase3_artifact_workspace.py`; ADR-003; ADR-015; ADR-016; ADR-018; Phase 3.
+### ADR-020 - Execute artifact cleanup only from a revalidated plan
+
+- **Decision ID:** ADR-020
+- **Date:** 2026-07-27
+- **Status:** Accepted
+- **Approval context:** After ADR-019 introduced a read-only cleanup planner, the user approved implementing the explicit cleanup executor/operator flow before live RGBPipeline publication wiring.
+- **Context:**
+  - Retained activation evidence, previous artifacts, and workspaces need a way to be removed eventually, but deletion is destructive and cannot be inferred from a previous plan alone.
+  - A valid cleanup plan can become stale if a publication lock appears, the active manifest changes, evidence changes, or a candidate disappears.
+  - Operator cleanup needs dry-run review, explicit acknowledgement, containment checks, ownership sentinels, and audit evidence.
+- **Decision:**
+  - Add a dormant `execute_artifact_cleanup()` helper that defaults to dry-run and deletes only when `allow_delete=True`.
+  - Re-run `plan_artifact_cleanup()` immediately before mutation and reject execution if the fresh candidate set or blocked reasons differ from the caller-reviewed plan.
+  - Require an explicit `.artifact-cleanup-root` sentinel file at each owner root before any candidate under that root can be deleted.
+  - Reject filesystem roots, owner-root candidates, wrong candidate kinds, missing sentinels, active publication locks, and stale plans before deletion.
+  - Write an audit record under `.artifact-cleanup-audit/<cleanup-id>.json` for approved delete attempts, including candidates, deleted entries, failed attempts, and blocked reasons.
+  - Add `tools/artifact_cleanup.py` with read-only `plan` and guarded `execute` commands; `execute` requires `--allow-delete` and a caller-supplied cleanup ID.
+  - Keep the executor dormant and operator-invoked; do not call it from `RGBPipeline` or background jobs.
+- **Alternatives considered:**
+  - Delete directly from planner output without revalidation: rejected because the plan can become stale after review.
+  - Use age-only cleanup: rejected because age does not prove publication safety or owner liveness.
+  - Require only `--allow-delete`: rejected because a mistyped root would still be dangerous without owner-root sentinels.
+  - Move to trash/quarantine instead of deletion: safer for some filesystems but not reliable for large tile trees, network shares, or cross-volume roots without separate storage policy.
+- **Consequences:**
+  - Operators get a dry-run-first workflow and explicit audit trail before any future cleanup use.
+  - The helper can delete files/directories when intentionally invoked, so production use still requires operator authorization and controlled path selection.
+  - Normal tests delete only pytest-owned temporary files/directories with sentinels.
+  - Live pipeline behavior, publication activation defaults, database schema, and dependencies remain unchanged.
+  - Real SMB deletion performance, interrupted deletion recovery, antivirus/indexer contention, and large-tree timing remain unvalidated outside controlled environment tests.
+- **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `tools/artifact_cleanup.py`; `tests/test_phase3_artifact_workspace.py`; ADR-019; Phase 3.
+### ADR-021 - Validate publication filesystem behavior only under disposable sentinel roots
+
+- **Decision ID:** ADR-021
+- **Date:** 2026-07-27
+- **Status:** Accepted
+- **Approval context:** After the guarded cleanup executor was implemented, the user approved the next prerequisite: controlled local/cross-volume/SMB filesystem validation before live RGBPipeline publication wiring.
+- **Context:**
+  - Phase 3 publication relies on filesystem behaviors that vary by local disk, cross-volume paths, Windows SMB shares, open handles, caching, antivirus/indexers, and disconnect/reconnect behavior.
+  - The hermetic suite proves helper logic but cannot prove operational filesystem semantics for production-like storage.
+  - Validation itself must create, rename, replace, and delete files, so it must never run against production survey roots or broad paths by accident.
+- **Decision:**
+  - Add an explicit opt-in filesystem validator that runs only under a caller-supplied disposable root containing `.filesystem-validation-root`.
+  - Require `--allow-destructive-validation` before creating, replacing, renaming, or deleting validation artifacts.
+  - Keep validation artifacts under `.filesystem-validation-runs/<validation-id>` and reject filesystem roots, unsafe validation IDs, missing sentinels, and reused validation IDs.
+  - Validate the primitives needed by Phase 3 publication: exclusive-create lock behavior, file replacement, directory backup/candidate rename, and JSON read-after-write visibility.
+  - Emit structured JSON results and optionally write a report beneath the validation root.
+  - Keep this separate from `RGBPipeline`, publication activation, cleanup execution, and normal default tests.
+- **Alternatives considered:**
+  - Treat hermetic tests as sufficient: rejected because SMB/cross-volume behavior is explicitly outside their scope.
+  - Run validation automatically from the pipeline: rejected because it mutates the target filesystem and could collide with real work.
+  - Validate directly inside survey roots: rejected because disposable validation must not touch real survey outputs.
+  - Use external benchmark tools: rejected for this slice because the required publication semantics are narrow and can be tested with standard-library primitives.
+- **Consequences:**
+  - Operators get a repeatable protocol for local, cross-volume, and SMB validation before live publication wiring is enabled.
+  - The tool is intentionally destructive within its disposable sentinel root, so target selection remains an operator responsibility.
+  - Normal tests exercise only pytest-owned temporary roots and do not validate real SMB behavior.
+  - Live RGBPipeline publication remains deferred until controlled validation is run and reviewed in the intended environment.
+- **Related files or issues:** R02, R04, R07, R10, R11; `shared/filesystem_validation.py`; `tools/filesystem_validation.py`; `tests/test_filesystem_validation.py`; Phase 3; ADR-014; ADR-015; ADR-018; ADR-020.

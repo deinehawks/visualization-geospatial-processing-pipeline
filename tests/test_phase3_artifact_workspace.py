@@ -6,6 +6,8 @@ import pytest
 
 import shared.artifacts as artifacts_module
 from shared.artifacts import (
+    ARTIFACT_CLEANUP_AUDIT_DIR,
+    ARTIFACT_CLEANUP_SENTINEL_NAME,
     PublicationArtifact,
     activate_publication,
     activate_publication_with_lock,
@@ -13,14 +15,18 @@ from shared.artifacts import (
     create_run_workspace,
     describe_published_survey,
     describe_run_workspace,
+    execute_artifact_cleanup,
     plan_published_survey,
     plan_published_survey_from_rgb_path,
     plan_run_workspace,
+    plan_artifact_cleanup,
     publication_activation_path,
     reconcile_directory_publication,
     reconcile_publication_set,
     prepare_publication,
 )
+from tools.artifact_cleanup import main as cleanup_cli_main
+
 from shared.publication_lock import (
     PUBLICATION_LOCK_NAME,
     PublicationLockedError,
@@ -470,6 +476,368 @@ def test_activate_publication_rejects_mixed_set_without_changing_active_manifest
     assert published.publication_manifest.read_bytes() == original_manifest
     assert not (published.root / "ortho" / "orthomosaic.tif").exists()
     assert not published.tiles_ortho_round.exists()
+
+def test_plan_artifact_cleanup_reports_only_terminal_unprotected_evidence(tmp_path):
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    published.root.mkdir(parents=True)
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "active-run"}\n',
+        encoding="utf-8",
+    )
+    old_run = "old-run"
+    old_activation = published.root / ".activation" / old_run
+    old_activation.mkdir(parents=True)
+    previous_manifest = published.root / f".publication.json.{old_run}.previous"
+    previous_manifest.write_text("old manifest", encoding="utf-8")
+    previous_file = published.ortho / f".orthomosaic.tif.{old_run}.previous"
+    previous_file.parent.mkdir(parents=True)
+    previous_file.write_text("old file", encoding="utf-8")
+    previous_tiles = published.tiles_ortho_round.parent / ".previous" / f"round-corners.{old_run}"
+    (previous_tiles / "11").mkdir(parents=True)
+    (previous_tiles / "11" / "tile.png").write_bytes(b"old tile")
+    journal = {
+        "journal_version": 1,
+        "run_id": old_run,
+        "survey_id": "AH-026019",
+        "output_type": "publication_set",
+        "status": "committed",
+        "previous_publication_manifest": str(previous_manifest),
+        "artifacts": [
+            {
+                "kind": "file",
+                "previous": str(previous_file),
+            },
+            {
+                "kind": "directory",
+                "previous": str(previous_tiles),
+            },
+        ],
+    }
+    (old_activation / "publication-set.json").write_text(
+        json.dumps(journal),
+        encoding="utf-8",
+    )
+    workspace_root = tmp_path / "workspaces"
+    old_workspace = workspace_root / old_run
+    active_workspace = workspace_root / "active-run"
+    keep_workspace = workspace_root / "keep-run"
+    old_workspace.mkdir(parents=True)
+    active_workspace.mkdir()
+    keep_workspace.mkdir()
+    for path in [old_activation, previous_manifest, previous_file, previous_tiles, old_workspace]:
+        artifacts_module.os.utime(path, (100.0, 100.0))
+
+    plan = plan_artifact_cleanup(
+        published=published,
+        workspace_root=workspace_root,
+        preserve_run_ids=("keep-run",),
+        min_age_seconds=50,
+        now=200,
+    )
+
+    candidate_paths = {candidate.path for candidate in plan.candidates}
+    assert old_activation.resolve() in candidate_paths
+    assert previous_manifest.resolve() in candidate_paths
+    assert previous_file.resolve() in candidate_paths
+    assert previous_tiles.resolve() in candidate_paths
+    assert old_workspace.resolve() in candidate_paths
+    assert active_workspace.resolve() not in candidate_paths
+    assert keep_workspace.resolve() not in candidate_paths
+    assert plan.protected_run_ids == ("active-run", "keep-run")
+    assert plan.blocked_reasons == ()
+
+
+def test_plan_artifact_cleanup_blocks_when_publication_lock_exists(tmp_path):
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    published.root.mkdir(parents=True)
+    (published.root / PUBLICATION_LOCK_NAME).write_text("locked", encoding="utf-8")
+    old_activation = published.root / ".activation" / "old-run"
+    old_activation.mkdir(parents=True)
+
+    plan = plan_artifact_cleanup(published=published)
+
+    assert plan.candidates == ()
+    assert len(plan.blocked_reasons) == 1
+    assert "Publication lock exists" in plan.blocked_reasons[0]
+
+
+def test_plan_artifact_cleanup_blocks_nonterminal_journal_without_candidates(tmp_path):
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    run_id = "old-run"
+    activation = published.root / ".activation" / run_id
+    activation.mkdir(parents=True)
+    (activation / "publication-set.json").write_text(
+        json.dumps(
+            {
+                "journal_version": 1,
+                "run_id": run_id,
+                "survey_id": "AH-026019",
+                "output_type": "publication_set",
+                "status": "activated",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_module.os.utime(activation, (100.0, 100.0))
+
+    plan = plan_artifact_cleanup(published=published, min_age_seconds=50, now=200)
+
+    assert plan.candidates == ()
+    assert len(plan.blocked_reasons) == 1
+    assert "not terminal" in plan.blocked_reasons[0]
+
+
+def test_plan_artifact_cleanup_blocks_mixed_terminal_and_nonterminal_evidence(tmp_path):
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    run_id = "old-run"
+    activation = published.root / ".activation" / run_id
+    activation.mkdir(parents=True)
+    previous_manifest = published.root / f".publication.json.{run_id}.previous"
+    previous_manifest.write_text("old manifest", encoding="utf-8")
+    (activation / "publication-set.json").write_text(
+        json.dumps(
+            {
+                "journal_version": 1,
+                "run_id": run_id,
+                "survey_id": "AH-026019",
+                "output_type": "publication_set",
+                "status": "committed",
+                "previous_publication_manifest": str(previous_manifest),
+            }
+        ),
+        encoding="utf-8",
+    )
+    (activation / "activation.json").write_text(
+        json.dumps(
+            {
+                "journal_version": 1,
+                "run_id": run_id,
+                "survey_id": "AH-026019",
+                "output_type": "tiles",
+                "status": "activated",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_module.os.utime(activation, (100.0, 100.0))
+    artifacts_module.os.utime(previous_manifest, (100.0, 100.0))
+
+    plan = plan_artifact_cleanup(published=published, min_age_seconds=50, now=200)
+
+    assert plan.candidates == ()
+    assert len(plan.blocked_reasons) == 1
+    assert "not terminal" in plan.blocked_reasons[0]
+
+def test_plan_artifact_cleanup_respects_minimum_age(tmp_path):
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    run_id = "old-run"
+    activation = published.root / ".activation" / run_id
+    activation.mkdir(parents=True)
+    (activation / "publication-set.json").write_text(
+        json.dumps(
+            {
+                "journal_version": 1,
+                "run_id": run_id,
+                "survey_id": "AH-026019",
+                "output_type": "publication_set",
+                "status": "committed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    artifacts_module.os.utime(activation, (190.0, 190.0))
+
+    plan = plan_artifact_cleanup(published=published, min_age_seconds=50, now=200)
+
+    assert plan.candidates == ()
+    assert plan.blocked_reasons == ()
+
+
+def _prepared_cleanup_plan(tmp_path):
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    published.root.mkdir(parents=True)
+    published.publication_manifest.write_text(
+        '{"status": "published", "run_id": "active-run"}\n',
+        encoding="utf-8",
+    )
+    run_id = "old-run"
+    activation = published.root / ".activation" / run_id
+    activation.mkdir(parents=True)
+    previous_manifest = published.root / f".publication.json.{run_id}.previous"
+    previous_manifest.write_text("old manifest", encoding="utf-8")
+    previous_file = published.ortho / f".orthomosaic.tif.{run_id}.previous"
+    previous_file.parent.mkdir(parents=True)
+    previous_file.write_text("old file", encoding="utf-8")
+    (activation / "publication-set.json").write_text(
+        json.dumps(
+            {
+                "journal_version": 1,
+                "run_id": run_id,
+                "survey_id": "AH-026019",
+                "output_type": "publication_set",
+                "status": "committed",
+                "previous_publication_manifest": str(previous_manifest),
+                "artifacts": [
+                    {
+                        "kind": "file",
+                        "previous": str(previous_file),
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    workspace_root = tmp_path / "workspaces"
+    old_workspace = workspace_root / run_id
+    old_workspace.mkdir(parents=True)
+    for path in [activation, previous_manifest, previous_file, old_workspace]:
+        artifacts_module.os.utime(path, (100.0, 100.0))
+    plan = plan_artifact_cleanup(
+        published=published,
+        workspace_root=workspace_root,
+        min_age_seconds=50,
+        now=200,
+    )
+    assert plan.blocked_reasons == ()
+    assert len(plan.candidates) == 4
+    return published, workspace_root, plan
+
+
+def test_execute_artifact_cleanup_dry_run_deletes_nothing_without_sentinels(tmp_path):
+    published, workspace_root, plan = _prepared_cleanup_plan(tmp_path)
+
+    result = execute_artifact_cleanup(
+        plan=plan,
+        published=published,
+        workspace_root=workspace_root,
+        min_age_seconds=50,
+        now=200,
+    )
+
+    assert result.dry_run is True
+    assert result.deleted == ()
+    assert result.skipped == plan.candidates
+    assert result.blocked_reasons == ()
+    assert not (published.root / ARTIFACT_CLEANUP_AUDIT_DIR).exists()
+    assert all(candidate.path.exists() for candidate in plan.candidates)
+
+
+def test_execute_artifact_cleanup_requires_owner_sentinels_before_delete(tmp_path):
+    published, workspace_root, plan = _prepared_cleanup_plan(tmp_path)
+
+    result = execute_artifact_cleanup(
+        plan=plan,
+        published=published,
+        workspace_root=workspace_root,
+        min_age_seconds=50,
+        now=200,
+        allow_delete=True,
+    )
+
+    assert result.dry_run is False
+    assert result.deleted == ()
+    assert len(result.blocked_reasons) == 2
+    assert all("missing sentinel" in reason for reason in result.blocked_reasons)
+    assert all(candidate.path.exists() for candidate in plan.candidates)
+    assert not (published.root / ARTIFACT_CLEANUP_AUDIT_DIR).exists()
+
+
+def test_execute_artifact_cleanup_blocks_when_fresh_plan_changes(tmp_path):
+    published, workspace_root, plan = _prepared_cleanup_plan(tmp_path)
+    (published.root / ARTIFACT_CLEANUP_SENTINEL_NAME).write_text(
+        "owned by test", encoding="utf-8"
+    )
+    (workspace_root / ARTIFACT_CLEANUP_SENTINEL_NAME).write_text(
+        "owned by test", encoding="utf-8"
+    )
+    (published.root / PUBLICATION_LOCK_NAME).write_text("locked", encoding="utf-8")
+
+    result = execute_artifact_cleanup(
+        plan=plan,
+        published=published,
+        workspace_root=workspace_root,
+        min_age_seconds=50,
+        now=200,
+        allow_delete=True,
+    )
+
+    assert result.deleted == ()
+    assert any("Publication lock exists" in reason for reason in result.blocked_reasons)
+    assert any("Cleanup plan changed" in reason for reason in result.blocked_reasons)
+    assert all(candidate.path.exists() for candidate in plan.candidates)
+
+
+def test_execute_artifact_cleanup_deletes_candidates_and_writes_audit(tmp_path):
+    published, workspace_root, plan = _prepared_cleanup_plan(tmp_path)
+    published_sentinel = published.root / ARTIFACT_CLEANUP_SENTINEL_NAME
+    workspace_sentinel = workspace_root / ARTIFACT_CLEANUP_SENTINEL_NAME
+    published_sentinel.write_text("owned by test", encoding="utf-8")
+    workspace_sentinel.write_text("owned by test", encoding="utf-8")
+
+    result = execute_artifact_cleanup(
+        plan=plan,
+        published=published,
+        workspace_root=workspace_root,
+        min_age_seconds=50,
+        now=200,
+        allow_delete=True,
+        cleanup_id="cleanup-001",
+    )
+
+    assert result.dry_run is False
+    assert len(result.deleted) == len(plan.candidates)
+    assert result.skipped == ()
+    assert result.blocked_reasons == ()
+    assert result.audit_path == published.root / ARTIFACT_CLEANUP_AUDIT_DIR / "cleanup-001.json"
+    assert not any(candidate.path.exists() for candidate in plan.candidates)
+    assert published_sentinel.is_file()
+    assert workspace_sentinel.is_file()
+    audit = json.loads(result.audit_path.read_text(encoding="utf-8"))
+    assert audit["status"] == "completed"
+    assert len(audit["candidates"]) == len(plan.candidates)
+    assert len(audit["deleted"]) == len(plan.candidates)
+    assert all(attempt["status"] == "deleted" for attempt in audit["attempts"])
+
+def test_artifact_cleanup_cli_plans_requires_ack_and_executes(tmp_path, capsys):
+    published, workspace_root, plan = _prepared_cleanup_plan(tmp_path)
+
+    assert cleanup_cli_main(
+        [
+            "plan",
+            "--published-root", str(published.root),
+            "--workspace-root", str(workspace_root),
+            "--min-age-seconds", "50",
+        ]
+    ) == 0
+    planned = json.loads(capsys.readouterr().out)
+    assert planned["status"] == "planned"
+    assert len(planned["candidates"]) == len(plan.candidates)
+    assert all(candidate.path.exists() for candidate in plan.candidates)
+
+    execute_args = [
+        "execute",
+        "--published-root", str(published.root),
+        "--workspace-root", str(workspace_root),
+        "--min-age-seconds", "50",
+        "--cleanup-id", "cli-cleanup-001",
+    ]
+    assert cleanup_cli_main(execute_args) == 2
+    missing_ack = json.loads(capsys.readouterr().out)
+    assert "--allow-delete" in missing_ack["error"]
+    assert all(candidate.path.exists() for candidate in plan.candidates)
+
+    (published.root / ARTIFACT_CLEANUP_SENTINEL_NAME).write_text(
+        "owned by test", encoding="utf-8"
+    )
+    (workspace_root / ARTIFACT_CLEANUP_SENTINEL_NAME).write_text(
+        "owned by test", encoding="utf-8"
+    )
+    assert cleanup_cli_main(execute_args + ["--allow-delete"]) == 0
+    executed = json.loads(capsys.readouterr().out)
+    assert executed["status"] == "deleted"
+    assert len(executed["deleted"]) == len(plan.candidates)
+    assert Path(executed["audit_path"]).is_file()
+    assert not any(candidate.path.exists() for candidate in plan.candidates)
 
 def _prepare_mixed_publication_set(tmp_path, *, existing_final=False):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")

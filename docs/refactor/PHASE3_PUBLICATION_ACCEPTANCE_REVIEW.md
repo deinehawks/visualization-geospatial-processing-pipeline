@@ -23,8 +23,8 @@ The file-only activation, one-directory activation, restart reconciliation, owne
 | Existing consumers resolve final artifacts | Map boundary and orthomosaic resolvers prefer valid publication-manifest entries and retain legacy fallback | Pass for covered consumers |
 | One run publishes a complete coherent artifact set | Mixed file/directory activation is rejected; each directory activation writes a manifest containing only that directory | Blocker |
 | Current RGBPipeline uses the validated publish boundary | Stages still mirror successful workspace outputs directly to legacy survey paths | Blocker for Phase 3 completion |
-| Cleanup and retention are defined | `.previous`, `.activation`, workspaces, and recovery evidence are intentionally retained; no approved policy exists | Deferred deliverable |
-| Same-volume, cross-volume, and SMB behavior is validated | Unit tests exercise copy/rename boundaries under temporary paths, not distinct volumes or a network share | External validation gap |
+| Cleanup and retention are defined | ADR-019/ADR-020 define read-only planning plus guarded, sentinel-owned, audit-backed explicit execution | Partial pass; controlled filesystem validation still required |
+| Same-volume, cross-volume, and SMB behavior is validated | ADR-021 adds an explicit disposable-root validation protocol; real local/cross-volume/SMB runs are not yet executed | Protocol ready; external validation still pending |
 
 ## What is accepted
 
@@ -71,8 +71,8 @@ The current workspace migrations intentionally mirror successful stage outputs t
 
 ## Non-blocking but required before Phase 3 completion
 
-- Define retention and cleanup rules for workspaces, `.previous`, `.activation`, and `.publication-lock-recovery` evidence, including ownership sentinels and failure preservation.
-- Run controlled same-volume, cross-volume, and Windows SMB validation with disposable data and explicit authorization.
+- Validate the cleanup planner/executor workflow in controlled local, cross-volume, large-tree, and Windows SMB environments before recommending operational cleanup.
+- Run the ADR-021 validation tool on controlled same-volume, cross-volume, large-tree, and Windows SMB disposable roots with explicit authorization, then review reports before live wiring.
 - Measure large-tree scan and rename behavior with representative tile counts.
 - Document the operator sequence for diagnosing an abandoned lock, verifying liveness externally, recovering evidence, and resuming reconciliation.
 - Confirm reporting consumers beyond the covered map-export resolvers either use the manifest or intentionally remain on legacy paths.
@@ -89,10 +89,32 @@ Resolve the complete publication-set decision before wiring any live pipeline st
 - Full safe default suite: 154 passed.
 - git diff --check: passed.
 - No external service, production database, real survey root, network share, QGIS/GDAL executable, or live pipeline was used.
+
 ## ADR-018 follow-up
 
 Date: 2026-07-27.
 
 The mixed-artifact publication-set blocker identified by this review is now partially resolved by dormant code: `activate_publication_set_with_lock()` validates a complete staged file/directory generation, holds one publication lock, writes one set-level journal, activates all artifacts before a single authoritative `publication.json` commit, and rolls back caught pre-commit activation failures.
 
-This does not approve live RGBPipeline wiring yet. The remaining live-integration prerequisites are mixed-set restart reconciliation for interrupted non-committed journals, retention/cleanup policy, and controlled local/SMB filesystem validation.
+This does not approve live RGBPipeline wiring yet. Mixed-set restart reconciliation and the non-destructive cleanup planner are now implemented as dormant helpers. The remaining live-integration prerequisite is running and reviewing controlled local/cross-volume/SMB filesystem validation reports before enabling live publication behavior.
+## ADR-019 follow-up
+
+Date: 2026-07-27.
+
+The retention/cleanup-policy deliverable is now partially resolved by dormant code: `plan_artifact_cleanup()` produces a read-only candidate plan for terminal activation evidence, previous publication manifests, previous artifact backups, and old run workspaces while protecting active/preserved runs and blocking active locks or unresolved evidence.
+
+This does not approve deletion or live RGBPipeline wiring. The remaining cleanup prerequisite is a separately approved executor/operator flow that can validate ownership, preserve audit evidence, support dry-run review, and safely delete only planner-approved candidates.
+## ADR-020 follow-up
+
+Date: 2026-07-27.
+
+The cleanup executor/operator-flow prerequisite is now partially resolved by dormant code: `execute_artifact_cleanup()` revalidates reviewed planner output, requires owner-root sentinels, defaults to dry-run, writes audit JSON for approved deletion attempts, and is exposed through `tools/artifact_cleanup.py` with explicit `--allow-delete` acknowledgement.
+
+This does not approve live RGBPipeline publication wiring or routine production cleanup. Controlled local, cross-volume, large-tree, and Windows SMB validation remain required before the cleanup workflow or publication activation is recommended operationally.
+## ADR-021 follow-up
+
+Date: 2026-07-27.
+
+The controlled filesystem validation prerequisite is now protocol-ready: `validate_publication_filesystem()` and `tools/filesystem_validation.py` can exercise exclusive-create, file-replace, directory-rename, and JSON visibility semantics under an explicit disposable sentinel root.
+
+This does not prove production SMB behavior yet. The tool must still be run on operator-approved disposable same-volume, cross-volume, large-tree, and SMB locations before live publication activation is wired into `RGBPipeline`.

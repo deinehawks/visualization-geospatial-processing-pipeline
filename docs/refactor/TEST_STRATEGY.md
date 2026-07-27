@@ -910,3 +910,67 @@ Validation for this slice:
 - `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 60 passed
 
 This coverage does not terminate a real process, recover a real stale lock, generate real tiles, invoke QGIS/GDAL, contact WebODM, access SMB/network shares, validate real Windows rename semantics, clean backups, or touch production storage.
+## Phase 3 artifact cleanup planner coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `plan_artifact_cleanup()` helper using only pytest-owned published roots, activation journals, previous-artifact placeholders, and workspace directories.
+
+Coverage proves that:
+
+- terminal unprotected publication evidence produces read-only cleanup candidates for activation directories, previous manifests, previous file artifacts, previous directory artifacts, and old workspaces;
+- active and caller-preserved run IDs are protected;
+- an existing `.publication.lock` blocks planning before candidates are returned;
+- non-terminal evidence produces blocked reasons and no candidates;
+- mixed terminal and non-terminal evidence in the same run directory fails closed without candidates; and
+- minimum-age gating suppresses otherwise valid candidates until they are old enough.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "cleanup"` - 5 passed, 60 deselected
+
+This coverage does not delete files, run a cleanup executor, access network shares, validate SMB behavior, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change retention defaults.
+## Phase 3 artifact cleanup executor coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `execute_artifact_cleanup()` helper and `tools/artifact_cleanup.py` CLI using only pytest-owned roots, explicit sentinel files, tiny previous-artifact placeholders, and temporary workspace directories.
+
+Coverage proves that:
+
+- executor dry-run mode deletes nothing and requires no sentinel;
+- deletion is blocked when owner-root sentinels are missing;
+- a fresh `.publication.lock` or changed fresh plan blocks execution after review;
+- approved deletion removes only planner-approved file/directory candidates under sentinel-owned roots;
+- audit JSON records candidates, deleted entries, and per-candidate attempts; and
+- the operator CLI plans read-only, rejects `execute` without `--allow-delete`, and executes only after sentinels plus acknowledgement are present.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tools\artifact_cleanup.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "cleanup"` - 10 passed, 60 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 70 passed
+
+This coverage deletes only pytest-owned temporary files/directories. It does not clean production artifacts, access network shares, validate SMB behavior, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change live cleanup defaults.
+## Phase 3 controlled filesystem validation coverage
+
+Date: 2026-07-27.
+
+`tests/test_filesystem_validation.py` covers the controlled validation helper and CLI using only pytest-owned temporary roots with `.filesystem-validation-root` sentinels.
+
+Coverage proves that:
+
+- validation refuses to run without explicit destructive acknowledgement;
+- validation refuses roots missing the sentinel;
+- disposable validation runs cover exclusive create, file replace, directory rename, and JSON read-after-write checks;
+- disposable run directories are removed by default and can be kept for inspection;
+- reports are written only under the validation root; and
+- the CLI emits JSON, requires `--allow-destructive-validation`, and can write a report.
+
+Validation for this slice:
+
+- `python -m py_compile shared\filesystem_validation.py tools\filesystem_validation.py tests\test_filesystem_validation.py` - passed
+- `python -m pytest -q tests\test_filesystem_validation.py` - 5 passed
+
+This coverage mutates only pytest-owned temporary directories. It does not access network shares, validate SMB behavior, run cross-volume checks, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change live publication defaults.

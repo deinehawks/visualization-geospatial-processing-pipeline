@@ -9,13 +9,19 @@ from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Callable, Iterable, Literal
 
-from shared.publication_lock import acquire_publication_lock, release_publication_lock
+from shared.publication_lock import (
+    PUBLICATION_LOCK_NAME,
+    acquire_publication_lock,
+    release_publication_lock,
+)
 
 
 ArtifactKind = Literal["file", "directory"]
 
 PUBLICATION_MANIFEST_NAME = "publication.json"
 ACTIVATION_JOURNAL_NAME = "activation.json"
+ARTIFACT_CLEANUP_SENTINEL_NAME = ".artifact-cleanup-root"
+ARTIFACT_CLEANUP_AUDIT_DIR = ".artifact-cleanup-audit"
 
 
 @dataclass(frozen=True)
@@ -75,6 +81,42 @@ class PublicationArtifact:
     required_paths: tuple[str, ...] = ()
     expected_file_count: int | None = None
     expected_total_bytes: int | None = None
+
+
+CleanupCandidateKind = Literal["file", "directory"]
+
+
+@dataclass(frozen=True)
+class CleanupCandidate:
+    path: Path
+    kind: CleanupCandidateKind
+    reason: str
+    run_id: str
+    owner_root: Path
+
+
+@dataclass(frozen=True)
+class CleanupPlan:
+    candidates: tuple[CleanupCandidate, ...]
+    protected_run_ids: tuple[str, ...]
+    blocked_reasons: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class CleanupDeletion:
+    path: Path
+    kind: CleanupCandidateKind
+    run_id: str
+    owner_root: Path
+
+
+@dataclass(frozen=True)
+class CleanupExecutionResult:
+    dry_run: bool
+    deleted: tuple[CleanupDeletion, ...]
+    skipped: tuple[CleanupCandidate, ...]
+    blocked_reasons: tuple[str, ...]
+    audit_path: Path | None = None
 
 
 def describe_run_workspace(layout: RunWorkspaceLayout) -> dict[str, str]:
@@ -1359,6 +1401,572 @@ def activate_publication_with_lock(
         release_publication_lock(lock)
 
 
+def plan_artifact_cleanup(
+    *,
+    published: PublishedSurveyLayout,
+    workspace_root: Path | None = None,
+    preserve_run_ids: Iterable[str] = (),
+    min_age_seconds: float = 0,
+    now: float | None = None,
+) -> CleanupPlan:
+    """Build a non-destructive cleanup plan for Phase 3 artifacts.
+
+    The planner never deletes files. It reports terminal publication evidence
+    and old run workspaces that are eligible for a later explicit cleanup
+    executor. Any active lock, non-terminal journal, malformed run ID, or
+    ambiguous evidence becomes a blocked reason instead of a cleanup candidate.
+    """
+
+    if min_age_seconds < 0:
+        raise ValueError("min_age_seconds must be non-negative")
+    reference_time = time.time() if now is None else now
+    published_root = published.root.resolve(strict=False)
+    _reject_filesystem_root(published_root)
+    protected = {_safe_path_component(run_id, "preserve_run_id") for run_id in preserve_run_ids}
+    active_run_id = _active_publication_run_id(published.publication_manifest.resolve(strict=False))
+    if active_run_id is not None:
+        protected.add(active_run_id)
+
+    lock_path = published_root / PUBLICATION_LOCK_NAME
+    if lock_path.exists():
+        return CleanupPlan(
+            candidates=(),
+            protected_run_ids=tuple(sorted(protected)),
+            blocked_reasons=(f"Publication lock exists: {lock_path}",),
+        )
+
+    candidates: list[CleanupCandidate] = []
+    blocked: list[str] = []
+    activation_root = published_root / ".activation"
+    if activation_root.exists():
+        if not activation_root.is_dir():
+            blocked.append(f"Publication activation root is not a directory: {activation_root}")
+        else:
+            for run_dir in sorted(activation_root.iterdir(), key=lambda item: item.name):
+                if not run_dir.is_dir():
+                    blocked.append(f"Unexpected publication activation entry: {run_dir}")
+                    continue
+                try:
+                    run_id = _safe_path_component(run_dir.name, "publication cleanup run_id")
+                except ValueError as exc:
+                    blocked.append(str(exc))
+                    continue
+                if run_id in protected:
+                    continue
+                _plan_terminal_publication_evidence(
+                    run_id=run_id,
+                    run_dir=run_dir,
+                    published_root=published_root,
+                    min_age_seconds=min_age_seconds,
+                    now=reference_time,
+                    candidates=candidates,
+                    blocked=blocked,
+                )
+
+    if workspace_root is not None:
+        workspace_resolved = Path(workspace_root).resolve(strict=False)
+        _reject_filesystem_root(workspace_resolved)
+        if workspace_resolved.exists():
+            if not workspace_resolved.is_dir():
+                blocked.append(f"Workspace root is not a directory: {workspace_resolved}")
+            else:
+                for run_dir in sorted(workspace_resolved.iterdir(), key=lambda item: item.name):
+                    if run_dir.name == ARTIFACT_CLEANUP_SENTINEL_NAME:
+                        continue
+                    if not run_dir.is_dir():
+                        blocked.append(f"Unexpected workspace entry: {run_dir}")
+                        continue
+                    try:
+                        run_id = _safe_path_component(run_dir.name, "workspace cleanup run_id")
+                    except ValueError as exc:
+                        blocked.append(str(exc))
+                        continue
+                    if run_id in protected:
+                        continue
+                    _add_cleanup_candidate_if_old_enough(
+                        path=run_dir,
+                        kind="directory",
+                        reason="run workspace is not active or protected",
+                        run_id=run_id,
+                        owner_root=workspace_resolved,
+                        min_age_seconds=min_age_seconds,
+                        now=reference_time,
+                        candidates=candidates,
+                        blocked=blocked,
+                    )
+
+    return CleanupPlan(
+        candidates=tuple(candidates),
+        protected_run_ids=tuple(sorted(protected)),
+        blocked_reasons=tuple(blocked),
+    )
+
+
+def _plan_terminal_publication_evidence(
+    *,
+    run_id: str,
+    run_dir: Path,
+    published_root: Path,
+    min_age_seconds: float,
+    now: float,
+    candidates: list[CleanupCandidate],
+    blocked: list[str],
+) -> None:
+    journals = [
+        run_dir / "publication-set.json",
+        run_dir / ACTIVATION_JOURNAL_NAME,
+    ]
+    existing_journals = [journal for journal in journals if journal.exists()]
+    if not existing_journals:
+        blocked.append(f"Publication activation directory has no known journal: {run_dir}")
+        return
+    parsed_journals: list[dict[str, object]] = []
+    blocked_count = len(blocked)
+    for journal_path in existing_journals:
+        try:
+            journal = _read_activation_journal(journal_path)
+        except Exception as exc:
+            blocked.append(f"Unable to read cleanup journal {journal_path}: {exc}")
+            continue
+        journal_run_id = journal.get("run_id")
+        if journal_run_id != run_id:
+            blocked.append(f"Cleanup journal run_id does not match its directory: {journal_path}")
+            continue
+        status = journal.get("status")
+        if status not in {"committed", "rolled_back"}:
+            blocked.append(f"Cleanup journal is not terminal: {journal_path} status={status!r}")
+            continue
+        parsed_journals.append(journal)
+
+    if len(blocked) != blocked_count:
+        return
+
+    _add_cleanup_candidate_if_old_enough(
+        path=run_dir,
+        kind="directory",
+        reason="terminal publication activation evidence",
+        run_id=run_id,
+        owner_root=published_root,
+        min_age_seconds=min_age_seconds,
+        now=now,
+        candidates=candidates,
+        blocked=blocked,
+    )
+    for journal in parsed_journals:
+        _plan_journal_previous_paths(
+            journal=journal,
+            run_id=run_id,
+            published_root=published_root,
+            min_age_seconds=min_age_seconds,
+            now=now,
+            candidates=candidates,
+            blocked=blocked,
+        )
+
+
+def _plan_journal_previous_paths(
+    *,
+    journal: dict[str, object],
+    run_id: str,
+    published_root: Path,
+    min_age_seconds: float,
+    now: float,
+    candidates: list[CleanupCandidate],
+    blocked: list[str],
+) -> None:
+    previous_manifest = journal.get("previous_publication_manifest")
+    if isinstance(previous_manifest, str) and previous_manifest:
+        _add_path_value_cleanup_candidate(
+            path_value=previous_manifest,
+            kind="file",
+            reason="previous publication manifest retained after terminal activation",
+            run_id=run_id,
+            owner_root=published_root,
+            min_age_seconds=min_age_seconds,
+            now=now,
+            candidates=candidates,
+            blocked=blocked,
+        )
+    previous_directory = journal.get("previous")
+    if isinstance(previous_directory, str) and previous_directory:
+        _add_path_value_cleanup_candidate(
+            path_value=previous_directory,
+            kind="directory",
+            reason="previous directory publication retained after terminal activation",
+            run_id=run_id,
+            owner_root=published_root,
+            min_age_seconds=min_age_seconds,
+            now=now,
+            candidates=candidates,
+            blocked=blocked,
+        )
+    records = journal.get("artifacts")
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, dict):
+                blocked.append("Mixed publication-set cleanup journal contains non-object artifact")
+                continue
+            path_value = record.get("previous")
+            kind_value = record.get("kind")
+            if isinstance(path_value, str) and path_value:
+                if kind_value not in {"file", "directory"}:
+                    blocked.append("Mixed publication-set cleanup artifact has unknown kind")
+                    continue
+                _add_path_value_cleanup_candidate(
+                    path_value=path_value,
+                    kind=kind_value,
+                    reason="previous mixed publication artifact retained after terminal activation",
+                    run_id=run_id,
+                    owner_root=published_root,
+                    min_age_seconds=min_age_seconds,
+                    now=now,
+                    candidates=candidates,
+                    blocked=blocked,
+                )
+
+
+def _add_path_value_cleanup_candidate(
+    *,
+    path_value: str,
+    kind: CleanupCandidateKind,
+    reason: str,
+    run_id: str,
+    owner_root: Path,
+    min_age_seconds: float,
+    now: float,
+    candidates: list[CleanupCandidate],
+    blocked: list[str],
+) -> None:
+    path = Path(path_value).resolve(strict=False)
+    try:
+        _require_within(path, owner_root)
+    except ValueError as exc:
+        blocked.append(str(exc))
+        return
+    if not path.exists():
+        return
+    if kind == "file" and not path.is_file():
+        blocked.append(f"Cleanup candidate is not a file: {path}")
+        return
+    if kind == "directory" and not path.is_dir():
+        blocked.append(f"Cleanup candidate is not a directory: {path}")
+        return
+    _add_cleanup_candidate_if_old_enough(
+        path=path,
+        kind=kind,
+        reason=reason,
+        run_id=run_id,
+        owner_root=owner_root,
+        min_age_seconds=min_age_seconds,
+        now=now,
+        candidates=candidates,
+        blocked=blocked,
+    )
+
+
+def _add_cleanup_candidate_if_old_enough(
+    *,
+    path: Path,
+    kind: CleanupCandidateKind,
+    reason: str,
+    run_id: str,
+    owner_root: Path,
+    min_age_seconds: float,
+    now: float,
+    candidates: list[CleanupCandidate],
+    blocked: list[str],
+) -> None:
+    resolved = path.resolve(strict=False)
+    root = owner_root.resolve(strict=False)
+    try:
+        _require_within(resolved, root)
+    except ValueError as exc:
+        blocked.append(str(exc))
+        return
+    try:
+        modified_at = resolved.stat().st_mtime
+    except OSError as exc:
+        blocked.append(f"Unable to stat cleanup candidate {resolved}: {exc}")
+        return
+    if now - modified_at < min_age_seconds:
+        return
+    candidate = CleanupCandidate(
+        path=resolved,
+        kind=kind,
+        reason=reason,
+        run_id=run_id,
+        owner_root=root,
+    )
+    if candidate not in candidates:
+        candidates.append(candidate)
+
+
+def execute_artifact_cleanup(
+    *,
+    plan: CleanupPlan,
+    published: PublishedSurveyLayout,
+    workspace_root: Path | None = None,
+    preserve_run_ids: Iterable[str] = (),
+    min_age_seconds: float = 0,
+    now: float | None = None,
+    allow_delete: bool = False,
+    cleanup_id: str | None = None,
+    sentinel_name: str = ARTIFACT_CLEANUP_SENTINEL_NAME,
+    audit_root: Path | None = None,
+    remove_file: Callable[[Path], object] = os.remove,
+    remove_tree: Callable[[Path], object] = shutil.rmtree,
+) -> CleanupExecutionResult:
+    """Execute a cleanup plan only after revalidation and explicit approval.
+
+    The default mode is a dry run. Deletion requires ``allow_delete=True``, a
+    clean caller-supplied plan, an unchanged fresh plan, and an ownership
+    sentinel at every candidate owner root.
+    """
+
+    fresh_plan = plan_artifact_cleanup(
+        published=published,
+        workspace_root=workspace_root,
+        preserve_run_ids=preserve_run_ids,
+        min_age_seconds=min_age_seconds,
+        now=now,
+    )
+    blocked = list(plan.blocked_reasons) + list(fresh_plan.blocked_reasons)
+    requested = {_cleanup_candidate_key(candidate): candidate for candidate in plan.candidates}
+    fresh = {_cleanup_candidate_key(candidate): candidate for candidate in fresh_plan.candidates}
+    stale_keys = sorted(set(requested) - set(fresh))
+    if stale_keys:
+        blocked.append("Cleanup plan changed before execution; rerun planning")
+
+    if not allow_delete:
+        return CleanupExecutionResult(
+            dry_run=True,
+            deleted=(),
+            skipped=tuple(plan.candidates),
+            blocked_reasons=tuple(blocked),
+        )
+    if blocked:
+        return CleanupExecutionResult(
+            dry_run=False,
+            deleted=(),
+            skipped=tuple(plan.candidates),
+            blocked_reasons=tuple(blocked),
+        )
+
+    candidate_list = [fresh[key] for key in sorted(requested)]
+    if not candidate_list:
+        return CleanupExecutionResult(
+            dry_run=False,
+            deleted=(),
+            skipped=(),
+            blocked_reasons=(),
+        )
+    sentinel_errors = _validate_cleanup_sentinels(
+        candidate_list,
+        sentinel_name,
+        extra_roots=(published.root,),
+    )
+    if sentinel_errors:
+        return CleanupExecutionResult(
+            dry_run=False,
+            deleted=(),
+            skipped=tuple(candidate_list),
+            blocked_reasons=tuple(sentinel_errors),
+        )
+
+    audit_path = _cleanup_audit_path(
+        published=published,
+        audit_root=audit_root,
+        cleanup_id=cleanup_id,
+    )
+    started_payload = _cleanup_audit_payload(
+        status="started",
+        dry_run=False,
+        candidates=candidate_list,
+        deleted=[],
+        blocked=[],
+    )
+    _write_json_atomic(audit_path, started_payload)
+
+    deleted: list[CleanupDeletion] = []
+    remaining: list[CleanupCandidate] = []
+    attempts: list[dict[str, object]] = []
+    for candidate in candidate_list:
+        try:
+            _delete_cleanup_candidate(
+                candidate,
+                remove_file=remove_file,
+                remove_tree=remove_tree,
+            )
+        except Exception as exc:
+            blocked.append(f"Unable to delete cleanup candidate {candidate.path}: {exc}")
+            remaining.append(candidate)
+            attempts.append(
+                {
+                    "path": str(candidate.path),
+                    "kind": candidate.kind,
+                    "run_id": candidate.run_id,
+                    "status": "failed",
+                    "error_type": type(exc).__name__,
+                    "error": str(exc),
+                }
+            )
+            break
+        deletion = CleanupDeletion(
+            path=candidate.path,
+            kind=candidate.kind,
+            run_id=candidate.run_id,
+            owner_root=candidate.owner_root,
+        )
+        deleted.append(deletion)
+        attempts.append(
+            {
+                "path": str(candidate.path),
+                "kind": candidate.kind,
+                "run_id": candidate.run_id,
+                "status": "deleted",
+            }
+        )
+    if blocked:
+        deleted_keys = {_cleanup_deletion_key(deletion) for deletion in deleted}
+        remaining.extend(
+            candidate
+            for candidate in candidate_list
+            if _cleanup_candidate_key(candidate) not in deleted_keys
+            and candidate not in remaining
+        )
+    final_payload = _cleanup_audit_payload(
+        status="failed" if blocked else "completed",
+        dry_run=False,
+        candidates=candidate_list,
+        deleted=deleted,
+        blocked=blocked,
+    )
+    final_payload["attempts"] = attempts
+    _write_json_atomic(audit_path, final_payload)
+    return CleanupExecutionResult(
+        dry_run=False,
+        deleted=tuple(deleted),
+        skipped=tuple(remaining),
+        blocked_reasons=tuple(blocked),
+        audit_path=audit_path,
+    )
+
+
+def _cleanup_candidate_key(candidate: CleanupCandidate) -> tuple[str, str, str, str]:
+    return (
+        str(candidate.path.resolve(strict=False)),
+        candidate.kind,
+        candidate.run_id,
+        str(candidate.owner_root.resolve(strict=False)),
+    )
+
+
+def _cleanup_deletion_key(deletion: CleanupDeletion) -> tuple[str, str, str, str]:
+    return (
+        str(deletion.path.resolve(strict=False)),
+        deletion.kind,
+        deletion.run_id,
+        str(deletion.owner_root.resolve(strict=False)),
+    )
+
+
+def _validate_cleanup_sentinels(
+    candidates: Iterable[CleanupCandidate],
+    sentinel_name: str,
+    *,
+    extra_roots: Iterable[Path] = (),
+) -> list[str]:
+    if not sentinel_name:
+        raise ValueError("sentinel_name is required")
+    sentinel_component = _safe_path_component(sentinel_name, "sentinel_name")
+    errors: list[str] = []
+    checked_roots: set[Path] = set()
+    roots = [candidate.owner_root for candidate in candidates]
+    roots.extend(Path(root) for root in extra_roots)
+    for root_value in roots:
+        root = root_value.resolve(strict=False)
+        if root in checked_roots:
+            continue
+        checked_roots.add(root)
+        _reject_filesystem_root(root)
+        sentinel = root / sentinel_component
+        if not sentinel.is_file():
+            errors.append(f"Cleanup owner root is missing sentinel {sentinel}")
+    return errors
+
+
+def _delete_cleanup_candidate(
+    candidate: CleanupCandidate,
+    *,
+    remove_file: Callable[[Path], object],
+    remove_tree: Callable[[Path], object],
+) -> None:
+    path = candidate.path.resolve(strict=False)
+    owner_root = candidate.owner_root.resolve(strict=False)
+    _reject_filesystem_root(path)
+    _require_within(path, owner_root)
+    if path == owner_root:
+        raise ValueError(f"Cleanup candidate must not be its owner root: {path}")
+    if candidate.kind == "file":
+        if not path.is_file():
+            raise ValueError(f"Cleanup candidate is not a file: {path}")
+        remove_file(path)
+        return
+    if candidate.kind == "directory":
+        if not path.is_dir():
+            raise ValueError(f"Cleanup candidate is not a directory: {path}")
+        remove_tree(path)
+        return
+    raise ValueError(f"Unsupported cleanup candidate kind: {candidate.kind}")
+
+
+def _cleanup_audit_path(
+    *,
+    published: PublishedSurveyLayout,
+    audit_root: Path | None,
+    cleanup_id: str | None,
+) -> Path:
+    root = published.root.resolve(strict=False) if audit_root is None else Path(audit_root).resolve(strict=False)
+    _reject_filesystem_root(root)
+    if audit_root is not None:
+        _require_within(root, published.root.resolve(strict=False))
+    identifier = _safe_path_component(cleanup_id or str(int(time.time() * 1000)), "cleanup_id")
+    return root / ARTIFACT_CLEANUP_AUDIT_DIR / f"{identifier}.json"
+
+
+def _cleanup_audit_payload(
+    *,
+    status: str,
+    dry_run: bool,
+    candidates: Iterable[CleanupCandidate],
+    deleted: Iterable[CleanupDeletion],
+    blocked: Iterable[str],
+) -> dict[str, object]:
+    return {
+        "status": status,
+        "dry_run": dry_run,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "candidates": [
+            {
+                "path": str(candidate.path),
+                "kind": candidate.kind,
+                "reason": candidate.reason,
+                "run_id": candidate.run_id,
+                "owner_root": str(candidate.owner_root),
+            }
+            for candidate in candidates
+        ],
+        "deleted": [
+            {
+                "path": str(deletion.path),
+                "kind": deletion.kind,
+                "run_id": deletion.run_id,
+                "owner_root": str(deletion.owner_root),
+            }
+            for deletion in deleted
+        ],
+        "blocked_reasons": list(blocked),
+    }
 def activate_publication_set_with_lock(
     *,
     workspace: RunWorkspaceLayout,
