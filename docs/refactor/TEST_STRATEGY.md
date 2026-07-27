@@ -974,3 +974,17 @@ Validation for this slice:
 - `python -m pytest -q tests\test_filesystem_validation.py` - 5 passed
 
 This coverage mutates only pytest-owned temporary directories. It does not access network shares, validate SMB behavior, run cross-volume checks, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change live publication defaults.
+## Phase 3 manual filesystem validation evidence
+
+Date: 2026-07-27.
+
+Manual opt-in validation was run outside the default pytest suite using the ADR-021 disposable-root protocol.
+
+Validated disposable targets:
+
+- Local: `.tmp/filesystem-validation/local-001` - passed `exclusive_create`, `file_replace`, `directory_rename`, and `json_visibility`.
+- SMB: `Z:\__pipeline_validation\filesystem-validation-001` / `\\192.168.10.5\Visualization\__pipeline_validation\filesystem-validation-001` - passed `exclusive_create`, `file_replace`, `directory_rename`, and `json_visibility`.
+
+The SMB report is retained at `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-001.json`. The validation run directory was removed by the tool; the sentinel and report remain.
+
+This manual evidence is not part of the safe default suite. It did not run the real pipeline, access `Z:\surveys`, invoke QGIS/GDAL, contact WebODM, or touch production survey outputs. Large-tree, open-handle, disconnect/reconnect, and cross-volume behavior remain manual validation gaps.

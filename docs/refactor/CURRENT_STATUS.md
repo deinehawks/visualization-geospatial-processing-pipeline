@@ -2006,3 +2006,36 @@ No database schema, dependency, pipeline stage, operator default, WebODM behavio
 - The protocol still needs to be run and reviewed on explicitly approved disposable same-volume, cross-volume, large-tree, and SMB roots.
 - It does not simulate process crashes, host loss, SMB reconnects, antivirus/indexer contention, open tile-server handles, or million-file tile trees yet.
 - Live `RGBPipeline` publication wiring remains deferred; current stages still use workspace-to-legacy compatibility mirrors.
+## Phase 3 controlled filesystem validation results
+
+Date: 2026-07-27.
+
+### Observed validation
+
+The ADR-021 validator was run manually against disposable roots after the protocol was implemented.
+
+Local disposable validation:
+
+- Root: `.tmp/filesystem-validation/local-001`
+- Result: passed
+- Checks passed: `exclusive_create`, `file_replace`, `directory_rename`, `json_visibility`
+- Disposable run directory cleanup: passed
+- Production data touched: no
+
+SMB disposable validation:
+
+- Root: `Z:\__pipeline_validation\filesystem-validation-001`
+- Resolved root in validator output: `\\192.168.10.5\Visualization\__pipeline_validation\filesystem-validation-001`
+- Report: `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-001.json`
+- Result: passed
+- Checks passed: `exclusive_create`, `file_replace`, `directory_rename`, `json_visibility`
+- Disposable run directory cleanup: passed
+- Sentinel/report intentionally retained for audit review
+- Production survey data touched: no; validation stayed outside `Z:\surveys`
+
+### Remaining validation gaps
+
+- The manual SMB validation used tiny disposable files/directories only.
+- Representative large tile-tree count/rename timing remains unmeasured.
+- Open-handle behavior, antivirus/indexer contention, interrupted delete, process crash, host loss, SMB disconnect/reconnect, and cross-volume behavior remain unvalidated.
+- Live `RGBPipeline` publication wiring remains deferred until those remaining risks are accepted or separately validated.

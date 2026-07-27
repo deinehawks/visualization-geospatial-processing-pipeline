@@ -24,7 +24,7 @@ The file-only activation, one-directory activation, restart reconciliation, owne
 | One run publishes a complete coherent artifact set | Mixed file/directory activation is rejected; each directory activation writes a manifest containing only that directory | Blocker |
 | Current RGBPipeline uses the validated publish boundary | Stages still mirror successful workspace outputs directly to legacy survey paths | Blocker for Phase 3 completion |
 | Cleanup and retention are defined | ADR-019/ADR-020 define read-only planning plus guarded, sentinel-owned, audit-backed explicit execution | Partial pass; controlled filesystem validation still required |
-| Same-volume, cross-volume, and SMB behavior is validated | ADR-021 adds an explicit disposable-root validation protocol; real local/cross-volume/SMB runs are not yet executed | Protocol ready; external validation still pending |
+| Same-volume, cross-volume, and SMB behavior is validated | ADR-021 local and SMB disposable validations passed for exclusive-create, file replace, directory rename, and JSON visibility; cross-volume, large-tree, open-handle, and disconnect behavior remain untested | Partial pass; representative stress validation still pending |
 
 ## What is accepted
 
@@ -117,4 +117,11 @@ Date: 2026-07-27.
 
 The controlled filesystem validation prerequisite is now protocol-ready: `validate_publication_filesystem()` and `tools/filesystem_validation.py` can exercise exclusive-create, file-replace, directory-rename, and JSON visibility semantics under an explicit disposable sentinel root.
 
-This does not prove production SMB behavior yet. The tool must still be run on operator-approved disposable same-volume, cross-volume, large-tree, and SMB locations before live publication activation is wired into `RGBPipeline`.
+Disposable local and SMB validations now passed for the core filesystem primitives. This still does not prove representative production behavior for large tile trees, open handles, antivirus/indexer contention, cross-volume activation, interrupted operations, or SMB disconnect/reconnect scenarios before live publication activation is wired into `RGBPipeline`.
+## Manual filesystem validation evidence
+
+Date: 2026-07-27.
+
+The ADR-021 validator was run against disposable local and SMB roots. Both passed `exclusive_create`, `file_replace`, `directory_rename`, and `json_visibility`. The SMB report is retained at `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-001.json` and the validator cleaned its disposable run directory.
+
+No real survey root, production output, QGIS/GDAL command, WebODM service, or live pipeline was used.
