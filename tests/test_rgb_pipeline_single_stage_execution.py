@@ -25,6 +25,7 @@ from pipelines import rgb_pipeline as rgb_module
 from pipelines.rgb_pipeline import RGBPipeline
 from shared.db.repo import PipelineRepo
 from shared.logging import get_logger
+from shared.artifacts import publication_activation_path
 from shared.publication_lock import acquire_publication_lock, PublicationLockedError
 from tests.fakes import FakeWebODM
 
@@ -1968,10 +1969,16 @@ def test_prepare_publication_staging_writes_workspace_manifest_without_activatio
     }
     geojson_record = artifact_records["kml_boundary.published.processed_files.geojson"]
     tiles_record = artifact_records["qgis.published.tiles_dir"]
+    expected_tiles_staged_path = publication_activation_path(
+        published_path=published_tiles,
+        run_id=pipeline.run_id,
+    )
     assert geojson_record["kind"] == "file"
     assert tiles_record["kind"] == "directory"
     assert Path(geojson_record["staged_path"]).read_text(encoding="utf-8") == "workspace geojson"
-    assert (Path(tiles_record["staged_path"]) / "12" / "345" / "678.png").read_text(
+    assert Path(tiles_record["staged_path"]).resolve(strict=False) == expected_tiles_staged_path.resolve(strict=False)
+    assert not (pipeline.workspace_layout.publish / "staged" / "tiles" / "ortho" / "round-corners").exists()
+    assert (expected_tiles_staged_path / "12" / "345" / "678.png").read_text(
         encoding="utf-8"
     ) == "workspace tile"
     assert published_geojson.read_text(encoding="utf-8") == "legacy geojson remains untouched"

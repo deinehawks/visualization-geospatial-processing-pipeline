@@ -609,6 +609,7 @@ class RGBPipeline(
             workspace=self.workspace_layout,
             published=self.published_layout,
             artifacts=artifacts,
+            stage_directories_for_activation=True,
         )
         result["status"] = "staged"
         result["staged_manifest"] = str(staged_manifest)

@@ -1088,3 +1088,19 @@ Validation for this slice:
 - `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 9 passed, 19 deselected.
 
 The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, activate publication automatically, recover stale locks, run cleanup, or mutate production survey roots.
+
+## Phase 3 directory/tile staging optimization coverage
+
+Date: 2026-07-30.
+
+`tests/test_phase3_artifact_workspace.py` and `tests/test_rgb_pipeline_single_stage_execution.py` now cover optimized directory publication staging using pytest-owned roots.
+
+Coverage proves that `prepare_publication(stage_directories_for_activation=True)` stages a workspace directory directly at the exact hidden activation path, writes that path into the staged manifest, and allows activation to rename the prepared directory without invoking `copytree`. RGBPipeline staged publication now records QGIS tiles at that hidden activation path while preserving file staging under the run workspace and avoiding writes to the visible published `publication.json`.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "stage_directory or zero_copy"` - 3 passed, 70 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 9 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, activate publication automatically, clean hidden activation candidates, or mutate production survey roots.

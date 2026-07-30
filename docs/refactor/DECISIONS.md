@@ -73,7 +73,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, ADR-021, ADR-022, and ADR-023 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, ADR-021, ADR-022, ADR-023, and ADR-024 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -469,3 +469,30 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   - Cross-run image directories remain available in the workspace/legacy mirrors but are not part of the publication activation set by default.
   - This does not remove legacy mirroring, optimize tile staging, implement cleanup metadata archival, or wire publication into normal `RGBPipeline.run()`.
 - **Related files or issues:** R02, R07, R10, R11; `pipelines/rgb_pipeline.py`; `tests/test_rgb_pipeline_single_stage_execution.py`; ADR-003; ADR-018; ADR-022; Phase 3.
+
+
+### ADR-024 - Stage directory artifacts at hidden activation paths to avoid duplicate tile copies
+
+- **Decision ID:** ADR-024
+- **Date:** 2026-07-30
+- **Status:** Accepted
+- **Approval context:** After accepting the publication artifact allowlist, the user approved optimizing tile/directory staging before further live publication wiring.
+- **Context:**
+  - Large QGIS tile trees can contain many files.
+  - The original staged-publication bridge copied directory artifacts into the run workspace staging tree, and mixed activation then copied them again to a target-adjacent activation path before rename.
+  - ADR-016/ADR-018 already define the exact hidden same-filesystem activation path as the safe zero-copy directory activation source.
+- **Decision:**
+  - Add an explicit `stage_directories_for_activation` option to `prepare_publication()`.
+  - When enabled, directory artifacts are copied once directly to `publication_activation_path(published_path, run_id)` and recorded there in the staged manifest.
+  - Enable this option from `RGBPipeline.prepare_publication_staging()` so QGIS tile directories can be activated by rename rather than by a second full copy.
+  - Keep file artifacts staged inside the run workspace and keep explicit activation as a separate operator-controlled step.
+- **Alternatives considered:**
+  - Keep double-copy staging: safest in terms of published-root mutation during staging, but too expensive for large tile trees.
+  - Move workspace tile directories instead of copying once: rejected because it would remove run-workspace diagnostic evidence before activation completes.
+  - Generate QGIS tiles directly into the hidden activation path: deferred because it changes stage-generation paths and recovery semantics more broadly.
+- **Consequences:**
+  - Directory activation avoids a second full `copytree`, reducing time and temporary storage pressure for tile publication.
+  - Explicit staging can now create hidden non-authoritative `.activation/<run-id>/...tmp` directories under the published root before activation.
+  - If staging is abandoned, hidden activation candidates may need operator-reviewed cleanup; visible published artifacts and `publication.json` remain unchanged.
+  - Legacy mirrors, automatic runtime activation, cleanup metadata archival, and production-scale SMB behavior remain separate follow-up concerns.
+- **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `tests/test_phase3_artifact_workspace.py`; `tests/test_rgb_pipeline_single_stage_execution.py`; ADR-016; ADR-018; ADR-023; Phase 3.
