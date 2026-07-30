@@ -602,3 +602,460 @@ Coverage proves that:
 - partial workspace orthomosaic files remain available as diagnostic evidence after a controlled failure.
 
 The tests use a fake WebODM processor, pytest-owned survey/workspace paths, fake upload-cache behavior, and orthomosaic-only export configuration. They do not contact WebODM, run QGIS/GDAL, execute the real pipeline, access production storage, or delete real data.
+## Phase 3 QGIS workspace coverage
+
+Date: 2026-07-20.
+
+QGIS workspace migration coverage remains in `tests/test_rgb_pipeline_single_stage_execution.py` and uses a fake `QGISTools` boundary. The fake records clip/tile calls and writes tiny text/tile placeholders under pytest-owned temporary paths. It does not execute QGIS, GDAL, `gdalwarp`, `gdal2tiles`, `gdalinfo`, subprocesses, network shares, or real survey roots.
+
+Covered behavior:
+
+- bounded QGIS clips write to `workspace/qgis/clipped/ortho` first and then mirror to legacy `rgb/qgis/clipped/ortho`;
+- tile generation writes to `workspace/qgis/tiles/<mode>` first and then mirrors to legacy `rgb/tiles/ortho/<mode>`;
+- returned QGIS outputs preserve legacy-compatible `clip.output`, `tiles.output_dir`, `selected_orthomosaic.clipped_path`, and `selected_orthomosaic.tiles_dir`;
+- additive `workspace` and `published` metadata reports both ownership layers; and
+- controlled clip failure leaves existing legacy clipped/tile outputs untouched while preserving partial workspace evidence.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py`
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k qgis`
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest --collect-only -q`
+- `python -m pytest -q`
+- `git diff --check`
+
+The tests intentionally do not validate real GDAL/QGIS command-line behavior, local/network throughput, or Windows SMB behavior. Those remain external/operator concerns outside the safe default test suite.
+## Phase 3 WebODM pointcloud and all-assets ZIP workspace coverage
+
+Date: 2026-07-20.
+
+WebODM remaining-export coverage stays in `tests/test_rgb_pipeline_single_stage_execution.py` and uses a fake WebODM processor. The fake records pointcloud and all-assets ZIP calls and writes tiny placeholder files under pytest-owned temporary paths. It does not contact WebODM, upload images, download real assets, run QGIS/GDAL, convert real point clouds, execute subprocesses, access network shares, or touch real survey roots.
+
+Covered behavior:
+
+- Task 2 pointcloud export receives `workspace/webodm/3d/task2` as its output directory;
+- successful pointcloud LAZ/PCD outputs are mirrored back to legacy `rgb/3d`;
+- Task 2 all-assets ZIP download receives `workspace/webodm/odm/task2/<name>.zip` as its output path;
+- successful all-assets ZIP output is mirrored back to legacy `rgb/odm`;
+- returned WebODM downloads preserve legacy-compatible pointcloud and ZIP paths;
+- additive `workspace` and `published` metadata reports both ownership layers; and
+- controlled pointcloud failure leaves existing legacy pointcloud files untouched while preserving partial workspace evidence.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_single_stage_execution.py -k "webodm_task2_remaining or webodm_pointcloud_failure"`
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py tests\test_rgb_pipeline_construction.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest --collect-only -q`
+- `python -m pytest -q`
+- `git diff --check`
+
+DEM downloads remain intentionally untested and unmigrated because production currently sets `dem_do_download = False`; activating that path should be a separate behavior decision with its own fake GDAL/WebODM coverage.
+
+## Phase 3 map-export publication-manifest compatibility coverage
+
+Date: 2026-07-20.
+
+Map-export manifest compatibility coverage lives in `tests/test_map_export_manifest_resolution.py` and uses only pytest-owned survey roots and tiny placeholder files. It does not run `map.py`, QGIS print export, GDAL/QGIS, the real RGB pipeline, WebODM, network shares, production SQLite, or real survey roots.
+
+Covered behavior:
+
+- clipped orthomosaic lookup prefers an existing `publication.json` artifact path over legacy glob candidates;
+- clipped orthomosaic lookup falls back to the legacy survey-tree scan when no publication manifest exists;
+- clipped orthomosaic lookup falls back to the legacy survey-tree scan when the manifest-listed artifact is missing;
+- boundary lookup prefers an existing publication-manifest KML/KMZ artifact before the legacy manifest `kml_file` path; and
+- publication artifact paths are resolved inside the published `rgb` root before they are considered usable.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile modules/map_export/survey_manifest.py modules/map_export/orthomosaic_finder.py modules/map_export/boundary_finder.py tests/test_map_export_manifest_resolution.py`
+- `python -m pytest -q tests/test_map_export_manifest_resolution.py`
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py tests/test_map_export_manifest_resolution.py`
+
+Publish activation, real map package export, print layout generation, large raster copying, and network-share behavior remain outside the safe default unit coverage for this slice.
+
+## Phase 3 file-only publish activation coverage
+
+Date: 2026-07-20.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `activate_publication()` helper using only pytest-owned temporary workspace and survey roots with tiny text placeholders.
+
+Coverage proves that:
+
+- a valid staged file replaces its legacy-compatible target and the published manifest is written with `status: published`;
+- the published manifest switch is the final replacement and the prior manifest is retained at a run-specific recovery path;
+- the replaced file remains available at a run-specific `.previous` recovery path;
+- copy failure before activation leaves all previous published files and the previous manifest unchanged;
+- an injected failure during multi-file replacement rolls already changed files back to their previous contents;
+- directory artifacts are rejected before the published root is created;
+- a staged file whose size no longer matches its manifest record is rejected before publication; and
+- a tampered manifest path that escapes the published root is rejected before publication.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile shared/artifacts.py tests/test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py` - 20 passed
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 50 passed
+- `python -m pytest --collect-only -q` - 103 collected
+- `python -m pytest -q` - 103 passed
+
+The helper is not wired into `RGBPipeline`. Real survey publication, network-share behavior, large-file throughput, directory/tile activation, process-crash recovery, concurrent publisher locking, and backup retention remain outside the safe default suite.
+
+## Phase 3 file publication recovery coverage
+
+Date: 2026-07-20.
+
+`tests/test_phase3_artifact_workspace.py` now covers retry and interrupted-attempt reconciliation for the dormant file-only activation helper using pytest-owned temporary paths and tiny text files.
+
+Coverage proves that:
+
+- calling activation again for an already published run performs no copy or replacement work;
+- an interrupted temporary-file copy is detected, its run-specific temporary file is removed, and activation safely retries;
+- a simulated process interruption after a published file was replaced but before `publication.json` switched restores the prior file and then completes a fresh activation;
+- the recovered published manifest records `recovered_interrupted_activation: true`;
+- a normal caught replacement failure rolls all changed files back and a subsequent activation succeeds; and
+- recovery refuses to modify targets when the active manifest changed after the interrupted attempt, retaining the candidate and `.previous` evidence.
+
+Validation added or rerun for this slice:
+
+- `python -m py_compile shared/artifacts.py tests/test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py` - 24 passed
+- `python -m pytest -q tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 54 passed
+- `python -m pytest --collect-only -q` - 107 collected
+- `python -m pytest -q` - 107 passed
+- `git diff --check`
+
+This coverage assumes a single publisher. It does not exercise live `RGBPipeline` publication, concurrent same-survey publishers, process or host termination, network shares, large files, content hashing, directory/tile activation, or backup retention.
+
+## Phase 3 publication ownership coverage
+
+Date: 2026-07-20.
+
+`tests/test_publication_lock.py` covers the dormant same-survey publication lock using only pytest-owned temporary roots with an explicit ownership sentinel.
+
+Coverage proves that:
+
+- acquisition writes a parseable ownership record and release removes it;
+- two concurrent contenders for one published root produce exactly one owner and one fail-closed conflict;
+- a caller with the wrong owner token cannot release another owner's lock;
+- malformed existing lock evidence blocks acquisition and remains unchanged;
+- replacing a lock with another valid owner's record prevents the old handle from deleting it; and
+- filesystem roots are rejected as publication roots.
+
+Validation added for this slice:
+
+- `python -m py_compile shared/publication_lock.py tests/test_publication_lock.py`
+- `python -m pytest -q tests/test_publication_lock.py` - 6 passed
+- `python -m pytest -q tests/test_publication_lock.py tests/test_phase3_artifact_workspace.py tests/test_map_export_manifest_resolution.py tests/test_rgb_pipeline_construction.py tests/test_rgb_pipeline_single_stage_execution.py` - 60 passed
+- `python -m pytest --collect-only -q` - 113 collected
+- `python -m pytest -q` - 113 passed
+
+This is hermetic helper-level coverage. It does not wire lock ownership into `activate_publication()` or `RGBPipeline`, terminate a real process, exercise stale-lock operator recovery, access network shares, validate Windows SMB atomicity, run the real pipeline, contact WebODM, execute QGIS/GDAL, or touch production storage.
+## Phase 3 lock-owned activation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `activate_publication_with_lock()` coordinator using only pytest-owned temporary workspace and survey roots with tiny placeholder files.
+
+Coverage proves that:
+
+- successful lock-owned activation publishes the file artifact and releases `.publication.lock`;
+- activation failure releases `.publication.lock` while leaving the previous published artifact unchanged; and
+- an existing owner blocks activation before any copy or replace operation starts.
+
+Validation added for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_with_lock"` - 3 passed
+
+This is hermetic helper-level coverage. It does not wire publication into `RGBPipeline`, run the real pipeline, contact WebODM, execute QGIS/GDAL, access network shares, validate Windows SMB lock behavior, activate directory/tile artifacts, or touch production storage.
+
+## Phase 3 zero-copy directory activation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant directory/tile activation primitive using only pytest-owned paths and tiny directory trees.
+
+Coverage proves that:
+
+- an external workspace-staged directory is copied once into the exact hidden activation path and activated;
+- `prepare_publication()` records an exact `.activation/<run-id>/<name>.tmp` source without invoking `copytree` when generation metrics are supplied, and activation also avoids `copytree`;
+- a merely hidden-looking path does not qualify for zero-copy mode;
+- existing final directories are retained under the run-specific `.previous` path;
+- copy, manifest validation, final-to-backup rename, and temp-to-final rename failures do not commit `publication.json`;
+- a temp-to-final failure restores the previous final directory;
+- journal transitions occur in order and `publication.json` is written after the `activated` state but before `committed`;
+- an independent directory recount runs exactly once and post-rename validation remains lightweight;
+- rename retries are bounded and use injected backoff;
+- symlink/reparse-point directory entries are rejected;
+- process-interruption simulations retain unambiguous `previous_moved` or `activated` evidence without falsely claiming commitment; and
+- all existing file activation, recovery, and lock-composition tests continue to pass.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 39 passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_publication_lock.py tests\test_map_export_manifest_resolution.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 75 passed
+- `python -m pytest --collect-only -q` - 128 collected
+- `python -m pytest -q` - 128 passed
+
+The suite does not generate real tiles, invoke QGIS/GDAL, access network shares, exercise SMB semantics, scan a million-file fixture, wire `RGBPipeline`, perform automatic restart recovery, clean old backups, or touch production storage.
+
+## Phase 3 directory restart reconciliation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers dormant directory activation restart reconciliation using only pytest-owned roots, tiny directory trees, injected filesystem operations, and simulated `BaseException` process interruptions.
+
+Coverage proves that:
+
+- valid `prepared` evidence retains the validated candidate and untouched prior final without a rename;
+- a backup move that completed before the `prepared` journal advanced is detected and restored;
+- `previous_moved` is rolled back when the candidate is still temporary;
+- `previous_moved` is also rolled back when the candidate rename reached the final path before the journal advanced;
+- `activated` is rolled back to the publication named by the older `publication.json`;
+- first activation with no prior directory returns to no published final;
+- a current-run `publication.json` finalizes an `activated` journal as committed without moving or rescanning the directory;
+- committed and rolled-back reconciliation are idempotent;
+- changed active publication, tampered journal paths, and missing previous backups fail closed without moving evidence; and
+- injected reconciliation rename failure preserves the original activation status and records explicit retryable failure details.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py`
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k reconciliation` - 12 passed, 39 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 51 passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py tests\test_publication_lock.py tests\test_map_export_manifest_resolution.py tests\test_rgb_pipeline_construction.py tests\test_rgb_pipeline_single_stage_execution.py` - 87 passed
+- `python -m pytest --collect-only -q` - 140 collected
+- `python -m pytest -q` - 140 passed
+
+The suite does not terminate a real process, recover a real stale lock, generate tiles, invoke QGIS/GDAL, access SMB/network shares, scan million-file fixtures, wire `RGBPipeline`, delete backups, or touch production storage.
+
+## Phase 3 stale publication-lock recovery coverage
+
+Date: 2026-07-27.
+
+`tests/test_publication_lock_recovery.py` covers the dormant diagnosis helper, explicit recovery helper, and operator CLI using only pytest-owned temporary roots and injected filesystem races.
+
+Coverage proves that diagnosis is read-only; age is diagnostic only; invalid timestamps never produce trusted age; exact confirmation and a non-empty reason are mandatory; changed evidence fails closed; valid and malformed evidence is archived byte-for-byte; audit records omit the raw owner token; recovery-ID collisions retain the active lock; a mutation during quarantine is detected and restored; missing and linked lock paths are rejected; and the CLI requires both the diagnosed digest and explicit `--allow-recovery` acknowledgement.
+
+The suite does not determine real process liveness, terminate processes, recover production locks, access network shares, validate SMB cache/rename semantics, invoke QGIS/GDAL, contact WebODM, or run the pipeline.
+
+Validation for this slice:
+
+- `python -m py_compile shared\publication_lock.py tools\publication_lock_recovery.py tests\test_publication_lock.py tests\test_publication_lock_recovery.py`
+- `python -m pytest tests\test_publication_lock.py tests\test_publication_lock_recovery.py -q` - 19 passed
+- relevant Phase 3 and pipeline tests - 100 passed
+- collection-only - 153 collected
+- full safe default suite - 153 passed
+- `git diff --check` - passed
+## Phase 3 publication-protocol acceptance coverage
+
+Date: 2026-07-27.
+
+The acceptance review adds a focused regression proving that a staged mixed file/directory set is rejected before any published artifact or active manifest changes. This preserves the known composition boundary while ADR-018 remains pending and prevents a future live call site from silently treating a partial subset as a complete publication.
+
+Validation for the acceptance gate:
+
+- compile checks for publication helpers, operator tool, and tests - passed
+- focused mixed-set/lock/reconciliation selection - 16 passed, 36 deselected
+- relevant publication and pipeline suite - 101 passed
+- collection-only - 154 collected
+- full safe default suite - 154 passed
+- `git diff --check` - passed
+
+Distinct-volume, Windows SMB, real large-tree, live pipeline, QGIS/GDAL, WebODM, and production-storage validation remain excluded and must be explicitly authorized in a controlled environment.
+## Phase 3 mixed publication-set activation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `activate_publication_set_with_lock()` coordinator using only pytest-owned roots, tiny files, tiny directory trees, injected copy/replace callables, and the existing publication lock helper.
+
+Coverage proves that:
+
+- one lock-owned activation can publish a mixed file plus directory/tile artifact set and commit one authoritative `publication.json`;
+- the set-level journal reaches `committed` only after the manifest switch;
+- a caught failure during the final manifest switch rolls both file and directory targets back to the previous visible publication;
+- repeated activation for an already committed mixed set is idempotent and performs no copy/replace work; and
+- an existing publication owner blocks mixed activation before any artifact mutation starts.
+
+The original `activate_publication()` mixed-set rejection remains covered so older primitive contracts cannot silently expand.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_set"` - 4 passed, 52 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 56 passed
+
+This coverage does not run the real pipeline, generate real tiles, invoke QGIS/GDAL, contact WebODM, access SMB/network shares, validate real Windows rename behavior, reconcile an interrupted mixed-set journal, clean backups, or touch production storage.
+## Phase 3 mixed publication-set reconciliation coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `reconcile_publication_set()` helper using pytest-owned roots, tiny file/directory artifacts, injected replace behavior, and simulated `BaseException` process interruptions.
+
+Coverage proves that:
+
+- a prepared mixed-set journal can roll back a partial artifact activation when `publication.json` still names the previous run;
+- an activated mixed-set journal can roll back all visible candidates when the authoritative manifest did not switch;
+- an activated mixed-set journal is finalized as committed when `publication.json` already names the current run;
+- changed active manifests fail closed without moving evidence; and
+- the existing mixed activation, lock ownership, and old mixed-set rejection tests continue to pass.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "publication_set"` - 8 passed, 52 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 60 passed
+
+This coverage does not terminate a real process, recover a real stale lock, generate real tiles, invoke QGIS/GDAL, contact WebODM, access SMB/network shares, validate real Windows rename semantics, clean backups, or touch production storage.
+## Phase 3 artifact cleanup planner coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `plan_artifact_cleanup()` helper using only pytest-owned published roots, activation journals, previous-artifact placeholders, and workspace directories.
+
+Coverage proves that:
+
+- terminal unprotected publication evidence produces read-only cleanup candidates for activation directories, previous manifests, previous file artifacts, previous directory artifacts, and old workspaces;
+- active and caller-preserved run IDs are protected;
+- an existing `.publication.lock` blocks planning before candidates are returned;
+- non-terminal evidence produces blocked reasons and no candidates;
+- mixed terminal and non-terminal evidence in the same run directory fails closed without candidates; and
+- minimum-age gating suppresses otherwise valid candidates until they are old enough.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "cleanup"` - 5 passed, 60 deselected
+
+This coverage does not delete files, run a cleanup executor, access network shares, validate SMB behavior, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change retention defaults.
+## Phase 3 artifact cleanup executor coverage
+
+Date: 2026-07-27.
+
+`tests/test_phase3_artifact_workspace.py` now covers the dormant `execute_artifact_cleanup()` helper and `tools/artifact_cleanup.py` CLI using only pytest-owned roots, explicit sentinel files, tiny previous-artifact placeholders, and temporary workspace directories.
+
+Coverage proves that:
+
+- executor dry-run mode deletes nothing and requires no sentinel;
+- deletion is blocked when owner-root sentinels are missing;
+- a fresh `.publication.lock` or changed fresh plan blocks execution after review;
+- approved deletion removes only planner-approved file/directory candidates under sentinel-owned roots;
+- audit JSON records candidates, deleted entries, and per-candidate attempts; and
+- the operator CLI plans read-only, rejects `execute` without `--allow-delete`, and executes only after sentinels plus acknowledgement are present.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py tools\artifact_cleanup.py tests\test_phase3_artifact_workspace.py` - passed
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "cleanup"` - 10 passed, 60 deselected
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py` - 70 passed
+
+This coverage deletes only pytest-owned temporary files/directories. It does not clean production artifacts, access network shares, validate SMB behavior, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change live cleanup defaults.
+## Phase 3 controlled filesystem validation coverage
+
+Date: 2026-07-27.
+
+`tests/test_filesystem_validation.py` covers the controlled validation helper and CLI using only pytest-owned temporary roots with `.filesystem-validation-root` sentinels.
+
+Coverage proves that:
+
+- validation refuses to run without explicit destructive acknowledgement;
+- validation refuses roots missing the sentinel;
+- disposable validation runs cover exclusive create, file replace, directory rename, and JSON read-after-write checks;
+- disposable run directories are removed by default and can be kept for inspection;
+- reports are written only under the validation root; and
+- the CLI emits JSON, requires `--allow-destructive-validation`, and can write a report.
+
+Validation for this slice:
+
+- `python -m py_compile shared\filesystem_validation.py tools\filesystem_validation.py tests\test_filesystem_validation.py` - passed
+- `python -m pytest -q tests\test_filesystem_validation.py` - 5 passed
+
+This coverage mutates only pytest-owned temporary directories. It does not access network shares, validate SMB behavior, run cross-volume checks, scan million-file tile trees, run the real pipeline, invoke QGIS/GDAL, contact WebODM, touch production storage, or change live publication defaults.
+## Phase 3 manual filesystem validation evidence
+
+Date: 2026-07-27.
+
+Manual opt-in validation was run outside the default pytest suite using the ADR-021 disposable-root protocol.
+
+Validated disposable targets:
+
+- Local: `.tmp/filesystem-validation/local-001` - passed `exclusive_create`, `file_replace`, `directory_rename`, and `json_visibility`.
+- SMB: `Z:\__pipeline_validation\filesystem-validation-001` / `\\192.168.10.5\Visualization\__pipeline_validation\filesystem-validation-001` - passed `exclusive_create`, `file_replace`, `directory_rename`, and `json_visibility`.
+
+The SMB report is retained at `Z:\__pipeline_validation\filesystem-validation-001\reports\smb-001.json`. The validation run directory was removed by the tool; the sentinel and report remain.
+
+This manual evidence is not part of the safe default suite. It did not run the real pipeline, access `Z:\surveys`, invoke QGIS/GDAL, contact WebODM, or touch production survey outputs. Large-tree, open-handle, disconnect/reconnect, and cross-volume behavior remain manual validation gaps.
+
+## Phase 3 large-tree SMB filesystem validation evidence
+
+Date: 2026-07-27.
+
+The controlled filesystem validator now includes an opt-in `large_tree_rename` check, covered by `tests/test_filesystem_validation.py`, plus CLI coverage for `--large-tree-files`. The safe default suite still uses pytest-owned temporary roots and tiny counts only.
+
+Manual opt-in validation was run against the disposable SMB root `Z:\__pipeline_validation\filesystem-validation-001` with `--large-tree-files 1000`. The result passed all checks, observed 1,000 files after rename, recorded create/rename/count timings, wrote `reports\smb-large-tree-001.json`, and removed its disposable run directory. No production survey path, real pipeline, QGIS/GDAL, WebODM, or `Z:\surveys` data was touched.
+
+This manual evidence is intentionally outside normal pytest. It is useful for accepting the Phase 3 filesystem primitive on the current SMB share at small representative scale, but it does not replace future validation for full tile counts, cross-volume behavior, open handles, interrupted operations, disconnect/reconnect behavior, or host-loss scenarios.
+
+## CLI resume source-selection coverage
+
+Date: 2026-07-30.
+
+`tests/test_main_resume_source.py` covers the production CLI source-resolution helper using a pytest-owned temporary SQLite database and monkeypatched resolver behavior.
+
+Coverage proves that:
+
+- `--resume --run-id` reuses `runs.source_dir` and does not call ambiguous dataset resolution again;
+- fresh runs still call `resolve_source_dataset_dir()` with the expected `FIELD_DATA_ROOT / survey` input and date hint; and
+- resume fails closed when no matching run record exists.
+
+The tests do not run the real RGB pipeline, load production `.env`, access field-data roots, contact WebODM, execute QGIS/GDAL, or open the production database.
+
+## Phase 3 RGBPipeline publication dry-run planning coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the opt-in `RGBPipeline.plan_publication_dry_run()` bridge with pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- workspace-backed file and directory artifacts from KML, WebODM, and QGIS stage state are represented in one mixed publication plan;
+- planned targets are expressed relative to the published survey root;
+- activation remains disabled and no `publication.json` is written;
+- existing legacy mirrored files/directories are not changed by planning; and
+- non-workspace-owned sources make the plan fail closed with a blocked reason.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, or mutate production survey roots.
+
+## Phase 3 RGBPipeline staged publication coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the opt-in staged publication bridge with pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- staged publication writes a manifest under the run workspace `publish/staged` directory;
+- staged file and directory artifacts are copied from workspace-owned sources into the staging tree;
+- the published survey `publication.json` is not written;
+- existing legacy mirrored files and tile directories remain untouched; and
+- blocked dry-run plans remain blocked and do not create a staged manifest.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, or mutate production survey roots.
+## Phase 3 RGBPipeline explicit publication activation coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the opt-in explicit activation bridge with pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- activation requires the exact `PUBLISH <survey_id> <run_id>` confirmation phrase;
+- missing staged publication manifests block before published outputs change;
+- confirmed activation publishes a mixed file/directory set and writes the published survey `publication.json`;
+- the publication lock is released after successful activation; and
+- an existing publication lock blocks activation before visible artifacts change.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, recover stale locks, run cleanup, or mutate production survey roots.

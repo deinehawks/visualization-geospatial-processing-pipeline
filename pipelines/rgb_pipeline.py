@@ -11,6 +11,7 @@ from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
 from shared.artifacts import (
+    PublicationArtifact,
     PublishedSurveyLayout,
     RunWorkspaceLayout,
     create_run_workspace,
@@ -18,6 +19,8 @@ from shared.artifacts import (
     describe_run_workspace,
     plan_published_survey_from_rgb_path,
     plan_run_workspace,
+    prepare_publication,
+    activate_publication_set_with_lock,
 )
 
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
@@ -334,6 +337,344 @@ class RGBPipeline(
 
         return True
 
+    def _published_relative_path_for_plan(self, published_path: Path) -> Path:
+        if self.published_layout is None:
+            raise RuntimeError("published_layout is not set yet")
+        published_root = self.published_layout.root.resolve(strict=False)
+        target = Path(published_path).resolve(strict=False)
+        try:
+            return target.relative_to(published_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Publication target escapes published survey root: {published_path}"
+            ) from exc
+
+    def _collect_publication_plan_pairs(
+        self,
+        *,
+        stage_name: str,
+        workspace_node: Any,
+        published_node: Any,
+        logical_prefix: str,
+        artifacts: list[PublicationArtifact],
+        blocked_reasons: list[str],
+        seen_targets: set[str],
+    ) -> None:
+        if workspace_node is None or published_node is None:
+            return
+
+        if isinstance(workspace_node, Mapping) and isinstance(published_node, Mapping):
+            for key in sorted(set(workspace_node).intersection(published_node)):
+                self._collect_publication_plan_pairs(
+                    stage_name=stage_name,
+                    workspace_node=workspace_node.get(key),
+                    published_node=published_node.get(key),
+                    logical_prefix=f"{logical_prefix}.{key}",
+                    artifacts=artifacts,
+                    blocked_reasons=blocked_reasons,
+                    seen_targets=seen_targets,
+                )
+            return
+
+        if isinstance(workspace_node, list) and isinstance(published_node, list):
+            for index, (workspace_item, published_item) in enumerate(
+                zip(workspace_node, published_node)
+            ):
+                self._collect_publication_plan_pairs(
+                    stage_name=stage_name,
+                    workspace_node=workspace_item,
+                    published_node=published_item,
+                    logical_prefix=logical_prefix,
+                    artifacts=artifacts,
+                    blocked_reasons=blocked_reasons,
+                    seen_targets=seen_targets,
+                )
+            if len(workspace_node) != len(published_node):
+                blocked_reasons.append(
+                    f"{stage_name}:{logical_prefix} workspace/published list length mismatch"
+                )
+            return
+
+        if not isinstance(workspace_node, str) or not isinstance(published_node, str):
+            return
+        if not workspace_node or not published_node:
+            return
+
+        source = Path(workspace_node)
+        target = Path(published_node)
+        try:
+            source = self._require_workspace_owned_path(source)
+        except Exception as exc:
+            blocked_reasons.append(
+                f"{stage_name}:{logical_prefix} source is not run-workspace owned: {source} ({exc})"
+            )
+            return
+
+        if source.is_file():
+            kind = "file"
+        elif source.is_dir():
+            kind = "directory"
+        else:
+            blocked_reasons.append(
+                f"{stage_name}:{logical_prefix} source does not exist: {source}"
+            )
+            return
+
+        try:
+            relative_target = self._published_relative_path_for_plan(target)
+        except Exception as exc:
+            blocked_reasons.append(f"{stage_name}:{logical_prefix} invalid target: {exc}")
+            return
+
+        target_key = str(relative_target).replace("\\", "/").lower()
+        if target_key in seen_targets:
+            blocked_reasons.append(
+                f"{stage_name}:{logical_prefix} duplicates publication target: {relative_target}"
+            )
+            return
+        seen_targets.add(target_key)
+
+        artifacts.append(
+            PublicationArtifact(
+                logical_name=f"{stage_name}.{logical_prefix}",
+                source_path=source,
+                published_relative_path=relative_target,
+                kind=kind,
+            )
+        )
+
+    def _build_publication_artifact_plan(
+        self,
+    ) -> tuple[list[PublicationArtifact], list[str]]:
+        if not self.survey_id or self.rgb_path is None or self.published_layout is None:
+            self._hydrate_from_state()
+        if not self.survey_id:
+            raise RuntimeError("survey_id is not set yet. Run data_segregation first.")
+        if self.published_layout is None:
+            raise RuntimeError("published_layout is not set yet. Run data_segregation first.")
+
+        artifacts: list[PublicationArtifact] = []
+        blocked_reasons: list[str] = []
+        seen_targets: set[str] = set()
+
+        for stage_name in (
+            "cross_run_filter",
+            "kml_boundary",
+            "webodm",
+            "qgis",
+        ):
+            stage_state = self.state.get(stage_name) or {}
+            if not isinstance(stage_state, Mapping):
+                continue
+            self._collect_publication_plan_pairs(
+                stage_name=stage_name,
+                workspace_node=stage_state.get("workspace"),
+                published_node=stage_state.get("published"),
+                logical_prefix="published",
+                artifacts=artifacts,
+                blocked_reasons=blocked_reasons,
+                seen_targets=seen_targets,
+            )
+
+        return artifacts, blocked_reasons
+
+    def _publication_artifact_payload(
+        self,
+        artifacts: list[PublicationArtifact],
+    ) -> list[dict[str, str]]:
+        if self.published_layout is None:
+            raise RuntimeError("published_layout is not set yet. Run data_segregation first.")
+        return [
+            {
+                "logical_name": artifact.logical_name,
+                "kind": artifact.kind,
+                "source_path": str(artifact.source_path),
+                "published_relative_path": str(artifact.published_relative_path),
+                "published_path": str(
+                    self.published_layout.root / artifact.published_relative_path
+                ),
+            }
+            for artifact in artifacts
+        ]
+
+    def plan_publication_dry_run(self) -> Dict[str, Any]:
+        """Build the current RGB publication intent without activating it.
+
+        This is an opt-in planning bridge for Phase 3. It reads the current
+        in-memory stage state, finds run-workspace artifacts that are still
+        mirrored to legacy published paths, validates ownership/containment, and
+        returns the mixed file/directory publication set that a later activation
+        slice could stage. It intentionally does not copy, rename, lock, write a
+        publication manifest, or mutate pipeline state.
+        """
+
+        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        artifact_payload = [
+            dict(artifact_record)
+            for artifact_record in self._publication_artifact_payload(artifacts)
+        ]
+
+        plan = {
+            "run_id": self.run_id,
+            "survey_id": self.survey_id,
+            "published_root": str(self.published_layout.root),
+            "publication_manifest": str(self.published_layout.publication_manifest),
+            "activation_enabled": False,
+            "artifact_count": len(artifact_payload),
+            "artifacts": artifact_payload,
+            "blocked_reasons": blocked_reasons,
+            "status": "blocked" if blocked_reasons else "planned",
+        }
+        log_event(
+            self.loggers["pipeline"],
+            "publication_plan_built",
+            status=plan["status"],
+            artifact_count=str(plan["artifact_count"]),
+            activation_enabled="false",
+        )
+        return plan
+
+    def prepare_publication_staging(self) -> Dict[str, Any]:
+        """Prepare a staged RGB publication set without activating it.
+
+        This opt-in Phase 3 bridge reuses the dry-run publication plan and the
+        existing artifact staging helper. It writes only under the run workspace
+        publish/staged directory and intentionally does not acquire the
+        publication lock, mutate visible published artifacts, or write the
+        published survey publication.json.
+        """
+
+        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        if not artifacts and not blocked_reasons:
+            blocked_reasons.append("publication plan contains no artifacts")
+        artifact_payload = [
+            dict(artifact_record)
+            for artifact_record in self._publication_artifact_payload(artifacts)
+        ]
+        if self.published_layout is None or self.workspace_layout is None:
+            raise RuntimeError("publication layouts are not set yet. Run data_segregation first.")
+
+        result: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "survey_id": self.survey_id,
+            "published_root": str(self.published_layout.root),
+            "publication_manifest": str(self.published_layout.publication_manifest),
+            "activation_enabled": False,
+            "artifact_count": len(artifact_payload),
+            "artifacts": artifact_payload,
+            "blocked_reasons": blocked_reasons,
+        }
+        if blocked_reasons:
+            result["status"] = "blocked"
+            log_event(
+                self.loggers["pipeline"],
+                "publication_staging_blocked",
+                status=result["status"],
+                artifact_count=str(result["artifact_count"]),
+                activation_enabled="false",
+            )
+            return result
+
+        staged_manifest = prepare_publication(
+            run_id=self.run_id,
+            survey_id=self.survey_id,
+            workspace=self.workspace_layout,
+            published=self.published_layout,
+            artifacts=artifacts,
+        )
+        result["status"] = "staged"
+        result["staged_manifest"] = str(staged_manifest)
+        log_event(
+            self.loggers["pipeline"],
+            "publication_staging_prepared",
+            status=result["status"],
+            artifact_count=str(result["artifact_count"]),
+            staged_manifest=str(staged_manifest),
+            activation_enabled="false",
+        )
+        return result
+
+    def expected_publication_confirmation(self) -> str:
+        if not self.survey_id:
+            raise RuntimeError("survey_id is not set yet. Run data_segregation first.")
+        return f"PUBLISH {self.survey_id} {self.run_id}"
+
+    def activate_publication_explicit(self, *, confirmation: str) -> Dict[str, Any]:
+        """Activate a staged RGB publication only after explicit confirmation.
+
+        This is the deliberately guarded Phase 3 live-publication bridge. It
+        requires the caller to provide the exact confirmation phrase for the
+        current survey and run, then delegates to the existing lock-owned mixed
+        publication-set activation helper. It is intentionally not called from
+        RGBPipeline.run().
+        """
+
+        if self.published_layout is None or self.workspace_layout is None:
+            raise RuntimeError("publication layouts are not set yet. Run data_segregation first.")
+        expected_confirmation = self.expected_publication_confirmation()
+        if confirmation != expected_confirmation:
+            log_event(
+                self.loggers["pipeline"],
+                "publication_activation_blocked",
+                status="blocked",
+                reason="confirmation_mismatch",
+                activation_enabled="true",
+            )
+            return {
+                "run_id": self.run_id,
+                "survey_id": self.survey_id,
+                "published_root": str(self.published_layout.root),
+                "publication_manifest": str(self.published_layout.publication_manifest),
+                "activation_enabled": True,
+                "status": "blocked",
+                "blocked_reasons": [
+                    f"confirmation must exactly match: {expected_confirmation}"
+                ],
+            }
+
+        staged_manifest = self.workspace_layout.publish / "staged" / "publication.json"
+        if not staged_manifest.is_file():
+            log_event(
+                self.loggers["pipeline"],
+                "publication_activation_blocked",
+                status="blocked",
+                reason="missing_staged_manifest",
+                staged_manifest=str(staged_manifest),
+                activation_enabled="true",
+            )
+            return {
+                "run_id": self.run_id,
+                "survey_id": self.survey_id,
+                "published_root": str(self.published_layout.root),
+                "publication_manifest": str(self.published_layout.publication_manifest),
+                "activation_enabled": True,
+                "status": "blocked",
+                "blocked_reasons": [
+                    f"staged publication manifest is missing: {staged_manifest}"
+                ],
+            }
+
+        publication_manifest = activate_publication_set_with_lock(
+            workspace=self.workspace_layout,
+            published=self.published_layout,
+        )
+        result: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "survey_id": self.survey_id,
+            "published_root": str(self.published_layout.root),
+            "publication_manifest": str(publication_manifest),
+            "activation_enabled": True,
+            "status": "activated",
+        }
+        log_event(
+            self.loggers["pipeline"],
+            "publication_activation_completed",
+            status=result["status"],
+            publication_manifest=str(publication_manifest),
+            activation_enabled="true",
+        )
+        return result
+
     def _preflight_stage(self, stage_name: str) -> None:
         result = self.preflight.check_stage(
             stage_name,
@@ -615,6 +956,89 @@ class RGBPipeline(
             return None, None
 
         workspace_path = self._require_workspace_owned_path(Path(workspace_path))
+        published_path = Path(published_dir) / workspace_path.name
+        self._replace_legacy_file_after_success(
+            source_file=workspace_path,
+            target_file=published_path,
+        )
+        return workspace_path, published_path
+
+    def _export_pointcloud_to_workspace(
+        self,
+        *,
+        processor: Any,
+        project_id: int,
+        task_id: str,
+        task_key: str,
+        published_dir: Path,
+        laz_archive_name: str,
+        pcd_name: str,
+        candidates: list[str],
+        max_points: int,
+        viewpoint: str,
+    ) -> tuple[dict[str, Any], dict[str, str], dict[str, str]]:
+        workspace_dir = self.workspace_layout.webodm_3d / task_key
+        self._reset_workspace_directory(workspace_dir)
+
+        workspace_result = processor.export_pointcloud(
+            project_id,
+            task_id,
+            out_dir=workspace_dir,
+            laz_archive_name=laz_archive_name,
+            pcd_name=pcd_name,
+            candidates=candidates,
+            max_points=max_points,
+            viewpoint=viewpoint,
+        )
+
+        published_result = dict(workspace_result or {})
+        workspace_paths: dict[str, str] = {}
+        published_paths: dict[str, str] = {}
+
+        for key in ("laz", "ply", "pcd"):
+            value = published_result.get(key)
+            if not value:
+                continue
+            workspace_path = self._require_workspace_owned_path(Path(value))
+            if not workspace_path.is_file():
+                continue
+            published_path = Path(published_dir) / workspace_path.name
+            self._replace_legacy_file_after_success(
+                source_file=workspace_path,
+                target_file=published_path,
+            )
+            workspace_paths[key] = str(workspace_path)
+            published_paths[key] = str(published_path)
+            published_result[key] = str(published_path)
+
+        return published_result, workspace_paths, published_paths
+
+    def _download_all_assets_zip_to_workspace(
+        self,
+        *,
+        processor: Any,
+        project_id: int,
+        task_id: str,
+        task_key: str,
+        published_dir: Path,
+        filename: str,
+    ) -> tuple[Path | None, Path | None]:
+        workspace_dir = self.workspace_layout.webodm_odm / task_key
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        workspace_path = workspace_dir / filename
+
+        ok = processor.download_all_assets_safe(
+            project_id,
+            task_id,
+            workspace_path,
+        )
+        if not ok:
+            return None, None
+
+        workspace_path = self._require_workspace_owned_path(workspace_path)
+        if not workspace_path.is_file():
+            raise FileNotFoundError(f"Workspace all-assets zip not found: {workspace_path}")
+
         published_path = Path(published_dir) / workspace_path.name
         self._replace_legacy_file_after_success(
             source_file=workspace_path,
@@ -1623,16 +2047,16 @@ class RGBPipeline(
                     pc_enabled = bool(pc_cfg.get("enabled", True))
     
                     if pc_enabled:
-                        pc_dir = task2_3d_dir
                         laz_candidates = list(
                             pc_cfg.get("asset_candidates") or ["georeferenced_model.laz"]
                         )
-                        pdal_path = qgis_tools_cfg.get("pdal_path") or "pdal"
     
-                        pc_out = processor.export_pointcloud(
-                            project_id,
-                            current_task2_id,
-                            out_dir=pc_dir,
+                        pc_out, pc_workspace, pc_published = self._export_pointcloud_to_workspace(
+                            processor=processor,
+                            project_id=project_id,
+                            task_id=current_task2_id,
+                            task_key="task2",
+                            published_dir=task2_3d_dir,
                             laz_archive_name=f"{task2_export_id}.laz",
                             pcd_name=f"{task2_export_id}.pcd",
                             candidates=laz_candidates,
@@ -1644,6 +2068,10 @@ class RGBPipeline(
                         result["downloads"]["task2"]["pointcloud_ply"] = pc_out.get("ply")
                         result["downloads"]["task2"]["pointcloud_pcd"] = pc_out.get("pcd")
                         result["downloads"]["task2"]["pointcloud_asset_type"] = pc_out.get("asset_type")
+                        if pc_workspace:
+                            result.setdefault("workspace", {}).setdefault("webodm_3d", {})["task2"] = pc_workspace
+                        if pc_published:
+                            result.setdefault("published", {}).setdefault("webodm_3d", {})["task2"] = pc_published
     
                         if not pc_out.get("laz") and bool(pc_cfg.get("required", True)):
                             raise RuntimeError("POINTCLOUD_DOWNLOAD_FAILED")
@@ -1654,7 +2082,6 @@ class RGBPipeline(
     
                     if exports_cfg.get("all_assets_zip", {}).get("enabled", False):
                         zcfg = exports_cfg["all_assets_zip"]
-                        out_dir = task2_odm_dir
     
                         task2_zip_override = self.export_name_overrides.get("task2")
                         if task2_zip_override:
@@ -1668,13 +2095,18 @@ class RGBPipeline(
                                 flag=task2_flag,
                             )
     
-                        zip_path = out_dir / fname
-    
-                        ok = processor.download_all_assets_safe(
-                            project_id, current_task2_id, zip_path
+                        workspace_zip, published_zip = self._download_all_assets_zip_to_workspace(
+                            processor=processor,
+                            project_id=project_id,
+                            task_id=current_task2_id,
+                            task_key="task2",
+                            published_dir=task2_odm_dir,
+                            filename=fname,
                         )
-                        if ok:
-                            result["downloads"]["task2"]["all_assets_zip"] = str(zip_path)
+                        if published_zip:
+                            result["downloads"]["task2"]["all_assets_zip"] = str(published_zip)
+                            result.setdefault("workspace", {}).setdefault("webodm_odm", {})["task2_all_assets_zip"] = str(workspace_zip)
+                            result.setdefault("published", {}).setdefault("webodm_odm", {})["task2_all_assets_zip"] = str(published_zip)
                         else:
                             logger.warning(
                                 "All-assets zip was not downloaded (endpoint missing or failed)."
@@ -1832,6 +2264,7 @@ class RGBPipeline(
     def stage_qgis(self, *, resume: bool = False) -> Dict[str, Any]:
         logger = self.loggers["qgis"]
         logger.info("Stage: QGIS Processing (selected orthomosaic clip + tiles)")
+        create_run_workspace(self.workspace_layout)
 
         rgb_path = self._require_rgb_path()
 
@@ -1918,20 +2351,23 @@ class RGBPipeline(
                     "QGIS will use soft-corners tile workflow."
                 )
 
-        clipped_ortho_dir = dir_from_key(
+        published_clipped_ortho_dir = dir_from_key(
             "qgis_clipped_ortho",
             fallback=(rgb_path / "qgis" / "clipped" / "ortho"),
         )
 
-        tiles_round_dir = dir_from_key(
+        published_tiles_round_dir = dir_from_key(
             "tiles_ortho_round",
             fallback=(rgb_path / "tiles" / "ortho" / "round-corners"),
         )
 
-        tiles_soft_dir = optional_dir_from_keys(
+        published_tiles_soft_dir = optional_dir_from_keys(
             ["tiles_ortho_soft"],
             fallback=(rgb_path / "tiles" / "ortho" / "soft-corners"),
         )
+        workspace_clipped_ortho_dir = self.workspace_layout.qgis_clipped_ortho
+        workspace_tiles_round_dir = self.workspace_layout.qgis_tiles_round
+        workspace_tiles_soft_dir = self.workspace_layout.qgis_tiles_soft
 
         clip_cfg = qgis_cfg.get("clip") or {}
         clip_enabled = bool(clip_cfg.get("enabled", True))
@@ -2015,32 +2451,39 @@ class RGBPipeline(
 
         # ── Clip ─────────────────────────────────────────────────────────────
         clipped_path: Path
+        workspace_clipped_path: Path | None = None
+        published_clipped_path: Path | None = None
 
         if boundary_used and clip_enabled:
             clipped_filename = self._clipped_orthomosaic_filename(
                 task_key=task_key,
                 flag=flag,
             )
-            clipped_path = clipped_ortho_dir / clipped_filename
+            workspace_clipped_path = workspace_clipped_ortho_dir / clipped_filename
+            published_clipped_path = published_clipped_ortho_dir / clipped_filename
 
             logger.info(
-                f"Clipping selected orthomosaic ({task_key}) -> {clipped_path.name}"
+                f"Clipping selected orthomosaic ({task_key}) -> {workspace_clipped_path.name}"
             )
 
             if mask_geojson is None:
                 raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
 
             skip_clip = False
-            if resume and clipped_path.exists():
+            if resume and workspace_clipped_path.exists():
                 logger.info(
                     f"Resume: clipped orthomosaic already exists "
-                    f"({clipped_path.name}); verifying before reuse..."
+                    f"({workspace_clipped_path.name}); verifying before reuse..."
                 )
                 try:
-                    tools.verify_raster_readable(clipped_path, retries=1, delay_s=2.0)
+                    tools.verify_raster_readable(
+                        workspace_clipped_path,
+                        retries=1,
+                        delay_s=2.0,
+                    )
                     skip_clip = True
                     logger.info(
-                        f"Existing clip verified OK, skipping re-clip: {clipped_path.name}"
+                        f"Existing clip verified OK, skipping re-clip: {workspace_clipped_path.name}"
                     )
                 except RuntimeError as e:
                     logger.warning(
@@ -2051,10 +2494,16 @@ class RGBPipeline(
                 tools.clip_raster_by_mask(
                     input_tif=source_path,
                     mask_geojson=mask_geojson,
-                    output_tif=clipped_path,
+                    output_tif=workspace_clipped_path,
                     dst_nodata=dst_nodata,
                     local_staging_dir=clip_staging_dir,
                 )
+
+            self._replace_legacy_file_after_success(
+                source_file=workspace_clipped_path,
+                target_file=published_clipped_path,
+            )
+            clipped_path = published_clipped_path
 
         elif boundary_used and not clip_enabled:
             logger.warning(
@@ -2076,7 +2525,12 @@ class RGBPipeline(
 
         self.state["selected_orthomosaic"] = selected
 
-        tiles_dir = tiles_round_dir if boundary_used else tiles_soft_dir
+        workspace_tiles_dir = (
+            workspace_tiles_round_dir if boundary_used else workspace_tiles_soft_dir
+        )
+        published_tiles_dir = (
+            published_tiles_round_dir if boundary_used else published_tiles_soft_dir
+        )
 
         # ── Tile generation ──────────────────────────────────────────────────
         _staging_root: Optional[Path] = None
@@ -2084,8 +2538,8 @@ class RGBPipeline(
             tile_resume = bool(resume)
             tile_clean = not tile_resume
 
-            tiling_input_path = clipped_path
-            tiling_output_dir = tiles_dir
+            tiling_input_path = workspace_clipped_path or clipped_path
+            tiling_output_dir = workspace_tiles_dir
             _local_tile_staging_active = False
 
             if local_staging_root is not None:
@@ -2093,7 +2547,7 @@ class RGBPipeline(
                 try:
                     _local_ortho_staging = local_staging_root / "ortho"
                     tiling_input_path = tools.stage_local_copy(
-                        clipped_path,
+                        workspace_clipped_path or clipped_path,
                         _local_ortho_staging,
                     )
                     tiling_output_dir = local_staging_root / "tiles" / tile_mode
@@ -2101,15 +2555,15 @@ class RGBPipeline(
                     logger.info(
                         f"Local staging enabled: tiling will read/write on "
                         f"local disk ({tiling_output_dir}) and copy results "
-                        f"to {tiles_dir} afterward."
+                        f"to {workspace_tiles_dir} afterward."
                     )
                 except Exception as e:
                     logger.warning(
                         f"Local staging setup failed ({e}); falling back to "
-                        f"tiling directly against {clipped_path}."
+                        f"tiling directly against {workspace_clipped_path or clipped_path}."
                     )
-                    tiling_input_path = clipped_path
-                    tiling_output_dir = tiles_dir
+                    tiling_input_path = workspace_clipped_path or clipped_path
+                    tiling_output_dir = workspace_tiles_dir
                     _local_tile_staging_active = False
 
             logger.info(
@@ -2130,12 +2584,19 @@ class RGBPipeline(
 
             if _local_tile_staging_active:
                 logger.info(
-                    f"Copying tiles from local staging to network share: "
-                    f"{tiling_output_dir} -> {tiles_dir}"
+                    f"Copying tiles from local staging to run workspace: "
+                    f"{tiling_output_dir} -> {workspace_tiles_dir}"
                 )
                 t0 = time.perf_counter()
-                tiles_dir.mkdir(parents=True, exist_ok=True)
-                shutil.copytree(tiling_output_dir, tiles_dir, dirs_exist_ok=True)
+                if tile_resume:
+                    workspace_tiles_dir.mkdir(parents=True, exist_ok=True)
+                else:
+                    self._reset_workspace_directory(workspace_tiles_dir)
+                shutil.copytree(
+                    tiling_output_dir,
+                    workspace_tiles_dir,
+                    dirs_exist_ok=True,
+                )
                 logger.info(
                     f"Tile copy-back complete in {time.perf_counter() - t0:.1f}s"
                 )
@@ -2159,7 +2620,11 @@ class RGBPipeline(
                                 f"Could not clean up {_label} ({_stale_dir}): {_e}"
                             )
 
-            selected["tiles_dir"] = str(tiles_dir)
+            self._replace_legacy_directory_after_success(
+                source_dir=workspace_tiles_dir,
+                target_dir=published_tiles_dir,
+            )
+            selected["tiles_dir"] = str(published_tiles_dir)
         else:
             logger.warning(
                 "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation."
@@ -2185,11 +2650,23 @@ class RGBPipeline(
             "tiles": {
                 "enabled": tiles_enabled,
                 "mode": tile_mode,
-                "output_dir": str(tiles_dir) if tiles_enabled else None,
+                "output_dir": str(published_tiles_dir) if tiles_enabled else None,
                 "zoom": zoom,
                 "profile": profile,
                 "webviewer": webviewer,
                 "copyright": copyright_text,
+            },
+            "workspace": {
+                "qgis_clipped_ortho": (
+                    str(workspace_clipped_path) if workspace_clipped_path else None
+                ),
+                "tiles_dir": str(workspace_tiles_dir) if tiles_enabled else None,
+            },
+            "published": {
+                "qgis_clipped_ortho": (
+                    str(published_clipped_path) if published_clipped_path else None
+                ),
+                "tiles_dir": str(published_tiles_dir) if tiles_enabled else None,
             },
         }
     

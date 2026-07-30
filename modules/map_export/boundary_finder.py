@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from .survey_manifest import resolve_survey_id, load_manifest
+from .survey_manifest import resolve_publication_artifact_paths, resolve_survey_id, load_manifest
 import re
 import json
 
@@ -269,9 +269,14 @@ def find_boundary_file_by_survey_id(
     except FileNotFoundError:
         pass
 
-    candidates: list[Path] = []
+    publication_candidates = [
+        path
+        for path in resolve_publication_artifact_paths(surveys_root, survey_id)
+        if path.suffix.lower() in BOUNDARY_EXTENSIONS
+    ]
+    candidates: list[Path] = publication_candidates
 
-    if kml_file_name:
+    if not candidates and kml_file_name:
         candidates = [
             path
             for path in surveys_root.rglob(f"{survey_id}/rgb/**/{kml_file_name}")

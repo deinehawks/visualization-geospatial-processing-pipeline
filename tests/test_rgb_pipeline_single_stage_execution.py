@@ -1,5 +1,6 @@
 
 import importlib.util
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -24,6 +25,7 @@ from pipelines import rgb_pipeline as rgb_module
 from pipelines.rgb_pipeline import RGBPipeline
 from shared.db.repo import PipelineRepo
 from shared.logging import get_logger
+from shared.publication_lock import acquire_publication_lock, PublicationLockedError
 from tests.fakes import FakeWebODM
 
 
@@ -62,6 +64,118 @@ class ControlledWebODMExportFailure(Exception):
     pass
 
 
+class ControlledWebODMPointcloudFailure(Exception):
+    pass
+
+
+class ControlledQGISFailure(Exception):
+    pass
+
+
+class FakeQGISTools:
+    instances = []
+    fail_clip = False
+    fail_tiles = False
+
+    def __init__(
+        self,
+        *,
+        logger,
+        qgis_root="",
+        gdalwarp_path="gdalwarp",
+        gdal2tiles_path="gdal2tiles.py",
+        gdalinfo_path="gdalinfo",
+    ):
+        self.logger = logger
+        self.qgis_root = qgis_root
+        self.gdalwarp_path = gdalwarp_path
+        self.gdal2tiles_path = gdal2tiles_path
+        self.gdalinfo_path = gdalinfo_path
+        self.calls = []
+        type(self).instances.append(self)
+
+    def clip_raster_by_mask(
+        self,
+        *,
+        input_tif,
+        mask_geojson,
+        output_tif,
+        dst_nodata=None,
+        local_staging_dir=None,
+    ):
+        self.calls.append(
+            {
+                "method": "clip_raster_by_mask",
+                "input_tif": input_tif,
+                "mask_geojson": mask_geojson,
+                "output_tif": output_tif,
+                "dst_nodata": dst_nodata,
+                "local_staging_dir": local_staging_dir,
+            }
+        )
+        output_tif.parent.mkdir(parents=True, exist_ok=True)
+        output_tif.write_text("workspace clipped ortho", encoding="utf-8")
+        if type(self).fail_clip:
+            raise ControlledQGISFailure("controlled qgis clip failure")
+        return output_tif
+
+    def generate_tiles(
+        self,
+        *,
+        input_tif,
+        output_dir,
+        zoom="11-24",
+        profile="mercator",
+        webviewer="none",
+        copyright_text="ASIMOV-HAWKS",
+        resume=False,
+        clean=False,
+    ):
+        self.calls.append(
+            {
+                "method": "generate_tiles",
+                "input_tif": input_tif,
+                "output_dir": output_dir,
+                "zoom": zoom,
+                "profile": profile,
+                "webviewer": webviewer,
+                "copyright_text": copyright_text,
+                "resume": resume,
+                "clean": clean,
+            }
+        )
+        if type(self).fail_tiles:
+            raise ControlledQGISFailure("controlled qgis tile failure")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        tile = output_dir / "12" / "345" / "678.png"
+        tile.parent.mkdir(parents=True, exist_ok=True)
+        tile.write_text("workspace tile", encoding="utf-8")
+        return output_dir
+
+    def stage_local_copy(self, src, local_dir):
+        self.calls.append(
+            {
+                "method": "stage_local_copy",
+                "src": src,
+                "local_dir": local_dir,
+            }
+        )
+        local_dir.mkdir(parents=True, exist_ok=True)
+        dst = local_dir / Path(src).name
+        dst.write_text(Path(src).read_text(encoding="utf-8"), encoding="utf-8")
+        return dst
+
+    def verify_raster_readable(self, tif_path, *, retries=3, delay_s=5.0):
+        self.calls.append(
+            {
+                "method": "verify_raster_readable",
+                "tif_path": tif_path,
+                "retries": retries,
+                "delay_s": delay_s,
+            }
+        )
+
+
 class OrthomosaicExportFakeWebODM(FakeWebODM):
     def __init__(self, *, fail_export=False):
         super().__init__()
@@ -94,6 +208,63 @@ class OrthomosaicExportFakeWebODM(FakeWebODM):
         if self.fail_export:
             raise ControlledWebODMExportFailure("controlled orthomosaic export failure")
         return out_path
+
+
+
+
+class RemainingWebODMExportFake(OrthomosaicExportFakeWebODM):
+    def __init__(self, *, fail_pointcloud=False, fail_zip=False):
+        super().__init__()
+        self.fail_pointcloud = fail_pointcloud
+        self.fail_zip = fail_zip
+
+    def export_pointcloud(
+        self,
+        project_id,
+        task_id,
+        *,
+        out_dir,
+        laz_archive_name,
+        pcd_name="odm.pcd",
+        candidates=None,
+        max_points=3_000_000,
+        viewpoint="0 0 0 1 0 0 0",
+    ):
+        self._record(
+            "export_pointcloud",
+            project_id,
+            str(task_id),
+            out_dir=out_dir,
+            laz_archive_name=laz_archive_name,
+            pcd_name=pcd_name,
+            candidates=list(candidates or []),
+            max_points=max_points,
+            viewpoint=viewpoint,
+        )
+        out_dir.mkdir(parents=True, exist_ok=True)
+        laz_path = out_dir / laz_archive_name
+        pcd_path = out_dir / pcd_name
+        laz_path.write_text("workspace laz", encoding="utf-8")
+        pcd_path.write_text("workspace pcd", encoding="utf-8")
+        if self.fail_pointcloud:
+            raise ControlledWebODMPointcloudFailure("controlled pointcloud failure")
+        return {
+            "laz": str(laz_path),
+            "pcd": str(pcd_path),
+            "asset_type": "georeferenced_model.laz",
+        }
+
+    def download_all_assets_safe(self, project_id, task_id, out_file):
+        self._record(
+            "download_all_assets_safe",
+            project_id,
+            str(task_id),
+            str(out_file),
+        )
+        out_file = Path(out_file)
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        out_file.write_text("workspace all assets", encoding="utf-8")
+        return not self.fail_zip
 
 
 def explicit_config(temporary_path_layout):
@@ -279,6 +450,95 @@ def prepare_webodm_ortho_context(pipeline, temporary_path_layout, survey_id="TES
     )
     return survey_path, image_path, boundary_path
 
+
+
+
+def prepare_qgis_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-QGIS"):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    source_ortho = survey_path / "ortho" / "orthomosaic--xcb-t2.tif"
+    source_ortho.parent.mkdir(parents=True)
+    source_ortho.write_text("source ortho", encoding="utf-8")
+
+    boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
+    boundary_path.parent.mkdir(parents=True)
+    boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+                "dirs": {
+                    "qgis_clipped_ortho": str(survey_path / "qgis" / "clipped" / "ortho"),
+                    "tiles_ortho_round": str(
+                        survey_path / "tiles" / "ortho" / "round-corners"
+                    ),
+                    "tiles_ortho_soft": str(
+                        survey_path / "tiles" / "ortho" / "soft-corners"
+                    ),
+                },
+            },
+            "boundary_available": True,
+            "boundary_geojson_path": str(boundary_path),
+            "selected_webodm_task": "task2",
+            "selected_orthomosaic": {
+                "task_key": "task2",
+                "task_label": "t2",
+                "task_id": "task-0001",
+                "task_name": "TEST-SURVEY-QGIS-RGB--xcb-t2",
+                "flag": "xcb",
+                "source_path": str(source_ortho),
+                "source_filename": source_ortho.name,
+                "boundary_used": True,
+                "tile_mode": "round-corners",
+                "fallback_used": False,
+                "fallback_reason": None,
+            },
+        }
+    )
+    return survey_path, source_ortho, boundary_path
+
+
+def configure_qgis_for_fake_tools(pipeline):
+    pipeline.config["qgis"] = {
+        "enabled": True,
+        "clip": {"enabled": True, "dst_nodata": "0"},
+        "tiles": {
+            "enabled": True,
+            "zoom": "11-12",
+            "profile": "mercator",
+            "webviewer": "none",
+            "copyright": "TEST-COPYRIGHT",
+        },
+        "local_staging": {"enabled": False},
+        "tools": {
+            "qgis_root": "",
+            "gdalwarp_path": "fake-gdalwarp",
+            "gdal2tiles_path": "fake-gdal2tiles",
+            "gdalinfo_path": "fake-gdalinfo",
+        },
+    }
+
+
+
+def enable_remaining_webodm_exports(pipeline):
+    pipeline.config["exports"] = {
+        "enabled": True,
+        "ortho": {"enabled": False},
+        "pointcloud": {
+            "enabled": True,
+            "required": True,
+            "asset_candidates": ["georeferenced_model.laz"],
+            "max_points": 123,
+            "viewpoint": "0 0 0 1 0 0 0",
+        },
+        "all_assets_zip": {
+            "enabled": True,
+            "filename_template": "{survey_id}-RGB-{flag}-all.zip",
+        },
+        "tools": {"pdal_path": "fake-pdal"},
+    }
 
 def enable_only_orthomosaic_export(pipeline):
     pipeline.config["exports"] = {
@@ -1087,6 +1347,243 @@ def test_webodm_fallback_orthomosaic_exports_workspace_then_legacy(
         legacy_ortho
     )
 
+
+
+
+
+def test_webodm_task2_remaining_exports_workspace_then_legacy(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = RemainingWebODMExportFake()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_remaining_webodm_exports(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.export_name_overrides["task2"] = "task2-output"
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    result = pipeline.stage_webodm()
+
+    workspace_3d_dir = pipeline.workspace_layout.webodm_3d / "task2"
+    workspace_laz = workspace_3d_dir / "task2-output.laz"
+    workspace_pcd = workspace_3d_dir / "task2-output.pcd"
+    legacy_laz = survey_path / "3d" / "task2-output.laz"
+    legacy_pcd = survey_path / "3d" / "task2-output.pcd"
+    workspace_zip = pipeline.workspace_layout.webodm_odm / "task2" / "task2-output-all.zip"
+    legacy_zip = survey_path / "odm" / "task2-output-all.zip"
+    pointcloud_calls = fake_webodm.calls_for("export_pointcloud")
+    zip_calls = fake_webodm.calls_for("download_all_assets_safe")
+
+    assert len(pointcloud_calls) == 1
+    assert pointcloud_calls[0].kwargs["out_dir"] == workspace_3d_dir
+    assert pointcloud_calls[0].kwargs["laz_archive_name"] == "task2-output.laz"
+    assert pointcloud_calls[0].kwargs["pcd_name"] == "task2-output.pcd"
+    assert pointcloud_calls[0].kwargs["max_points"] == 123
+    assert len(zip_calls) == 1
+    assert zip_calls[0].args[2] == str(workspace_zip)
+    assert workspace_laz.read_text(encoding="utf-8") == "workspace laz"
+    assert workspace_pcd.read_text(encoding="utf-8") == "workspace pcd"
+    assert legacy_laz.read_text(encoding="utf-8") == "workspace laz"
+    assert legacy_pcd.read_text(encoding="utf-8") == "workspace pcd"
+    assert workspace_zip.read_text(encoding="utf-8") == "workspace all assets"
+    assert legacy_zip.read_text(encoding="utf-8") == "workspace all assets"
+    assert result["downloads"]["task2"]["pointcloud_laz"] == str(legacy_laz)
+    assert result["downloads"]["task2"]["pointcloud_pcd"] == str(legacy_pcd)
+    assert result["downloads"]["task2"]["pointcloud_asset_type"] == "georeferenced_model.laz"
+    assert result["downloads"]["task2"]["all_assets_zip"] == str(legacy_zip)
+    assert result["workspace"]["webodm_3d"]["task2"]["laz"] == str(workspace_laz)
+    assert result["workspace"]["webodm_3d"]["task2"]["pcd"] == str(workspace_pcd)
+    assert result["published"]["webodm_3d"]["task2"]["laz"] == str(legacy_laz)
+    assert result["published"]["webodm_3d"]["task2"]["pcd"] == str(legacy_pcd)
+    assert result["workspace"]["webodm_odm"]["task2_all_assets_zip"] == str(workspace_zip)
+    assert result["published"]["webodm_odm"]["task2_all_assets_zip"] == str(legacy_zip)
+
+    for path_to_check in (
+        workspace_laz,
+        workspace_pcd,
+        workspace_zip,
+        legacy_laz,
+        legacy_pcd,
+        legacy_zip,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_webodm_pointcloud_failure_leaves_legacy_outputs_untouched(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = RemainingWebODMExportFake(fail_pointcloud=True)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_remaining_webodm_exports(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline.export_name_overrides["task2"] = "task2-output"
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+    legacy_laz = survey_path / "3d" / "task2-output.laz"
+    legacy_pcd = survey_path / "3d" / "task2-output.pcd"
+    legacy_laz.parent.mkdir(parents=True)
+    legacy_laz.write_text("old laz", encoding="utf-8")
+    legacy_pcd.write_text("old pcd", encoding="utf-8")
+
+    with pytest.raises(
+        ControlledWebODMPointcloudFailure,
+        match="controlled pointcloud failure",
+    ):
+        pipeline.stage_webodm()
+
+    workspace_laz = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.laz"
+    workspace_pcd = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.pcd"
+    assert workspace_laz.read_text(encoding="utf-8") == "workspace laz"
+    assert workspace_pcd.read_text(encoding="utf-8") == "workspace pcd"
+    assert legacy_laz.read_text(encoding="utf-8") == "old laz"
+    assert legacy_pcd.read_text(encoding="utf-8") == "old pcd"
+def test_qgis_outputs_workspace_then_mirrors_legacy_paths(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, source_ortho, boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = False
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    legacy_clipped = (
+        survey_path / "qgis" / "clipped" / "ortho" / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    legacy_clipped.parent.mkdir(parents=True)
+    legacy_clipped.write_text("old clipped", encoding="utf-8")
+    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    legacy_stale_tile = legacy_tiles / "stale.png"
+    legacy_stale_tile.parent.mkdir(parents=True)
+    legacy_stale_tile.write_text("old tile", encoding="utf-8")
+
+    result = pipeline.stage_qgis()
+
+    workspace_clipped = (
+        pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    workspace_tile = pipeline.workspace_layout.qgis_tiles_round / "12" / "345" / "678.png"
+    legacy_tile = legacy_tiles / "12" / "345" / "678.png"
+    fake_tools = FakeQGISTools.instances[-1]
+
+    assert [call["method"] for call in fake_tools.calls] == [
+        "clip_raster_by_mask",
+        "generate_tiles",
+    ]
+    assert fake_tools.calls[0]["input_tif"] == source_ortho
+    assert fake_tools.calls[0]["mask_geojson"] == boundary_path
+    assert fake_tools.calls[0]["output_tif"] == workspace_clipped
+    assert fake_tools.calls[0]["dst_nodata"] == 0.0
+    assert fake_tools.calls[0]["local_staging_dir"] is None
+    assert fake_tools.calls[1]["input_tif"] == workspace_clipped
+    assert fake_tools.calls[1]["output_dir"] == pipeline.workspace_layout.qgis_tiles_round
+    assert fake_tools.calls[1]["clean"] is True
+    assert fake_tools.calls[1]["resume"] is False
+
+    assert workspace_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert legacy_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert workspace_tile.read_text(encoding="utf-8") == "workspace tile"
+    assert legacy_tile.read_text(encoding="utf-8") == "workspace tile"
+    assert not legacy_stale_tile.exists()
+    assert result["clip"]["output"] == str(legacy_clipped)
+    assert result["tiles"]["output_dir"] == str(legacy_tiles)
+    assert result["selected_orthomosaic"]["clipped_path"] == str(legacy_clipped)
+    assert result["selected_orthomosaic"]["tiles_dir"] == str(legacy_tiles)
+    assert result["workspace"]["qgis_clipped_ortho"] == str(workspace_clipped)
+    assert result["workspace"]["tiles_dir"] == str(pipeline.workspace_layout.qgis_tiles_round)
+    assert result["published"]["qgis_clipped_ortho"] == str(legacy_clipped)
+    assert result["published"]["tiles_dir"] == str(legacy_tiles)
+    assert pipeline.state["selected_orthomosaic"]["tiles_dir"] == str(legacy_tiles)
+
+    for path_to_check in (
+        workspace_clipped,
+        workspace_tile,
+        legacy_clipped,
+        legacy_tile,
+    ):
+        assert_within(path_to_check, temporary_path_layout.application_root)
+
+
+def test_qgis_clip_failure_leaves_legacy_outputs_untouched(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, source_ortho, _boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = True
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    legacy_clipped = (
+        survey_path / "qgis" / "clipped" / "ortho" / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    legacy_clipped.parent.mkdir(parents=True)
+    legacy_clipped.write_text("old clipped", encoding="utf-8")
+    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    legacy_tile = legacy_tiles / "keep.png"
+    legacy_tile.parent.mkdir(parents=True)
+    legacy_tile.write_text("old tile", encoding="utf-8")
+
+    with pytest.raises(ControlledQGISFailure, match="controlled qgis clip failure"):
+        pipeline.stage_qgis()
+
+    workspace_clipped = (
+        pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t2.tif"
+    )
+    assert workspace_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert legacy_clipped.read_text(encoding="utf-8") == "old clipped"
+    assert legacy_tile.read_text(encoding="utf-8") == "old tile"
+    assert pipeline.state["selected_orthomosaic"]["source_path"] == str(source_ortho)
+    assert "clipped_path" not in pipeline.state["selected_orthomosaic"]
+
 def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
     temporary_path_layout,
     sample_dataset_dir,
@@ -1151,3 +1648,431 @@ def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
         ) in content
     finally:
         cleanup_logger(pipeline.loggers["webodm"])
+
+
+def test_publication_dry_run_plans_workspace_backed_mixed_artifacts_without_activation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-PLAN"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_geojson = pipeline.workspace_layout.boundary / f"{survey_id}.geojson"
+    workspace_geojson.parent.mkdir(parents=True, exist_ok=True)
+    workspace_geojson.write_text('{"type":"FeatureCollection"}', encoding="utf-8")
+    published_geojson = survey_path / "boundary" / workspace_geojson.name
+    published_geojson.parent.mkdir(parents=True, exist_ok=True)
+    published_geojson.write_text("legacy geojson remains untouched", encoding="utf-8")
+
+    workspace_ortho = pipeline.workspace_layout.webodm_ortho / "task2" / "orthomosaic--xcb-t2.tif"
+    workspace_ortho.parent.mkdir(parents=True, exist_ok=True)
+    workspace_ortho.write_text("workspace ortho", encoding="utf-8")
+    published_ortho = survey_path / "ortho" / workspace_ortho.name
+    published_ortho.parent.mkdir(parents=True, exist_ok=True)
+    published_ortho.write_text("legacy ortho remains untouched", encoding="utf-8")
+
+    workspace_clipped = pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t2.tif"
+    workspace_clipped.parent.mkdir(parents=True, exist_ok=True)
+    workspace_clipped.write_text("workspace clipped", encoding="utf-8")
+    published_clipped = survey_path / "qgis" / "clipped" / "ortho" / workspace_clipped.name
+    published_clipped.parent.mkdir(parents=True, exist_ok=True)
+    published_clipped.write_text("legacy clipped remains untouched", encoding="utf-8")
+
+    workspace_tiles = pipeline.workspace_layout.qgis_tiles_round
+    workspace_tile = workspace_tiles / "12" / "345" / "678.png"
+    workspace_tile.parent.mkdir(parents=True, exist_ok=True)
+    workspace_tile.write_text("workspace tile", encoding="utf-8")
+    published_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    published_tile = published_tiles / "12" / "345" / "678.png"
+    published_tile.parent.mkdir(parents=True, exist_ok=True)
+    published_tile.write_text("legacy tile remains untouched", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "kml_boundary": {
+                "workspace": {
+                    "processed_files": [{"geojson": str(workspace_geojson)}],
+                },
+                "published": {
+                    "processed_files": [{"geojson": str(published_geojson)}],
+                },
+            },
+            "webodm": {
+                "workspace": {"webodm_ortho": {"task2": str(workspace_ortho)}},
+                "published": {"webodm_ortho": {"task2": str(published_ortho)}},
+            },
+            "qgis": {
+                "workspace": {
+                    "qgis_clipped_ortho": str(workspace_clipped),
+                    "tiles_dir": str(workspace_tiles),
+                },
+                "published": {
+                    "qgis_clipped_ortho": str(published_clipped),
+                    "tiles_dir": str(published_tiles),
+                },
+            },
+        }
+    )
+
+    plan = pipeline.plan_publication_dry_run()
+
+    assert plan["status"] == "planned"
+    assert plan["activation_enabled"] is False
+    assert plan["survey_id"] == survey_id
+    assert plan["publication_manifest"] == str(survey_path / "publication.json")
+    assert plan["artifact_count"] == 4
+    artifacts = {artifact["logical_name"]: artifact for artifact in plan["artifacts"]}
+    assert artifacts["kml_boundary.published.processed_files.geojson"]["kind"] == "file"
+    assert artifacts["webodm.published.webodm_ortho.task2"]["published_relative_path"] == str(
+        Path("ortho") / workspace_ortho.name
+    )
+    assert artifacts["qgis.published.qgis_clipped_ortho"]["kind"] == "file"
+    assert artifacts["qgis.published.tiles_dir"]["kind"] == "directory"
+    assert not (survey_path / "publication.json").exists()
+    assert published_geojson.read_text(encoding="utf-8") == "legacy geojson remains untouched"
+    assert published_ortho.read_text(encoding="utf-8") == "legacy ortho remains untouched"
+    assert published_clipped.read_text(encoding="utf-8") == "legacy clipped remains untouched"
+    assert published_tile.read_text(encoding="utf-8") == "legacy tile remains untouched"
+
+
+
+def test_prepare_publication_staging_writes_workspace_manifest_without_activation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-STAGED"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_geojson = pipeline.workspace_layout.boundary / "boundary.geojson"
+    workspace_geojson.parent.mkdir(parents=True, exist_ok=True)
+    workspace_geojson.write_text("workspace geojson", encoding="utf-8")
+    published_geojson = survey_path / "boundary" / "boundary.geojson"
+    published_geojson.parent.mkdir(parents=True, exist_ok=True)
+    published_geojson.write_text("legacy geojson remains untouched", encoding="utf-8")
+
+    workspace_tiles = pipeline.workspace_layout.qgis_tiles_round
+    workspace_tile = workspace_tiles / "12" / "345" / "678.png"
+    workspace_tile.parent.mkdir(parents=True, exist_ok=True)
+    workspace_tile.write_text("workspace tile", encoding="utf-8")
+    published_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    published_tile = published_tiles / "12" / "345" / "678.png"
+    published_tile.parent.mkdir(parents=True, exist_ok=True)
+    published_tile.write_text("legacy tile remains untouched", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "kml_boundary": {
+                "workspace": {
+                    "processed_files": [{"geojson": str(workspace_geojson)}],
+                },
+                "published": {
+                    "processed_files": [{"geojson": str(published_geojson)}],
+                },
+            },
+            "qgis": {
+                "workspace": {"tiles_dir": str(workspace_tiles)},
+                "published": {"tiles_dir": str(published_tiles)},
+            },
+        }
+    )
+
+    result = pipeline.prepare_publication_staging()
+
+    staged_manifest = Path(result["staged_manifest"])
+    assert result["status"] == "staged"
+    assert result["activation_enabled"] is False
+    assert result["artifact_count"] == 2
+    assert staged_manifest == pipeline.workspace_layout.publish / "staged" / "publication.json"
+    assert staged_manifest.exists()
+    assert not (survey_path / "publication.json").exists()
+
+    manifest = json.loads(staged_manifest.read_text(encoding="utf-8"))
+    assert manifest["status"] == "staged"
+    assert manifest["run_id"] == pipeline.run_id
+    assert manifest["survey_id"] == survey_id
+    assert manifest["published_root"] == str(survey_path)
+    artifact_records = {
+        artifact["logical_name"]: artifact for artifact in manifest["artifacts"]
+    }
+    geojson_record = artifact_records["kml_boundary.published.processed_files.geojson"]
+    tiles_record = artifact_records["qgis.published.tiles_dir"]
+    assert geojson_record["kind"] == "file"
+    assert tiles_record["kind"] == "directory"
+    assert Path(geojson_record["staged_path"]).read_text(encoding="utf-8") == "workspace geojson"
+    assert (Path(tiles_record["staged_path"]) / "12" / "345" / "678.png").read_text(
+        encoding="utf-8"
+    ) == "workspace tile"
+    assert published_geojson.read_text(encoding="utf-8") == "legacy geojson remains untouched"
+    assert published_tile.read_text(encoding="utf-8") == "legacy tile remains untouched"
+
+def test_prepare_publication_staging_blocks_empty_plan(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-EMPTY"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+        }
+    )
+
+    result = pipeline.prepare_publication_staging()
+
+    assert result["status"] == "blocked"
+    assert result["artifact_count"] == 0
+    assert result["blocked_reasons"] == ["publication plan contains no artifacts"]
+    assert not (pipeline.workspace_layout.publish / "staged" / "publication.json").exists()
+    assert not (survey_path / "publication.json").exists()
+
+def _seed_simple_publication_state(pipeline: RGBPipeline, temporary_path_layout, survey_id: str):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_geojson = pipeline.workspace_layout.boundary / "boundary.geojson"
+    workspace_geojson.parent.mkdir(parents=True, exist_ok=True)
+    workspace_geojson.write_text("workspace geojson", encoding="utf-8")
+    published_geojson = survey_path / "boundary" / "boundary.geojson"
+    published_geojson.parent.mkdir(parents=True, exist_ok=True)
+    published_geojson.write_text("legacy geojson", encoding="utf-8")
+
+    workspace_tiles = pipeline.workspace_layout.qgis_tiles_round
+    workspace_tile = workspace_tiles / "12" / "345" / "678.png"
+    workspace_tile.parent.mkdir(parents=True, exist_ok=True)
+    workspace_tile.write_text("workspace tile", encoding="utf-8")
+    published_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    published_tile = published_tiles / "12" / "345" / "678.png"
+    published_tile.parent.mkdir(parents=True, exist_ok=True)
+    published_tile.write_text("legacy tile", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "kml_boundary": {
+                "workspace": {
+                    "processed_files": [{"geojson": str(workspace_geojson)}],
+                },
+                "published": {
+                    "processed_files": [{"geojson": str(published_geojson)}],
+                },
+            },
+            "qgis": {
+                "workspace": {"tiles_dir": str(workspace_tiles)},
+                "published": {"tiles_dir": str(published_tiles)},
+            },
+        }
+    )
+    return {
+        "survey_path": survey_path,
+        "published_geojson": published_geojson,
+        "published_tile": published_tile,
+    }
+
+
+def test_activate_publication_explicit_blocks_without_exact_confirmation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-CONFIRM",
+    )
+    pipeline.prepare_publication_staging()
+
+    result = pipeline.activate_publication_explicit(confirmation="publish please")
+
+    assert result["status"] == "blocked"
+    assert result["activation_enabled"] is True
+    assert "confirmation must exactly match" in result["blocked_reasons"][0]
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+
+def test_activate_publication_explicit_blocks_missing_staged_manifest(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-MISSING-STAGED",
+    )
+
+    result = pipeline.activate_publication_explicit(
+        confirmation=pipeline.expected_publication_confirmation(),
+    )
+
+    assert result["status"] == "blocked"
+    assert "staged publication manifest is missing" in result["blocked_reasons"][0]
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+
+def test_activate_publication_explicit_publishes_staged_mixed_set(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-ACTIVATE",
+    )
+    pipeline.prepare_publication_staging()
+
+    result = pipeline.activate_publication_explicit(
+        confirmation=pipeline.expected_publication_confirmation(),
+    )
+
+    publication_manifest = paths["survey_path"] / "publication.json"
+    assert result["status"] == "activated"
+    assert result["activation_enabled"] is True
+    assert result["publication_manifest"] == str(publication_manifest)
+    assert publication_manifest.exists()
+    manifest = json.loads(publication_manifest.read_text(encoding="utf-8"))
+    assert manifest["status"] == "published"
+    assert manifest["run_id"] == pipeline.run_id
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "workspace geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "workspace tile"
+    assert not (paths["survey_path"] / ".publication.lock").exists()
+
+
+def test_activate_publication_explicit_existing_lock_blocks_before_mutation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-LOCKED",
+    )
+    pipeline.prepare_publication_staging()
+    acquire_publication_lock(
+        published_root=paths["survey_path"],
+        run_id="other-run",
+        survey_id="TEST-SURVEY-PUBLISH-LOCKED",
+        owner_token="other-owner",
+        created_at="2026-07-30T00:00:00Z",
+    )
+
+    with pytest.raises(PublicationLockedError):
+        pipeline.activate_publication_explicit(
+            confirmation=pipeline.expected_publication_confirmation(),
+        )
+
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+    assert not (paths["survey_path"] / "publication.json").exists()
+
+def test_publication_dry_run_blocks_non_workspace_source(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-BLOCKED"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    legacy_source = survey_path / "ortho" / "legacy-only.tif"
+    legacy_source.parent.mkdir(parents=True, exist_ok=True)
+    legacy_source.write_text("legacy source", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "webodm": {
+                "workspace": {"webodm_ortho": {"task2": str(legacy_source)}},
+                "published": {"webodm_ortho": {"task2": str(legacy_source)}},
+            },
+        }
+    )
+
+    plan = pipeline.plan_publication_dry_run()
+
+    assert plan["status"] == "blocked"
+    assert plan["artifact_count"] == 0
+    assert "not run-workspace owned" in plan["blocked_reasons"][0]
+    assert not (survey_path / "publication.json").exists()
+
+    staging_result = pipeline.prepare_publication_staging()
+
+    assert staging_result["status"] == "blocked"
+    assert staging_result["artifact_count"] == 0
+    assert "not run-workspace owned" in staging_result["blocked_reasons"][0]
+    assert not (pipeline.workspace_layout.publish / "staged" / "publication.json").exists()
