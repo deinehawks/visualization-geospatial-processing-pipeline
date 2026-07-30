@@ -1,5 +1,6 @@
 
 import importlib.util
+import json
 import logging
 import sqlite3
 from pathlib import Path
@@ -24,6 +25,7 @@ from pipelines import rgb_pipeline as rgb_module
 from pipelines.rgb_pipeline import RGBPipeline
 from shared.db.repo import PipelineRepo
 from shared.logging import get_logger
+from shared.publication_lock import acquire_publication_lock, PublicationLockedError
 from tests.fakes import FakeWebODM
 
 
@@ -1745,6 +1747,291 @@ def test_publication_dry_run_plans_workspace_backed_mixed_artifacts_without_acti
     assert published_tile.read_text(encoding="utf-8") == "legacy tile remains untouched"
 
 
+
+def test_prepare_publication_staging_writes_workspace_manifest_without_activation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-STAGED"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_geojson = pipeline.workspace_layout.boundary / "boundary.geojson"
+    workspace_geojson.parent.mkdir(parents=True, exist_ok=True)
+    workspace_geojson.write_text("workspace geojson", encoding="utf-8")
+    published_geojson = survey_path / "boundary" / "boundary.geojson"
+    published_geojson.parent.mkdir(parents=True, exist_ok=True)
+    published_geojson.write_text("legacy geojson remains untouched", encoding="utf-8")
+
+    workspace_tiles = pipeline.workspace_layout.qgis_tiles_round
+    workspace_tile = workspace_tiles / "12" / "345" / "678.png"
+    workspace_tile.parent.mkdir(parents=True, exist_ok=True)
+    workspace_tile.write_text("workspace tile", encoding="utf-8")
+    published_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    published_tile = published_tiles / "12" / "345" / "678.png"
+    published_tile.parent.mkdir(parents=True, exist_ok=True)
+    published_tile.write_text("legacy tile remains untouched", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "kml_boundary": {
+                "workspace": {
+                    "processed_files": [{"geojson": str(workspace_geojson)}],
+                },
+                "published": {
+                    "processed_files": [{"geojson": str(published_geojson)}],
+                },
+            },
+            "qgis": {
+                "workspace": {"tiles_dir": str(workspace_tiles)},
+                "published": {"tiles_dir": str(published_tiles)},
+            },
+        }
+    )
+
+    result = pipeline.prepare_publication_staging()
+
+    staged_manifest = Path(result["staged_manifest"])
+    assert result["status"] == "staged"
+    assert result["activation_enabled"] is False
+    assert result["artifact_count"] == 2
+    assert staged_manifest == pipeline.workspace_layout.publish / "staged" / "publication.json"
+    assert staged_manifest.exists()
+    assert not (survey_path / "publication.json").exists()
+
+    manifest = json.loads(staged_manifest.read_text(encoding="utf-8"))
+    assert manifest["status"] == "staged"
+    assert manifest["run_id"] == pipeline.run_id
+    assert manifest["survey_id"] == survey_id
+    assert manifest["published_root"] == str(survey_path)
+    artifact_records = {
+        artifact["logical_name"]: artifact for artifact in manifest["artifacts"]
+    }
+    geojson_record = artifact_records["kml_boundary.published.processed_files.geojson"]
+    tiles_record = artifact_records["qgis.published.tiles_dir"]
+    assert geojson_record["kind"] == "file"
+    assert tiles_record["kind"] == "directory"
+    assert Path(geojson_record["staged_path"]).read_text(encoding="utf-8") == "workspace geojson"
+    assert (Path(tiles_record["staged_path"]) / "12" / "345" / "678.png").read_text(
+        encoding="utf-8"
+    ) == "workspace tile"
+    assert published_geojson.read_text(encoding="utf-8") == "legacy geojson remains untouched"
+    assert published_tile.read_text(encoding="utf-8") == "legacy tile remains untouched"
+
+def test_prepare_publication_staging_blocks_empty_plan(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-EMPTY"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+        }
+    )
+
+    result = pipeline.prepare_publication_staging()
+
+    assert result["status"] == "blocked"
+    assert result["artifact_count"] == 0
+    assert result["blocked_reasons"] == ["publication plan contains no artifacts"]
+    assert not (pipeline.workspace_layout.publish / "staged" / "publication.json").exists()
+    assert not (survey_path / "publication.json").exists()
+
+def _seed_simple_publication_state(pipeline: RGBPipeline, temporary_path_layout, survey_id: str):
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_geojson = pipeline.workspace_layout.boundary / "boundary.geojson"
+    workspace_geojson.parent.mkdir(parents=True, exist_ok=True)
+    workspace_geojson.write_text("workspace geojson", encoding="utf-8")
+    published_geojson = survey_path / "boundary" / "boundary.geojson"
+    published_geojson.parent.mkdir(parents=True, exist_ok=True)
+    published_geojson.write_text("legacy geojson", encoding="utf-8")
+
+    workspace_tiles = pipeline.workspace_layout.qgis_tiles_round
+    workspace_tile = workspace_tiles / "12" / "345" / "678.png"
+    workspace_tile.parent.mkdir(parents=True, exist_ok=True)
+    workspace_tile.write_text("workspace tile", encoding="utf-8")
+    published_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    published_tile = published_tiles / "12" / "345" / "678.png"
+    published_tile.parent.mkdir(parents=True, exist_ok=True)
+    published_tile.write_text("legacy tile", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "kml_boundary": {
+                "workspace": {
+                    "processed_files": [{"geojson": str(workspace_geojson)}],
+                },
+                "published": {
+                    "processed_files": [{"geojson": str(published_geojson)}],
+                },
+            },
+            "qgis": {
+                "workspace": {"tiles_dir": str(workspace_tiles)},
+                "published": {"tiles_dir": str(published_tiles)},
+            },
+        }
+    )
+    return {
+        "survey_path": survey_path,
+        "published_geojson": published_geojson,
+        "published_tile": published_tile,
+    }
+
+
+def test_activate_publication_explicit_blocks_without_exact_confirmation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-CONFIRM",
+    )
+    pipeline.prepare_publication_staging()
+
+    result = pipeline.activate_publication_explicit(confirmation="publish please")
+
+    assert result["status"] == "blocked"
+    assert result["activation_enabled"] is True
+    assert "confirmation must exactly match" in result["blocked_reasons"][0]
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+
+def test_activate_publication_explicit_blocks_missing_staged_manifest(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-MISSING-STAGED",
+    )
+
+    result = pipeline.activate_publication_explicit(
+        confirmation=pipeline.expected_publication_confirmation(),
+    )
+
+    assert result["status"] == "blocked"
+    assert "staged publication manifest is missing" in result["blocked_reasons"][0]
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+
+def test_activate_publication_explicit_publishes_staged_mixed_set(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-ACTIVATE",
+    )
+    pipeline.prepare_publication_staging()
+
+    result = pipeline.activate_publication_explicit(
+        confirmation=pipeline.expected_publication_confirmation(),
+    )
+
+    publication_manifest = paths["survey_path"] / "publication.json"
+    assert result["status"] == "activated"
+    assert result["activation_enabled"] is True
+    assert result["publication_manifest"] == str(publication_manifest)
+    assert publication_manifest.exists()
+    manifest = json.loads(publication_manifest.read_text(encoding="utf-8"))
+    assert manifest["status"] == "published"
+    assert manifest["run_id"] == pipeline.run_id
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "workspace geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "workspace tile"
+    assert not (paths["survey_path"] / ".publication.lock").exists()
+
+
+def test_activate_publication_explicit_existing_lock_blocks_before_mutation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-LOCKED",
+    )
+    pipeline.prepare_publication_staging()
+    acquire_publication_lock(
+        published_root=paths["survey_path"],
+        run_id="other-run",
+        survey_id="TEST-SURVEY-PUBLISH-LOCKED",
+        owner_token="other-owner",
+        created_at="2026-07-30T00:00:00Z",
+    )
+
+    with pytest.raises(PublicationLockedError):
+        pipeline.activate_publication_explicit(
+            confirmation=pipeline.expected_publication_confirmation(),
+        )
+
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+    assert not (paths["survey_path"] / "publication.json").exists()
+
 def test_publication_dry_run_blocks_non_workspace_source(
     temporary_path_layout,
     sample_dataset_dir,
@@ -1782,3 +2069,10 @@ def test_publication_dry_run_blocks_non_workspace_source(
     assert plan["artifact_count"] == 0
     assert "not run-workspace owned" in plan["blocked_reasons"][0]
     assert not (survey_path / "publication.json").exists()
+
+    staging_result = pipeline.prepare_publication_staging()
+
+    assert staging_result["status"] == "blocked"
+    assert staging_result["artifact_count"] == 0
+    assert "not run-workspace owned" in staging_result["blocked_reasons"][0]
+    assert not (pipeline.workspace_layout.publish / "staged" / "publication.json").exists()

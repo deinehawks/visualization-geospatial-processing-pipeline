@@ -73,7 +73,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, and ADR-021 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, ADR-021, and ADR-022 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -416,3 +416,30 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   - Normal tests exercise only pytest-owned temporary roots and do not validate real SMB behavior.
   - Live RGBPipeline publication remains deferred until controlled validation is run and reviewed in the intended environment.
 - **Related files or issues:** R02, R04, R07, R10, R11; `shared/filesystem_validation.py`; `tools/filesystem_validation.py`; `tests/test_filesystem_validation.py`; Phase 3; ADR-014; ADR-015; ADR-018; ADR-020.
+
+### ADR-022 - Preserve successful-run cleanup metadata before deleting bulky workspace artifacts
+
+- **Decision ID:** ADR-022
+- **Date:** 2026-07-30
+- **Status:** Accepted
+- **Approval context:** After discussing run workspace retention during Phase 3 publication wiring, the user approved documenting that bulky successful-run workspace artifacts should not be deleted until lightweight metadata is archived.
+- **Context:**
+  - Run workspaces can contain large QGIS tile trees, orthomosaic copies, and `images/cross-runs` image copies.
+  - Keeping every successful-run workspace forever can consume significant storage.
+  - Deleting workspaces immediately after success can remove recovery, audit, and diagnostic evidence before publication and cleanup evidence is safely recorded.
+  - `images/cross-runs` contents may no longer be operationally needed after successful publication, but the run should still retain enough metadata to explain what was selected, rejected, copied, and archived.
+- **Decision:**
+  - Do not automatically delete run workspaces or bulky intermediate directories as part of normal successful pipeline completion in the current Phase 3 wiring.
+  - Before any future cleanup deletes bulky successful-run workspace content, archive lightweight metadata for the removed content.
+  - For `images/cross-runs`, archived metadata should include file counts, names or relative identifiers, selected/rejected image lists where available, source references where safe, classification/filter reasons where available, timestamps where available, and total bytes where practical.
+  - Treat deletion of bulky workspace content as a guarded cleanup action driven by the cleanup planner/executor, not by implicit success status alone.
+  - Preserve publication/recovery evidence until the active publication manifest and terminal activation journals prove the run is safely published or rolled back.
+- **Alternatives considered:**
+  - Delete successful workspaces immediately: rejected because it can remove forensic and recovery evidence too early.
+  - Keep all workspace content forever: safe but wasteful for tile trees, orthomosaic copies, and copied image sets.
+  - Archive full bulky directories instead of metadata: rejected as the default because it moves the storage problem rather than solving it; full archival can remain a separate operator decision.
+- **Consequences:**
+  - Storage savings remain a follow-up cleanup-policy implementation, not a side effect of publication activation.
+  - Operators keep an audit trail explaining deleted successful-run intermediates without retaining every copied image or generated tile.
+  - Future cleanup code must distinguish metadata archival from destructive deletion and must remain explicit, guarded, and auditable.
+- **Related files or issues:** ADR-003; ADR-019; ADR-020; `shared/artifacts.py`; `tools/artifact_cleanup.py`; `pipelines/rgb_pipeline.py`; Phase 3.

@@ -1028,3 +1028,34 @@ Coverage proves that:
 - non-workspace-owned sources make the plan fail closed with a blocked reason.
 
 The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, or mutate production survey roots.
+
+## Phase 3 RGBPipeline staged publication coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the opt-in staged publication bridge with pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- staged publication writes a manifest under the run workspace `publish/staged` directory;
+- staged file and directory artifacts are copied from workspace-owned sources into the staging tree;
+- the published survey `publication.json` is not written;
+- existing legacy mirrored files and tile directories remain untouched; and
+- blocked dry-run plans remain blocked and do not create a staged manifest.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, or mutate production survey roots.
+## Phase 3 RGBPipeline explicit publication activation coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the opt-in explicit activation bridge with pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- activation requires the exact `PUBLISH <survey_id> <run_id>` confirmation phrase;
+- missing staged publication manifests block before published outputs change;
+- confirmed activation publishes a mixed file/directory set and writes the published survey `publication.json`;
+- the publication lock is released after successful activation; and
+- an existing publication lock blocks activation before visible artifacts change.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, recover stale locks, run cleanup, or mutate production survey roots.

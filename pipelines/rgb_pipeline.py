@@ -19,6 +19,8 @@ from shared.artifacts import (
     describe_run_workspace,
     plan_published_survey_from_rgb_path,
     plan_run_workspace,
+    prepare_publication,
+    activate_publication_set_with_lock,
 )
 
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
@@ -441,17 +443,9 @@ class RGBPipeline(
             )
         )
 
-    def plan_publication_dry_run(self) -> Dict[str, Any]:
-        """Build the current RGB publication intent without activating it.
-
-        This is an opt-in planning bridge for Phase 3. It reads the current
-        in-memory stage state, finds run-workspace artifacts that are still
-        mirrored to legacy published paths, validates ownership/containment, and
-        returns the mixed file/directory publication set that a later activation
-        slice could stage. It intentionally does not copy, rename, lock, write a
-        publication manifest, or mutate pipeline state.
-        """
-
+    def _build_publication_artifact_plan(
+        self,
+    ) -> tuple[list[PublicationArtifact], list[str]]:
         if not self.survey_id or self.rgb_path is None or self.published_layout is None:
             self._hydrate_from_state()
         if not self.survey_id:
@@ -482,7 +476,15 @@ class RGBPipeline(
                 seen_targets=seen_targets,
             )
 
-        artifact_payload = [
+        return artifacts, blocked_reasons
+
+    def _publication_artifact_payload(
+        self,
+        artifacts: list[PublicationArtifact],
+    ) -> list[dict[str, str]]:
+        if self.published_layout is None:
+            raise RuntimeError("published_layout is not set yet. Run data_segregation first.")
+        return [
             {
                 "logical_name": artifact.logical_name,
                 "kind": artifact.kind,
@@ -493,6 +495,23 @@ class RGBPipeline(
                 ),
             }
             for artifact in artifacts
+        ]
+
+    def plan_publication_dry_run(self) -> Dict[str, Any]:
+        """Build the current RGB publication intent without activating it.
+
+        This is an opt-in planning bridge for Phase 3. It reads the current
+        in-memory stage state, finds run-workspace artifacts that are still
+        mirrored to legacy published paths, validates ownership/containment, and
+        returns the mixed file/directory publication set that a later activation
+        slice could stage. It intentionally does not copy, rename, lock, write a
+        publication manifest, or mutate pipeline state.
+        """
+
+        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        artifact_payload = [
+            dict(artifact_record)
+            for artifact_record in self._publication_artifact_payload(artifacts)
         ]
 
         plan = {
@@ -514,6 +533,148 @@ class RGBPipeline(
             activation_enabled="false",
         )
         return plan
+
+    def prepare_publication_staging(self) -> Dict[str, Any]:
+        """Prepare a staged RGB publication set without activating it.
+
+        This opt-in Phase 3 bridge reuses the dry-run publication plan and the
+        existing artifact staging helper. It writes only under the run workspace
+        publish/staged directory and intentionally does not acquire the
+        publication lock, mutate visible published artifacts, or write the
+        published survey publication.json.
+        """
+
+        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        if not artifacts and not blocked_reasons:
+            blocked_reasons.append("publication plan contains no artifacts")
+        artifact_payload = [
+            dict(artifact_record)
+            for artifact_record in self._publication_artifact_payload(artifacts)
+        ]
+        if self.published_layout is None or self.workspace_layout is None:
+            raise RuntimeError("publication layouts are not set yet. Run data_segregation first.")
+
+        result: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "survey_id": self.survey_id,
+            "published_root": str(self.published_layout.root),
+            "publication_manifest": str(self.published_layout.publication_manifest),
+            "activation_enabled": False,
+            "artifact_count": len(artifact_payload),
+            "artifacts": artifact_payload,
+            "blocked_reasons": blocked_reasons,
+        }
+        if blocked_reasons:
+            result["status"] = "blocked"
+            log_event(
+                self.loggers["pipeline"],
+                "publication_staging_blocked",
+                status=result["status"],
+                artifact_count=str(result["artifact_count"]),
+                activation_enabled="false",
+            )
+            return result
+
+        staged_manifest = prepare_publication(
+            run_id=self.run_id,
+            survey_id=self.survey_id,
+            workspace=self.workspace_layout,
+            published=self.published_layout,
+            artifacts=artifacts,
+        )
+        result["status"] = "staged"
+        result["staged_manifest"] = str(staged_manifest)
+        log_event(
+            self.loggers["pipeline"],
+            "publication_staging_prepared",
+            status=result["status"],
+            artifact_count=str(result["artifact_count"]),
+            staged_manifest=str(staged_manifest),
+            activation_enabled="false",
+        )
+        return result
+
+    def expected_publication_confirmation(self) -> str:
+        if not self.survey_id:
+            raise RuntimeError("survey_id is not set yet. Run data_segregation first.")
+        return f"PUBLISH {self.survey_id} {self.run_id}"
+
+    def activate_publication_explicit(self, *, confirmation: str) -> Dict[str, Any]:
+        """Activate a staged RGB publication only after explicit confirmation.
+
+        This is the deliberately guarded Phase 3 live-publication bridge. It
+        requires the caller to provide the exact confirmation phrase for the
+        current survey and run, then delegates to the existing lock-owned mixed
+        publication-set activation helper. It is intentionally not called from
+        RGBPipeline.run().
+        """
+
+        if self.published_layout is None or self.workspace_layout is None:
+            raise RuntimeError("publication layouts are not set yet. Run data_segregation first.")
+        expected_confirmation = self.expected_publication_confirmation()
+        if confirmation != expected_confirmation:
+            log_event(
+                self.loggers["pipeline"],
+                "publication_activation_blocked",
+                status="blocked",
+                reason="confirmation_mismatch",
+                activation_enabled="true",
+            )
+            return {
+                "run_id": self.run_id,
+                "survey_id": self.survey_id,
+                "published_root": str(self.published_layout.root),
+                "publication_manifest": str(self.published_layout.publication_manifest),
+                "activation_enabled": True,
+                "status": "blocked",
+                "blocked_reasons": [
+                    f"confirmation must exactly match: {expected_confirmation}"
+                ],
+            }
+
+        staged_manifest = self.workspace_layout.publish / "staged" / "publication.json"
+        if not staged_manifest.is_file():
+            log_event(
+                self.loggers["pipeline"],
+                "publication_activation_blocked",
+                status="blocked",
+                reason="missing_staged_manifest",
+                staged_manifest=str(staged_manifest),
+                activation_enabled="true",
+            )
+            return {
+                "run_id": self.run_id,
+                "survey_id": self.survey_id,
+                "published_root": str(self.published_layout.root),
+                "publication_manifest": str(self.published_layout.publication_manifest),
+                "activation_enabled": True,
+                "status": "blocked",
+                "blocked_reasons": [
+                    f"staged publication manifest is missing: {staged_manifest}"
+                ],
+            }
+
+        publication_manifest = activate_publication_set_with_lock(
+            workspace=self.workspace_layout,
+            published=self.published_layout,
+        )
+        result: Dict[str, Any] = {
+            "run_id": self.run_id,
+            "survey_id": self.survey_id,
+            "published_root": str(self.published_layout.root),
+            "publication_manifest": str(publication_manifest),
+            "activation_enabled": True,
+            "status": "activated",
+        }
+        log_event(
+            self.loggers["pipeline"],
+            "publication_activation_completed",
+            status=result["status"],
+            publication_manifest=str(publication_manifest),
+            activation_enabled="true",
+        )
+        return result
+
     def _preflight_stage(self, stage_name: str) -> None:
         result = self.preflight.check_stage(
             stage_name,

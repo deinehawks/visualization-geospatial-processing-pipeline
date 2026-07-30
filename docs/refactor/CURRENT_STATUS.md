@@ -2081,3 +2081,26 @@ Date: 2026-07-30.
 This bridge is intentionally read-only with respect to publication: it does not call `prepare_publication()`, acquire `.publication.lock`, reconcile journals, copy files, rename directories, write `publication.json`, modify legacy mirrors, or run automatically from `RGBPipeline.run()`. Legacy workspace-to-published mirroring remains unchanged.
 
 The helper can report `blocked` when a would-be artifact is not run-workspace owned, missing, duplicated, or targets a path outside the published survey root. This makes legacy-only or unsafe candidates visible before the live activation switch is considered.
+
+## Phase 3 RGBPipeline staged publication bridge
+
+Date: 2026-07-30.
+
+`RGBPipeline.prepare_publication_staging()` now provides an explicit opt-in bridge from the validated dry-run publication plan to the existing dormant `prepare_publication()` helper. The method collects the same workspace-owned file/directory artifacts, blocks unsafe or non-workspace-backed sources before staging, writes the staged publish set only under the run workspace `publish/staged` directory, and returns the staged manifest path and artifact summary.
+
+The bridge intentionally does not call publication activation, does not acquire the publication lock, does not mutate visible published survey artifacts, and does not write the published survey `publication.json`. Live automatic publication remains deferred until the activation call site and operator controls are accepted separately.
+## Phase 3 explicit RGBPipeline publication activation control
+
+Date: 2026-07-30.
+
+`RGBPipeline.activate_publication_explicit()` now provides the first guarded bridge from a staged publication manifest to live mixed file/directory activation. The method requires the exact confirmation phrase `PUBLISH <survey_id> <run_id>`, refuses missing staged manifests before mutation, and delegates confirmed activation to the existing lock-owned `activate_publication_set_with_lock()` helper.
+
+The method remains opt-in and is not called from `RGBPipeline.run()`. It can mutate visible published survey artifacts and the published `publication.json` only when explicitly called with the exact confirmation phrase. Automatic stale-lock recovery, cleanup, and implicit post-QGIS publication remain deferred.
+
+## Phase 3 successful-run workspace cleanup metadata policy
+
+Date: 2026-07-30.
+
+Successful runs should not automatically delete run workspaces or bulky intermediate artifacts during the current Phase 3 publication wiring. Before future guarded cleanup removes large successful-run content such as QGIS tile trees, orthomosaic copies, or `images/cross-runs`, lightweight metadata must be archived so operators can still audit what was selected, copied, filtered, and removed.
+
+This is a documented policy only in this slice. No automatic workspace deletion, `images/cross-runs` deletion, or cleanup trigger was added.
