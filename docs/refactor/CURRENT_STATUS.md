@@ -2104,3 +2104,25 @@ Date: 2026-07-30.
 Successful runs should not automatically delete run workspaces or bulky intermediate artifacts during the current Phase 3 publication wiring. Before future guarded cleanup removes large successful-run content such as QGIS tile trees, orthomosaic copies, or `images/cross-runs`, lightweight metadata must be archived so operators can still audit what was selected, copied, filtered, and removed.
 
 This is a documented policy only in this slice. No automatic workspace deletion, `images/cross-runs` deletion, or cleanup trigger was added.
+## Phase 3 remaining gaps before live/runtime publication use
+
+Date: 2026-07-30.
+
+The following gaps remain intentionally tracked before publication should be wired into normal runtime behavior:
+
+- Activation exists as an explicit method and operator CLI, but it is not a normal `RGBPipeline.run()` stage.
+- Publication activation is not yet recorded as a formal `StageRunner` stage row with retry/attempt history.
+- The official publication artifact allowlist still needs review; the current planner scans mirrored workspace/published pairs and may include bulky or non-final artifacts.
+- Tile staging can duplicate large tile directories and should be optimized before production-scale live use.
+- WebODM and QGIS stages still mirror outputs into legacy published paths during stage execution, so the pipeline is not yet workspace-only-until-publish.
+- SMB validation has covered disposable primitives and a 1,000-file tree, but not full production tile counts, open handles, disconnect/reconnect, host loss, antivirus/indexer interference, or huge cleanup workloads.
+- Successful-run workspace cleanup metadata archiving is documented but not implemented.
+- Cleanup is not yet tied to successful publication through an operator-reviewed archive-then-delete workflow.
+
+## Phase 3 explicit publication activation CLI
+
+Date: 2026-07-30.
+
+`tools/publication_activate.py` now provides a small operator-facing JSON CLI for activating an already staged Phase 3 publication. The command requires explicit `--workspace-root`, `--published-root`, exact confirmation phrase `PUBLISH <survey_id> <run_id>`, and `--allow-activation` before it mutates published artifacts.
+
+The CLI validates the staged manifest identity against the supplied roots before delegating to the existing lock-owned mixed publication-set activation helper. It does not construct `RGBPipeline`, run pipeline stages, recover stale locks, perform cleanup, or infer production paths.

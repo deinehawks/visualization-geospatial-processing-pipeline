@@ -1059,3 +1059,17 @@ Coverage proves that:
 - an existing publication lock blocks activation before visible artifacts change.
 
 The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, recover stale locks, run cleanup, or mutate production survey roots.
+## Phase 3 publication activation CLI coverage
+
+Date: 2026-07-30.
+
+`tests/test_phase3_artifact_workspace.py` now covers `tools/publication_activate.py` using only pytest-owned workspace and published roots.
+
+Coverage proves that:
+
+- activation refuses to run without `--allow-activation`;
+- activation refuses an incorrect confirmation phrase before mutating published artifacts;
+- activation validates and publishes an already staged mixed file/directory publication set; and
+- the publication lock is released after successful CLI activation.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, or touch production survey roots.

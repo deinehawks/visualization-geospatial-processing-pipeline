@@ -26,6 +26,7 @@ from shared.artifacts import (
     prepare_publication,
 )
 from tools.artifact_cleanup import main as cleanup_cli_main
+from tools.publication_activate import main as publication_activate_cli_main
 
 from shared.publication_lock import (
     PUBLICATION_LOCK_NAME,
@@ -838,6 +839,50 @@ def test_artifact_cleanup_cli_plans_requires_ack_and_executes(tmp_path, capsys):
     assert len(executed["deleted"]) == len(plan.candidates)
     assert Path(executed["audit_path"]).is_file()
     assert not any(candidate.path.exists() for candidate in plan.candidates)
+
+
+def test_publication_activate_cli_requires_ack_and_confirmation(tmp_path, capsys):
+    workspace, published = _prepare_mixed_publication_set(tmp_path)
+    args = [
+        "--workspace-root", str(workspace.root),
+        "--published-root", str(published.root),
+        "--confirmation", "PUBLISH AH-026019 run-001",
+    ]
+
+    assert publication_activate_cli_main(args) == 2
+    missing_ack = json.loads(capsys.readouterr().out)
+    assert "--allow-activation" in missing_ack["error"]
+    assert not published.publication_manifest.exists()
+
+    assert publication_activate_cli_main(
+        args[:-1] + ["wrong", "--allow-activation"]
+    ) == 2
+    wrong_confirmation = json.loads(capsys.readouterr().out)
+    assert "confirmation must exactly match" in wrong_confirmation["error"]
+    assert not published.publication_manifest.exists()
+
+
+def test_publication_activate_cli_activates_staged_mixed_set(tmp_path, capsys):
+    workspace, published = _prepare_mixed_publication_set(tmp_path)
+
+    assert publication_activate_cli_main(
+        [
+            "--workspace-root", str(workspace.root),
+            "--published-root", str(published.root),
+            "--confirmation", "PUBLISH AH-026019 run-001",
+            "--allow-activation",
+        ]
+    ) == 0
+
+    activated = json.loads(capsys.readouterr().out)
+    assert activated["status"] == "activated"
+    assert activated["run_id"] == "run-001"
+    assert activated["survey_id"] == "AH-026019"
+    assert activated["publication_manifest"] == str(published.publication_manifest)
+    assert published.publication_manifest.exists()
+    assert (published.ortho / "orthomosaic.tif").read_text(encoding="utf-8") == "new-ortho"
+    assert (published.tiles_ortho_round / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+    assert not (published.root / PUBLICATION_LOCK_NAME).exists()
 
 def _prepare_mixed_publication_set(tmp_path, *, existing_final=False):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
