@@ -5,9 +5,9 @@
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
 - **Current phase:** Phase 3 - Run-scoped workspace ownership, with tested dormant file, directory, and mixed publication-set activation boundaries, directory and mixed publication-set restart reconciliation, explicit operator-authorized stale-lock recovery, fail-closed publication ownership, lock-owned activation composition, and manifest-aware map-export compatibility
 - **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, file and directory publish activation helpers, file activation recovery, directory restart reconciliation, a dormant same-survey publication lock, explicit operator-authorized stale-lock diagnosis/recovery, dormant exception-safe lock-owned activation composition, dormant lock-owned mixed file/directory publication-set activation, dormant mixed publication-set restart reconciliation, non-destructive artifact cleanup planning, guarded artifact cleanup execution, and an opt-in controlled filesystem validation protocol
-- **Current task:** Controlled filesystem validation now has an opt-in disposable-root protocol; live RGBPipeline publication wiring remains deferred until local/cross-volume/SMB validation is run and reviewed in the intended environment
+- **Current task:** Phase 3 publication planning now uses an explicit artifact allowlist; live RGBPipeline publication wiring remains deferred until tile staging scale, legacy mirrors, cleanup metadata, and remaining SMB/runtime risks are addressed
 - **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning, file and directory activation, activation journaling/reconciliation, lock-owned activation composition, non-destructive cleanup planning, and guarded cleanup execution in shared/artifacts.py, fail-closed publication ownership and explicit stale-lock recovery in shared/publication_lock.py, the operator recovery command in tools/publication_lock_recovery.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
-- **Next recommended task:** Run and review controlled local/cross-volume/SMB filesystem validation on disposable operator-approved roots before any live RGBPipeline publication wiring
+- **Next recommended task:** Optimize tile/directory staging so publication activation does not duplicate huge tile trees before live runtime use
 
 ## Completed tasks
 
@@ -2112,7 +2112,7 @@ The following gaps remain intentionally tracked before publication should be wir
 
 - Activation exists as an explicit method and operator CLI, but it is not a normal `RGBPipeline.run()` stage.
 - Publication activation is not yet recorded as a formal `StageRunner` stage row with retry/attempt history.
-- The official publication artifact allowlist still needs review; the current planner scans mirrored workspace/published pairs and may include bulky or non-final artifacts.
+- Publication artifact allowlist is now explicit; future artifact families must be intentionally added with tests and documentation before they can be activated.
 - Tile staging can duplicate large tile directories and should be optimized before production-scale live use.
 - WebODM and QGIS stages still mirror outputs into legacy published paths during stage execution, so the pipeline is not yet workspace-only-until-publish.
 - SMB validation has covered disposable primitives and a 1,000-file tree, but not full production tile counts, open handles, disconnect/reconnect, host loss, antivirus/indexer interference, or huge cleanup workloads.
@@ -2126,3 +2126,22 @@ Date: 2026-07-30.
 `tools/publication_activate.py` now provides a small operator-facing JSON CLI for activating an already staged Phase 3 publication. The command requires explicit `--workspace-root`, `--published-root`, exact confirmation phrase `PUBLISH <survey_id> <run_id>`, and `--allow-activation` before it mutates published artifacts.
 
 The CLI validates the staged manifest identity against the supplied roots before delegating to the existing lock-owned mixed publication-set activation helper. It does not construct `RGBPipeline`, run pipeline stages, recover stale locks, perform cleanup, or infer production paths.
+
+## Phase 3 RGBPipeline publication artifact allowlist
+
+Date: 2026-07-30.
+
+`RGBPipeline` publication dry-run and staging now use an explicit allowlist instead of publishing every mirrored workspace/published pair discovered in stage state.
+
+Allowed publication artifacts are currently limited to:
+
+- KML boundary GeoJSON and CSV processed files;
+- WebODM orthomosaic outputs;
+- WebODM 3D outputs with `.laz`, `.ply`, or `.pcd` extensions;
+- the WebODM task2 all-assets ZIP;
+- the QGIS clipped orthomosaic; and
+- the QGIS tile directory.
+
+Cross-run image directories, unknown WebODM sidecars, and other unapproved mirrored pairs are reported in `skipped_artifacts` and do not block the plan merely by existing. Unsafe allowed artifacts still fail closed through the existing blocked-reason path when their source is outside the run workspace, missing, duplicated, or targets outside the published survey root.
+
+This slice does not activate publication automatically, does not remove legacy mirrors, does not stage or publish production artifacts, does not run the real pipeline, and does not change cleanup behavior.

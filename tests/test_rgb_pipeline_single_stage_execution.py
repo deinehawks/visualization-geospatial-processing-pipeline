@@ -1748,6 +1748,154 @@ def test_publication_dry_run_plans_workspace_backed_mixed_artifacts_without_acti
 
 
 
+
+def test_publication_plan_and_staging_use_artifact_allowlist(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-ALLOWLIST"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_csv = pipeline.workspace_layout.boundary / f"{survey_id}.csv"
+    workspace_csv.parent.mkdir(parents=True, exist_ok=True)
+    workspace_csv.write_text("id\n1\n", encoding="utf-8")
+    published_csv = survey_path / "boundary" / workspace_csv.name
+    published_csv.parent.mkdir(parents=True, exist_ok=True)
+    published_csv.write_text("legacy csv", encoding="utf-8")
+
+    workspace_laz = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.laz"
+    workspace_pcd = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.pcd"
+    workspace_sidecar = pipeline.workspace_layout.webodm_3d / "task2" / "task2-output.txt"
+    for path, content in (
+        (workspace_laz, "workspace laz"),
+        (workspace_pcd, "workspace pcd"),
+        (workspace_sidecar, "debug sidecar"),
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    published_laz = survey_path / "pointcloud" / workspace_laz.name
+    published_pcd = survey_path / "pointcloud" / workspace_pcd.name
+    published_sidecar = survey_path / "pointcloud" / workspace_sidecar.name
+    for path in (published_laz, published_pcd, published_sidecar):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("legacy", encoding="utf-8")
+
+    workspace_zip = pipeline.workspace_layout.webodm_odm / "task2-all-assets.zip"
+    workspace_zip.parent.mkdir(parents=True, exist_ok=True)
+    workspace_zip.write_text("workspace zip", encoding="utf-8")
+    published_zip = survey_path / "odm" / workspace_zip.name
+    published_zip.parent.mkdir(parents=True, exist_ok=True)
+    published_zip.write_text("legacy zip", encoding="utf-8")
+
+    workspace_debug_log = pipeline.workspace_layout.webodm_odm / "task2-debug.log"
+    workspace_debug_log.write_text("debug", encoding="utf-8")
+    published_debug_log = survey_path / "odm" / workspace_debug_log.name
+    published_debug_log.write_text("legacy debug", encoding="utf-8")
+
+    workspace_output_dir = pipeline.workspace_layout.images_path
+    workspace_excluded_dir = pipeline.workspace_layout.images_cross_runs
+    published_output_dir = survey_path / "images" / "path"
+    published_excluded_dir = survey_path / "images" / "cross-runs"
+    for path in (
+        workspace_output_dir / "kept.JPG",
+        workspace_excluded_dir / "excluded.JPG",
+        published_output_dir / "kept.JPG",
+        published_excluded_dir / "excluded.JPG",
+    ):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("image", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "cross_run_filter": {
+                "workspace": {
+                    "output_dir": str(workspace_output_dir),
+                    "excluded_dir": str(workspace_excluded_dir),
+                },
+                "published": {
+                    "output_dir": str(published_output_dir),
+                    "excluded_dir": str(published_excluded_dir),
+                },
+            },
+            "kml_boundary": {
+                "workspace": {"processed_files": [{"csv": str(workspace_csv)}]},
+                "published": {"processed_files": [{"csv": str(published_csv)}]},
+            },
+            "webodm": {
+                "workspace": {
+                    "webodm_3d": {
+                        "task2": {
+                            "laz": str(workspace_laz),
+                            "pcd": str(workspace_pcd),
+                            "sidecar": str(workspace_sidecar),
+                        },
+                    },
+                    "webodm_odm": {
+                        "task2_all_assets_zip": str(workspace_zip),
+                        "debug_log": str(workspace_debug_log),
+                    },
+                },
+                "published": {
+                    "webodm_3d": {
+                        "task2": {
+                            "laz": str(published_laz),
+                            "pcd": str(published_pcd),
+                            "sidecar": str(published_sidecar),
+                        },
+                    },
+                    "webodm_odm": {
+                        "task2_all_assets_zip": str(published_zip),
+                        "debug_log": str(published_debug_log),
+                    },
+                },
+            },
+        }
+    )
+
+    plan = pipeline.plan_publication_dry_run()
+
+    assert plan["status"] == "planned"
+    assert plan["artifact_count"] == 4
+    planned_names = {artifact["logical_name"] for artifact in plan["artifacts"]}
+    assert planned_names == {
+        "kml_boundary.published.processed_files.csv",
+        "webodm.published.webodm_3d.task2.laz",
+        "webodm.published.webodm_3d.task2.pcd",
+        "webodm.published.webodm_odm.task2_all_assets_zip",
+    }
+    assert plan["skipped_artifacts"] == [
+        "cross_run_filter.published.excluded_dir",
+        "cross_run_filter.published.output_dir",
+        "webodm.published.webodm_3d.task2.sidecar",
+        "webodm.published.webodm_odm.debug_log",
+    ]
+    assert plan["blocked_reasons"] == []
+
+    staging_result = pipeline.prepare_publication_staging()
+
+    assert staging_result["status"] == "staged"
+    assert staging_result["artifact_count"] == 4
+    assert staging_result["skipped_artifacts"] == plan["skipped_artifacts"]
+    manifest = json.loads(Path(staging_result["staged_manifest"]).read_text(encoding="utf-8"))
+    staged_names = {artifact["logical_name"] for artifact in manifest["artifacts"]}
+    assert staged_names == planned_names
+    assert not (survey_path / "publication.json").exists()
+    assert published_sidecar.read_text(encoding="utf-8") == "legacy"
+    assert published_debug_log.read_text(encoding="utf-8") == "legacy debug"
+
 def test_prepare_publication_staging_writes_workspace_manifest_without_activation(
     temporary_path_layout,
     sample_dataset_dir,

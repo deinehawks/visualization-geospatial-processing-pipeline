@@ -1073,3 +1073,18 @@ Coverage proves that:
 - the publication lock is released after successful CLI activation.
 
 The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, or touch production survey roots.
+
+## Phase 3 RGBPipeline publication artifact allowlist coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the RGBPipeline publication allowlist using only pytest-owned workspace and survey roots.
+
+Coverage proves that dry-run planning and staging include only the intended final publication families, skip cross-run image directories and unknown sidecars, report skipped logical names through `skipped_artifacts`, preserve the existing blocked behavior for unsafe allowed sources, and avoid writing the published survey `publication.json` during staging.
+
+Validation for this slice:
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 9 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, activate publication automatically, recover stale locks, run cleanup, or mutate production survey roots.

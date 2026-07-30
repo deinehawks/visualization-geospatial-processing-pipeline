@@ -73,7 +73,7 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, ADR-021, and ADR-022 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, ADR-021, ADR-022, and ADR-023 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -443,3 +443,29 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   - Operators keep an audit trail explaining deleted successful-run intermediates without retaining every copied image or generated tile.
   - Future cleanup code must distinguish metadata archival from destructive deletion and must remain explicit, guarded, and auditable.
 - **Related files or issues:** ADR-003; ADR-019; ADR-020; `shared/artifacts.py`; `tools/artifact_cleanup.py`; `pipelines/rgb_pipeline.py`; Phase 3.
+
+### ADR-023 - Use an explicit allowlist for RGB publication artifacts
+
+- **Decision ID:** ADR-023
+- **Date:** 2026-07-30
+- **Status:** Accepted
+- **Approval context:** After reviewing the remaining gaps before live/runtime publication use, the user approved addressing the publication artifact allowlist before further activation wiring.
+- **Context:**
+  - The RGBPipeline publication bridge originally discovered publishable artifacts by recursively pairing every `workspace` and `published` path in selected stage state.
+  - That broad discovery was useful for proving the bridge but could accidentally include bulky or non-final mirrored artifacts, especially cross-run image directories or debug sidecars.
+  - Live publication needs a predictable contract for which artifact families are allowed to become part of the authoritative publication manifest.
+- **Decision:**
+  - Gate RGBPipeline dry-run and staging through an explicit logical artifact allowlist.
+  - Allow only KML boundary GeoJSON/CSV, WebODM orthomosaics, WebODM 3D `.laz`/`.ply`/`.pcd` outputs, the WebODM task2 all-assets ZIP, the QGIS clipped orthomosaic, and the QGIS tiles directory.
+  - Report unapproved mirrored pairs as `skipped_artifacts` instead of treating their mere presence as a blocking failure.
+  - Keep existing fail-closed validation for allowed artifacts whose source is not workspace-owned, missing, duplicated, or whose target escapes the published survey root.
+- **Alternatives considered:**
+  - Continue recursive publication of every mirrored pair: rejected because it can publish non-final or bulky intermediate artifacts without review.
+  - Treat every unapproved pair as blocked: rejected because existing stage state may include useful non-publication metadata and mirrored intermediates that should not prevent publishing the final set.
+  - Move the allowlist into configuration immediately: deferred because runtime-configurable publication scope is broader and would need operator validation, defaults, and migration rules.
+- **Consequences:**
+  - Publication manifests become smaller and more intentional.
+  - New artifact families require code/test/documentation updates before activation includes them.
+  - Cross-run image directories remain available in the workspace/legacy mirrors but are not part of the publication activation set by default.
+  - This does not remove legacy mirroring, optimize tile staging, implement cleanup metadata archival, or wire publication into normal `RGBPipeline.run()`.
+- **Related files or issues:** R02, R07, R10, R11; `pipelines/rgb_pipeline.py`; `tests/test_rgb_pipeline_single_stage_execution.py`; ADR-003; ADR-018; ADR-022; Phase 3.

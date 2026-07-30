@@ -358,6 +358,7 @@ class RGBPipeline(
         logical_prefix: str,
         artifacts: list[PublicationArtifact],
         blocked_reasons: list[str],
+        skipped_artifacts: list[str],
         seen_targets: set[str],
     ) -> None:
         if workspace_node is None or published_node is None:
@@ -372,6 +373,7 @@ class RGBPipeline(
                     logical_prefix=f"{logical_prefix}.{key}",
                     artifacts=artifacts,
                     blocked_reasons=blocked_reasons,
+                    skipped_artifacts=skipped_artifacts,
                     seen_targets=seen_targets,
                 )
             return
@@ -387,6 +389,7 @@ class RGBPipeline(
                     logical_prefix=logical_prefix,
                     artifacts=artifacts,
                     blocked_reasons=blocked_reasons,
+                    skipped_artifacts=skipped_artifacts,
                     seen_targets=seen_targets,
                 )
             if len(workspace_node) != len(published_node):
@@ -400,7 +403,12 @@ class RGBPipeline(
         if not workspace_node or not published_node:
             return
 
+        logical_name = f"{stage_name}.{logical_prefix}"
         source = Path(workspace_node)
+        if not self._publication_artifact_is_allowed(logical_name, source):
+            skipped_artifacts.append(logical_name)
+            return
+
         target = Path(published_node)
         try:
             source = self._require_workspace_owned_path(source)
@@ -436,16 +444,32 @@ class RGBPipeline(
 
         artifacts.append(
             PublicationArtifact(
-                logical_name=f"{stage_name}.{logical_prefix}",
+                logical_name=logical_name,
                 source_path=source,
                 published_relative_path=relative_target,
                 kind=kind,
             )
         )
 
+    def _publication_artifact_is_allowed(self, logical_name: str, source_path: Path) -> bool:
+        allowed_exact = {
+            "kml_boundary.published.processed_files.geojson",
+            "kml_boundary.published.processed_files.csv",
+            "webodm.published.webodm_odm.task2_all_assets_zip",
+            "qgis.published.qgis_clipped_ortho",
+            "qgis.published.tiles_dir",
+        }
+        if logical_name in allowed_exact:
+            return True
+        if logical_name.startswith("webodm.published.webodm_ortho."):
+            return True
+        if logical_name.startswith("webodm.published.webodm_3d."):
+            return source_path.suffix.lower() in {".laz", ".ply", ".pcd"}
+        return False
+
     def _build_publication_artifact_plan(
         self,
-    ) -> tuple[list[PublicationArtifact], list[str]]:
+    ) -> tuple[list[PublicationArtifact], list[str], list[str]]:
         if not self.survey_id or self.rgb_path is None or self.published_layout is None:
             self._hydrate_from_state()
         if not self.survey_id:
@@ -455,6 +479,7 @@ class RGBPipeline(
 
         artifacts: list[PublicationArtifact] = []
         blocked_reasons: list[str] = []
+        skipped_artifacts: list[str] = []
         seen_targets: set[str] = set()
 
         for stage_name in (
@@ -473,10 +498,11 @@ class RGBPipeline(
                 logical_prefix="published",
                 artifacts=artifacts,
                 blocked_reasons=blocked_reasons,
+                skipped_artifacts=skipped_artifacts,
                 seen_targets=seen_targets,
             )
 
-        return artifacts, blocked_reasons
+        return artifacts, blocked_reasons, sorted(set(skipped_artifacts))
 
     def _publication_artifact_payload(
         self,
@@ -508,7 +534,7 @@ class RGBPipeline(
         publication manifest, or mutate pipeline state.
         """
 
-        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        artifacts, blocked_reasons, skipped_artifacts = self._build_publication_artifact_plan()
         artifact_payload = [
             dict(artifact_record)
             for artifact_record in self._publication_artifact_payload(artifacts)
@@ -523,6 +549,7 @@ class RGBPipeline(
             "artifact_count": len(artifact_payload),
             "artifacts": artifact_payload,
             "blocked_reasons": blocked_reasons,
+            "skipped_artifacts": skipped_artifacts,
             "status": "blocked" if blocked_reasons else "planned",
         }
         log_event(
@@ -544,7 +571,7 @@ class RGBPipeline(
         published survey publication.json.
         """
 
-        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        artifacts, blocked_reasons, skipped_artifacts = self._build_publication_artifact_plan()
         if not artifacts and not blocked_reasons:
             blocked_reasons.append("publication plan contains no artifacts")
         artifact_payload = [
@@ -563,6 +590,7 @@ class RGBPipeline(
             "artifact_count": len(artifact_payload),
             "artifacts": artifact_payload,
             "blocked_reasons": blocked_reasons,
+            "skipped_artifacts": skipped_artifacts,
         }
         if blocked_reasons:
             result["status"] = "blocked"
