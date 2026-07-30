@@ -2061,3 +2061,13 @@ Manual SMB validation was run against the previously approved disposable root:
 - Production survey data touched: no; validation stayed outside `Z:\surveys`
 
 Remaining validation gaps are reduced but not eliminated: this proves a 1,000-file disposable SMB tree, not a full production-scale tile set. Cross-volume behavior, open-handle behavior, antivirus/indexer contention, interrupted operations, process crash, host loss, and SMB disconnect/reconnect behavior remain unvalidated before live publication activation is wired into `RGBPipeline`.
+
+## CLI resume source-selection determinism fix
+
+Date: 2026-07-30.
+
+A paused/resumed production run could re-open ambiguous dataset selection before `RGBPipeline` construction because `main.py` always resolved `--survey` through `resolve_source_dataset_dir()`, even when `--resume --run-id` identified an existing run. If the same dataset folder name existed under multiple date/client folders, resume could ask the operator to choose again instead of reusing the source selected when the run was created.
+
+`main.py` now restores the concrete source dataset path from the existing `runs.source_dir` row when `--resume` is used. Fresh runs keep the existing resolver behavior, including `--date` support and the interactive prompt for truly ambiguous first-time selection. The full `RGBPipeline` import is also lazy inside `main()` so the source-resolution helper can be tested without importing heavy pipeline dependencies.
+
+This is a CLI-level resumability fix only. It does not change database schema, stage retry behavior, pause semantics, data segregation copying, WebODM, QGIS/GDAL, publication activation, or production paths. If the run row is missing or has no `source_dir`, resume now fails closed with a clear error rather than prompting for a potentially different dataset.

@@ -998,3 +998,17 @@ The controlled filesystem validator now includes an opt-in `large_tree_rename` c
 Manual opt-in validation was run against the disposable SMB root `Z:\__pipeline_validation\filesystem-validation-001` with `--large-tree-files 1000`. The result passed all checks, observed 1,000 files after rename, recorded create/rename/count timings, wrote `reports\smb-large-tree-001.json`, and removed its disposable run directory. No production survey path, real pipeline, QGIS/GDAL, WebODM, or `Z:\surveys` data was touched.
 
 This manual evidence is intentionally outside normal pytest. It is useful for accepting the Phase 3 filesystem primitive on the current SMB share at small representative scale, but it does not replace future validation for full tile counts, cross-volume behavior, open handles, interrupted operations, disconnect/reconnect behavior, or host-loss scenarios.
+
+## CLI resume source-selection coverage
+
+Date: 2026-07-30.
+
+`tests/test_main_resume_source.py` covers the production CLI source-resolution helper using a pytest-owned temporary SQLite database and monkeypatched resolver behavior.
+
+Coverage proves that:
+
+- `--resume --run-id` reuses `runs.source_dir` and does not call ambiguous dataset resolution again;
+- fresh runs still call `resolve_source_dataset_dir()` with the expected `FIELD_DATA_ROOT / survey` input and date hint; and
+- resume fails closed when no matching run record exists.
+
+The tests do not run the real RGB pipeline, load production `.env`, access field-data roots, contact WebODM, execute QGIS/GDAL, or open the production database.

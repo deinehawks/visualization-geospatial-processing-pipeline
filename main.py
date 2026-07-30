@@ -5,9 +5,48 @@ import logging
 from pathlib import Path
 from typing import Any
 
-from pipelines.rgb_pipeline import RGBPipeline
 from shared.config import load_pipeline_config
+from shared.db.repo import PipelineRepo
+from shared.paths import db_path
 from modules.data_segregation.data_segregation import resolve_source_dataset_dir
+
+
+def resolve_cli_source_dir(
+    *,
+    survey: str,
+    resume: bool,
+    run_id: str | None,
+    field_data_root: Path,
+    logger: logging.Logger,
+    date_hint: str | None = None,
+    repository: PipelineRepo | None = None,
+) -> Path:
+    if resume:
+        if not run_id:
+            raise ValueError("run_id is required when resume=True")
+        repo = repository or PipelineRepo(db_path(Path(".")))
+        run = repo.get_run(run_id)
+        if not run:
+            raise ValueError(
+                f"Cannot resume run {run_id!r}: no run record was found."
+            )
+        source_dir = run.get("source_dir")
+        if not source_dir:
+            raise ValueError(
+                f"Cannot resume run {run_id!r}: run record has no source_dir."
+            )
+        resolved = Path(source_dir)
+        logger.info("Resume source dataset restored from run state: %s", resolved)
+        return resolved
+
+    survey_arg = Path(survey)
+    source_input = survey_arg if survey_arg.is_absolute() else field_data_root / survey
+    return resolve_source_dataset_dir(
+        source_input,
+        logger,
+        date_hint=date_hint,
+    )
+
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run production RGB pipeline")
@@ -56,17 +95,12 @@ def main() -> None:
 
     resolver_logger = logging.getLogger("rgb.source_resolver")
 
-    survey_arg = Path(args.survey)
-
-    source_input = (
-        survey_arg
-        if survey_arg.is_absolute()
-        else field_data_root / args.survey
-    )
-
-    source_dir = resolve_source_dataset_dir(
-        source_input,
-        resolver_logger,
+    source_dir = resolve_cli_source_dir(
+        survey=args.survey,
+        resume=args.resume,
+        run_id=args.run_id,
+        field_data_root=field_data_root,
+        logger=resolver_logger,
         date_hint=args.date,
     )
 
@@ -90,6 +124,8 @@ def main() -> None:
     print(f"WebODM mode  : {mode_display}")
     print("===================================\n")
 
+    from pipelines.rgb_pipeline import RGBPipeline
+
     pipeline = RGBPipeline(
         base_dir=Path("."),
         config=config,
@@ -111,9 +147,9 @@ def main() -> None:
     )
 
     result = pipeline.run(
-    resume=args.resume,
-    force_stages=set(args.force_stage or []),
-)
+        resume=args.resume,
+        force_stages=set(args.force_stage or []),
+    )
 
     print("\n===== PIPELINE RESULT =====")
     print(f"Success : {result.get('success')}")
