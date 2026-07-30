@@ -1012,3 +1012,19 @@ Coverage proves that:
 - resume fails closed when no matching run record exists.
 
 The tests do not run the real RGB pipeline, load production `.env`, access field-data roots, contact WebODM, execute QGIS/GDAL, or open the production database.
+
+## Phase 3 RGBPipeline publication dry-run planning coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the opt-in `RGBPipeline.plan_publication_dry_run()` bridge with pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- workspace-backed file and directory artifacts from KML, WebODM, and QGIS stage state are represented in one mixed publication plan;
+- planned targets are expressed relative to the published survey root;
+- activation remains disabled and no `publication.json` is written;
+- existing legacy mirrored files/directories are not changed by planning; and
+- non-workspace-owned sources make the plan fail closed with a blocked reason.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open the production database, or mutate production survey roots.

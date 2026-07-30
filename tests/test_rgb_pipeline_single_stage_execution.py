@@ -1646,3 +1646,139 @@ def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
         ) in content
     finally:
         cleanup_logger(pipeline.loggers["webodm"])
+
+
+def test_publication_dry_run_plans_workspace_backed_mixed_artifacts_without_activation(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-PLAN"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+
+    workspace_geojson = pipeline.workspace_layout.boundary / f"{survey_id}.geojson"
+    workspace_geojson.parent.mkdir(parents=True, exist_ok=True)
+    workspace_geojson.write_text('{"type":"FeatureCollection"}', encoding="utf-8")
+    published_geojson = survey_path / "boundary" / workspace_geojson.name
+    published_geojson.parent.mkdir(parents=True, exist_ok=True)
+    published_geojson.write_text("legacy geojson remains untouched", encoding="utf-8")
+
+    workspace_ortho = pipeline.workspace_layout.webodm_ortho / "task2" / "orthomosaic--xcb-t2.tif"
+    workspace_ortho.parent.mkdir(parents=True, exist_ok=True)
+    workspace_ortho.write_text("workspace ortho", encoding="utf-8")
+    published_ortho = survey_path / "ortho" / workspace_ortho.name
+    published_ortho.parent.mkdir(parents=True, exist_ok=True)
+    published_ortho.write_text("legacy ortho remains untouched", encoding="utf-8")
+
+    workspace_clipped = pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t2.tif"
+    workspace_clipped.parent.mkdir(parents=True, exist_ok=True)
+    workspace_clipped.write_text("workspace clipped", encoding="utf-8")
+    published_clipped = survey_path / "qgis" / "clipped" / "ortho" / workspace_clipped.name
+    published_clipped.parent.mkdir(parents=True, exist_ok=True)
+    published_clipped.write_text("legacy clipped remains untouched", encoding="utf-8")
+
+    workspace_tiles = pipeline.workspace_layout.qgis_tiles_round
+    workspace_tile = workspace_tiles / "12" / "345" / "678.png"
+    workspace_tile.parent.mkdir(parents=True, exist_ok=True)
+    workspace_tile.write_text("workspace tile", encoding="utf-8")
+    published_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    published_tile = published_tiles / "12" / "345" / "678.png"
+    published_tile.parent.mkdir(parents=True, exist_ok=True)
+    published_tile.write_text("legacy tile remains untouched", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "kml_boundary": {
+                "workspace": {
+                    "processed_files": [{"geojson": str(workspace_geojson)}],
+                },
+                "published": {
+                    "processed_files": [{"geojson": str(published_geojson)}],
+                },
+            },
+            "webodm": {
+                "workspace": {"webodm_ortho": {"task2": str(workspace_ortho)}},
+                "published": {"webodm_ortho": {"task2": str(published_ortho)}},
+            },
+            "qgis": {
+                "workspace": {
+                    "qgis_clipped_ortho": str(workspace_clipped),
+                    "tiles_dir": str(workspace_tiles),
+                },
+                "published": {
+                    "qgis_clipped_ortho": str(published_clipped),
+                    "tiles_dir": str(published_tiles),
+                },
+            },
+        }
+    )
+
+    plan = pipeline.plan_publication_dry_run()
+
+    assert plan["status"] == "planned"
+    assert plan["activation_enabled"] is False
+    assert plan["survey_id"] == survey_id
+    assert plan["publication_manifest"] == str(survey_path / "publication.json")
+    assert plan["artifact_count"] == 4
+    artifacts = {artifact["logical_name"]: artifact for artifact in plan["artifacts"]}
+    assert artifacts["kml_boundary.published.processed_files.geojson"]["kind"] == "file"
+    assert artifacts["webodm.published.webodm_ortho.task2"]["published_relative_path"] == str(
+        Path("ortho") / workspace_ortho.name
+    )
+    assert artifacts["qgis.published.qgis_clipped_ortho"]["kind"] == "file"
+    assert artifacts["qgis.published.tiles_dir"]["kind"] == "directory"
+    assert not (survey_path / "publication.json").exists()
+    assert published_geojson.read_text(encoding="utf-8") == "legacy geojson remains untouched"
+    assert published_ortho.read_text(encoding="utf-8") == "legacy ortho remains untouched"
+    assert published_clipped.read_text(encoding="utf-8") == "legacy clipped remains untouched"
+    assert published_tile.read_text(encoding="utf-8") == "legacy tile remains untouched"
+
+
+def test_publication_dry_run_blocks_non_workspace_source(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-PUBLISH-BLOCKED"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    legacy_source = survey_path / "ortho" / "legacy-only.tif"
+    legacy_source.parent.mkdir(parents=True, exist_ok=True)
+    legacy_source.write_text("legacy source", encoding="utf-8")
+
+    pipeline.state.update(
+        {
+            "data_segregation": {
+                "survey_id": survey_id,
+                "survey_path": str(survey_path),
+            },
+            "webodm": {
+                "workspace": {"webodm_ortho": {"task2": str(legacy_source)}},
+                "published": {"webodm_ortho": {"task2": str(legacy_source)}},
+            },
+        }
+    )
+
+    plan = pipeline.plan_publication_dry_run()
+
+    assert plan["status"] == "blocked"
+    assert plan["artifact_count"] == 0
+    assert "not run-workspace owned" in plan["blocked_reasons"][0]
+    assert not (survey_path / "publication.json").exists()

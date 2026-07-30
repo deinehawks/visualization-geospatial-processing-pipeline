@@ -11,6 +11,7 @@ from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
 from shared.artifacts import (
+    PublicationArtifact,
     PublishedSurveyLayout,
     RunWorkspaceLayout,
     create_run_workspace,
@@ -334,6 +335,185 @@ class RGBPipeline(
 
         return True
 
+    def _published_relative_path_for_plan(self, published_path: Path) -> Path:
+        if self.published_layout is None:
+            raise RuntimeError("published_layout is not set yet")
+        published_root = self.published_layout.root.resolve(strict=False)
+        target = Path(published_path).resolve(strict=False)
+        try:
+            return target.relative_to(published_root)
+        except ValueError as exc:
+            raise ValueError(
+                f"Publication target escapes published survey root: {published_path}"
+            ) from exc
+
+    def _collect_publication_plan_pairs(
+        self,
+        *,
+        stage_name: str,
+        workspace_node: Any,
+        published_node: Any,
+        logical_prefix: str,
+        artifacts: list[PublicationArtifact],
+        blocked_reasons: list[str],
+        seen_targets: set[str],
+    ) -> None:
+        if workspace_node is None or published_node is None:
+            return
+
+        if isinstance(workspace_node, Mapping) and isinstance(published_node, Mapping):
+            for key in sorted(set(workspace_node).intersection(published_node)):
+                self._collect_publication_plan_pairs(
+                    stage_name=stage_name,
+                    workspace_node=workspace_node.get(key),
+                    published_node=published_node.get(key),
+                    logical_prefix=f"{logical_prefix}.{key}",
+                    artifacts=artifacts,
+                    blocked_reasons=blocked_reasons,
+                    seen_targets=seen_targets,
+                )
+            return
+
+        if isinstance(workspace_node, list) and isinstance(published_node, list):
+            for index, (workspace_item, published_item) in enumerate(
+                zip(workspace_node, published_node)
+            ):
+                self._collect_publication_plan_pairs(
+                    stage_name=stage_name,
+                    workspace_node=workspace_item,
+                    published_node=published_item,
+                    logical_prefix=logical_prefix,
+                    artifacts=artifacts,
+                    blocked_reasons=blocked_reasons,
+                    seen_targets=seen_targets,
+                )
+            if len(workspace_node) != len(published_node):
+                blocked_reasons.append(
+                    f"{stage_name}:{logical_prefix} workspace/published list length mismatch"
+                )
+            return
+
+        if not isinstance(workspace_node, str) or not isinstance(published_node, str):
+            return
+        if not workspace_node or not published_node:
+            return
+
+        source = Path(workspace_node)
+        target = Path(published_node)
+        try:
+            source = self._require_workspace_owned_path(source)
+        except Exception as exc:
+            blocked_reasons.append(
+                f"{stage_name}:{logical_prefix} source is not run-workspace owned: {source} ({exc})"
+            )
+            return
+
+        if source.is_file():
+            kind = "file"
+        elif source.is_dir():
+            kind = "directory"
+        else:
+            blocked_reasons.append(
+                f"{stage_name}:{logical_prefix} source does not exist: {source}"
+            )
+            return
+
+        try:
+            relative_target = self._published_relative_path_for_plan(target)
+        except Exception as exc:
+            blocked_reasons.append(f"{stage_name}:{logical_prefix} invalid target: {exc}")
+            return
+
+        target_key = str(relative_target).replace("\\", "/").lower()
+        if target_key in seen_targets:
+            blocked_reasons.append(
+                f"{stage_name}:{logical_prefix} duplicates publication target: {relative_target}"
+            )
+            return
+        seen_targets.add(target_key)
+
+        artifacts.append(
+            PublicationArtifact(
+                logical_name=f"{stage_name}.{logical_prefix}",
+                source_path=source,
+                published_relative_path=relative_target,
+                kind=kind,
+            )
+        )
+
+    def plan_publication_dry_run(self) -> Dict[str, Any]:
+        """Build the current RGB publication intent without activating it.
+
+        This is an opt-in planning bridge for Phase 3. It reads the current
+        in-memory stage state, finds run-workspace artifacts that are still
+        mirrored to legacy published paths, validates ownership/containment, and
+        returns the mixed file/directory publication set that a later activation
+        slice could stage. It intentionally does not copy, rename, lock, write a
+        publication manifest, or mutate pipeline state.
+        """
+
+        if not self.survey_id or self.rgb_path is None or self.published_layout is None:
+            self._hydrate_from_state()
+        if not self.survey_id:
+            raise RuntimeError("survey_id is not set yet. Run data_segregation first.")
+        if self.published_layout is None:
+            raise RuntimeError("published_layout is not set yet. Run data_segregation first.")
+
+        artifacts: list[PublicationArtifact] = []
+        blocked_reasons: list[str] = []
+        seen_targets: set[str] = set()
+
+        for stage_name in (
+            "cross_run_filter",
+            "kml_boundary",
+            "webodm",
+            "qgis",
+        ):
+            stage_state = self.state.get(stage_name) or {}
+            if not isinstance(stage_state, Mapping):
+                continue
+            self._collect_publication_plan_pairs(
+                stage_name=stage_name,
+                workspace_node=stage_state.get("workspace"),
+                published_node=stage_state.get("published"),
+                logical_prefix="published",
+                artifacts=artifacts,
+                blocked_reasons=blocked_reasons,
+                seen_targets=seen_targets,
+            )
+
+        artifact_payload = [
+            {
+                "logical_name": artifact.logical_name,
+                "kind": artifact.kind,
+                "source_path": str(artifact.source_path),
+                "published_relative_path": str(artifact.published_relative_path),
+                "published_path": str(
+                    self.published_layout.root / artifact.published_relative_path
+                ),
+            }
+            for artifact in artifacts
+        ]
+
+        plan = {
+            "run_id": self.run_id,
+            "survey_id": self.survey_id,
+            "published_root": str(self.published_layout.root),
+            "publication_manifest": str(self.published_layout.publication_manifest),
+            "activation_enabled": False,
+            "artifact_count": len(artifact_payload),
+            "artifacts": artifact_payload,
+            "blocked_reasons": blocked_reasons,
+            "status": "blocked" if blocked_reasons else "planned",
+        }
+        log_event(
+            self.loggers["pipeline"],
+            "publication_plan_built",
+            status=plan["status"],
+            artifact_count=str(plan["artifact_count"]),
+            activation_enabled="false",
+        )
+        return plan
     def _preflight_stage(self, stage_name: str) -> None:
         result = self.preflight.check_stage(
             stage_name,

@@ -2071,3 +2071,13 @@ A paused/resumed production run could re-open ambiguous dataset selection before
 `main.py` now restores the concrete source dataset path from the existing `runs.source_dir` row when `--resume` is used. Fresh runs keep the existing resolver behavior, including `--date` support and the interactive prompt for truly ambiguous first-time selection. The full `RGBPipeline` import is also lazy inside `main()` so the source-resolution helper can be tested without importing heavy pipeline dependencies.
 
 This is a CLI-level resumability fix only. It does not change database schema, stage retry behavior, pause semantics, data segregation copying, WebODM, QGIS/GDAL, publication activation, or production paths. If the run row is missing or has no `source_dir`, resume now fails closed with a clear error rather than prompting for a potentially different dataset.
+
+## Phase 3 RGBPipeline publication dry-run planning bridge
+
+Date: 2026-07-30.
+
+`RGBPipeline` now has an opt-in `plan_publication_dry_run()` helper that builds the current mixed publication intent from in-memory stage state without activating it. The helper scans workspace/published pairs already produced by migrated stages, validates that sources are run-workspace owned, validates that targets remain under the published survey root, rejects duplicate targets, and returns a structured plan containing logical names, artifact kind, source path, published relative path, and intended published path.
+
+This bridge is intentionally read-only with respect to publication: it does not call `prepare_publication()`, acquire `.publication.lock`, reconcile journals, copy files, rename directories, write `publication.json`, modify legacy mirrors, or run automatically from `RGBPipeline.run()`. Legacy workspace-to-published mirroring remains unchanged.
+
+The helper can report `blocked` when a would-be artifact is not run-workspace owned, missing, duplicated, or targets a path outside the published survey root. This makes legacy-only or unsafe candidates visible before the live activation switch is considered.
