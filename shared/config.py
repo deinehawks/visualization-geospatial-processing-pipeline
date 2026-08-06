@@ -100,6 +100,15 @@ def load_pipeline_config() -> dict:
             return None
         return Path(raw)
 
+    def read_csv_paths_env(name: str, *, required: bool = False) -> list[Path]:
+        """Read a comma-separated list of paths from env."""
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            if required:
+                raise ValueError(f"{name} is missing in .env")
+            return []
+        return [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
+
     # ============================================================
     # BUILD CONFIG
     # ============================================================
@@ -107,7 +116,7 @@ def load_pipeline_config() -> dict:
     config = {
         "paths": {
             "surveys_root": read_path_env("SURVEYS_ROOT", required=True),
-            "field_data_root": read_path_env("FIELD_DATA_ROOT", required=True),
+            "field_data_roots": read_csv_paths_env("FIELD_DATA_ROOT", required=True),
             "upload_cache_root": read_path_env("UPLOAD_CACHE_ROOT"),
         },
         "cross_run_filter": {
@@ -317,7 +326,13 @@ def load_pipeline_config() -> dict:
 
     # required paths
     validate_existing_path(config["paths"]["surveys_root"], "SURVEYS_ROOT")
-    validate_existing_path(config["paths"]["field_data_root"], "FIELD_DATA_ROOT")
+    
+    # At least one FIELD_DATA_ROOT must exist
+    for i, fdr in enumerate(config["paths"]["field_data_roots"]):
+        if not fdr.exists():
+            # Warn but don't hard-fail — the other root may be online
+            import warnings
+            warnings.warn(f"FIELD_DATA_ROOT[{i}] does not exist: {fdr}")
 
     # naming
     boundary_mode_allowed = {"b", "xb", "cb", "xcb", "cxb", "xcxb"}

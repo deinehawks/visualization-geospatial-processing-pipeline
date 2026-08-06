@@ -74,49 +74,71 @@ def resolve_source_dataset_dir(
     Resolve the actual dataset folder.
 
     Supports:
-    - Direct full dataset path
-    - Dataset folder name searched under FIELD_DATA_ROOT
+    - Direct full dataset path (absolute path that already exists)
+    - Dataset folder name searched across all FIELD_DATA_ROOT entries
 
-    Example FIELD_DATA_ROOT:
-    Z:/field-data-2026/sorted
-
-    Example dataset:
-    Z:/field-data-2026/sorted/20260318/BARBCO/DNG_001_36.4Ha_M3C_70m_85f75s_6mps
+    FIELD_DATA_ROOT supports multiple roots via comma separation:
+        FIELD_DATA_ROOT=Y:/field-data/2026/sorted, Z:/field-data-2026/sorted
     """
-
     source_dir = Path(str(source_dir).strip()).expanduser()
 
+    # Direct path — no search needed
     if source_dir.exists() and source_dir.is_dir():
         if _is_probable_dataset_folder(source_dir):
             log_ok(logger, f"Source dataset resolved directly: {source_dir}")
             return source_dir
 
         raise ValueError(
-            "The provided source path exists, but its folder name does not match the expected dataset naming pattern:\n"
+            "The provided source path exists, but its folder name does not match "
+            "the expected dataset naming pattern:\n"
             f"{source_dir}\n\n"
             "Expected example:\n"
             "DNG_001_36.4Ha_M3C_70m_85f75s_6mps"
         )
 
-    field_data_root = _get_field_data_root()
-
-    if not field_data_root.exists():
-        raise FileNotFoundError(f"FIELD_DATA_ROOT does not exist: {field_data_root}")
-
-    if not field_data_root.is_dir():
-        raise NotADirectoryError(f"FIELD_DATA_ROOT is not a folder: {field_data_root}")
-
+    # Search across all configured roots
+    field_data_roots = _get_field_data_roots()
     dataset_query = source_dir.name or str(source_dir)
 
-    log_step(logger, 0, f"Searching dataset under FIELD_DATA_ROOT: {dataset_query}")
+    all_candidates: list[Path] = []
+    missing_roots: list[Path] = []
+    searched_roots: list[Path] = []
 
-    candidates = _find_dataset_candidates(
-        search_root=field_data_root,
-        dataset_query=dataset_query,
-    )
+    for root in field_data_roots:
+        if not root.exists():
+            missing_roots.append(root)
+            continue
+        if not root.is_dir():
+            missing_roots.append(root)
+            continue
 
-    if not candidates:
-        sample_folders = _sample_dataset_folders(field_data_root)
+        searched_roots.append(root)
+        log_step(logger, 0, f"Searching '{dataset_query}' in: {root}")
+
+        candidates = _find_dataset_candidates(
+            search_root=root,
+            dataset_query=dataset_query,
+        )
+        all_candidates.extend(candidates)
+
+    if missing_roots:
+        logger.warning(
+            f"Some FIELD_DATA_ROOT entries do not exist and were skipped:\n"
+            + "\n".join(f"  - {r}" for r in missing_roots)
+        )
+
+    if not searched_roots:
+        raise FileNotFoundError(
+            "None of the configured FIELD_DATA_ROOT entries exist.\n"
+            + "\n".join(f"  - {r}" for r in field_data_roots)
+        )
+
+    if not all_candidates:
+        sample_folders: list[Path] = []
+        for root in searched_roots[:2]:  # sample from first two roots only
+            sample_folders.extend(_sample_dataset_folders(root))
+            if len(sample_folders) >= 10:
+                break
 
         hint = ""
         if sample_folders:
@@ -124,19 +146,19 @@ def resolve_source_dataset_dir(
                 f"  - {path}" for path in sample_folders[:10]
             )
 
+        roots_str = "\n".join(f"  - {r}" for r in searched_roots)
         raise FileNotFoundError(
-            "Dataset folder was not found.\n"
+            f"Dataset folder was not found.\n"
             f"Dataset query: {dataset_query}\n"
-            f"Search root: {field_data_root}"
+            f"Searched roots:\n{roots_str}"
             f"{hint}"
         )
 
-    candidates.sort(key=_dataset_candidate_sort_key, reverse=True)
+    all_candidates.sort(key=_dataset_candidate_sort_key, reverse=True)
 
-    if len(candidates) > 1:
-        # If --date was provided, try to auto-select without prompting
+    if len(all_candidates) > 1:
         if date_hint:
-            matched = [c for c in candidates if date_hint in str(c)]
+            matched = [c for c in all_candidates if date_hint in str(c)]
             if len(matched) == 1:
                 selected = matched[0]
                 log_ok(logger, f"Source dataset resolved via --date hint: {selected}")
@@ -144,51 +166,65 @@ def resolve_source_dataset_dir(
             elif len(matched) == 0:
                 raise FileNotFoundError(
                     f"--date {date_hint!r} provided but no matching folder found.\n"
-                    + "\n".join(f"  - {c}" for c in candidates)
+                    + "\n".join(f"  - {c}" for c in all_candidates)
                 )
             # Multiple matches even with date hint — fall through to prompt
 
-        # Multiple date folders contain the same survey name.
-        # Print to console and force the user to pick — never silently
-        # pick one, since choosing the wrong date produces bad survey data.
         print("\n[!] Multiple matching dataset folders found:")
-        for i, path in enumerate(candidates[:10], 1):
+        for i, path in enumerate(all_candidates[:10], 1):
             print(f"    {i}) {path}")
         print()
 
         while True:
             try:
                 raw = input(
-                    f"    Select folder [1–{len(candidates[:10])}] "
+                    f"    Select folder [1–{len(all_candidates[:10])}] "
                     f"or press Ctrl+C to cancel: "
                 ).strip()
             except (KeyboardInterrupt, EOFError):
-                raise RuntimeError(
-                    "Dataset folder selection cancelled by user."
-                )
-            if raw.isdigit() and 1 <= int(raw) <= len(candidates[:10]):
-                selected = candidates[int(raw) - 1]
+                raise RuntimeError("Dataset folder selection cancelled by user.")
+            if raw.isdigit() and 1 <= int(raw) <= len(all_candidates[:10]):
+                selected = all_candidates[int(raw) - 1]
                 break
-            print(f"    Invalid input. Enter a number between 1 and {len(candidates[:10])}.")
+            print(f"    Invalid input. Enter a number between 1 and {len(all_candidates[:10])}.")
 
         log_ok(logger, f"Source dataset selected by user: {selected}")
-    else:
-        selected = candidates[0]
-        log_ok(logger, f"Source dataset resolved: {selected}")
+        return selected
 
+    selected = all_candidates[0]
+    log_ok(logger, f"Source dataset resolved: {selected}")
     return selected
 
+def _get_field_data_roots() -> list[Path]:
+    """
+    Parse FIELD_DATA_ROOT from env — supports multiple roots via comma separation.
 
-def _get_field_data_root() -> Path:
+    Single root:
+        FIELD_DATA_ROOT=Y:/field-data/2026/sorted
+
+    Multiple roots:
+        FIELD_DATA_ROOT=Y:/field-data/2026/sorted, Z:/field-data-2026/sorted
+    """
     raw = os.getenv("FIELD_DATA_ROOT", "").strip().strip('"').strip("'")
 
     if not raw:
         raise ValueError(
             "FIELD_DATA_ROOT is missing. Set it in .env, for example:\n"
-            "FIELD_DATA_ROOT=Z:/field-data-2026/sorted"
+            "FIELD_DATA_ROOT=Y:/field-data/2026/sorted\n"
+            "Or multiple roots:\n"
+            "FIELD_DATA_ROOT=Y:/field-data/2026/sorted, Z:/field-data-2026/sorted"
         )
 
-    return Path(raw).expanduser()
+    roots = [Path(p.strip()).expanduser() for p in raw.split(",") if p.strip()]
+
+    if not roots:
+        raise ValueError("FIELD_DATA_ROOT is empty after parsing.")
+
+    return roots
+
+def _get_field_data_root() -> Path:
+    """Returns the first configured FIELD_DATA_ROOT. Use _get_field_data_roots() for multi-root search."""
+    return _get_field_data_roots()[0]
 
 
 def _find_dataset_candidates(
@@ -274,22 +310,26 @@ def _sample_dataset_folders(search_root: Path) -> list[Path]:
 
 
 def _extract_source_context(source_dir: Path) -> dict[str, Any]:
-    field_data_root = _get_field_data_root()
-
     try:
-        relative = source_dir.relative_to(field_data_root)
+        roots = _get_field_data_roots()
     except ValueError:
-        return {
-            "source_date_folder": None,
-            "source_client_folder": None,
-            "source_dataset_folder": source_dir.name,
-        }
+        roots = []
 
-    parts = relative.parts
+    for field_data_root in roots:
+        try:
+            relative = source_dir.relative_to(field_data_root)
+            parts = relative.parts
+            return {
+                "source_date_folder":   parts[0] if len(parts) >= 1 else None,
+                "source_client_folder": parts[1] if len(parts) >= 2 else None,
+                "source_dataset_folder": source_dir.name,
+            }
+        except ValueError:
+            continue
 
     return {
-        "source_date_folder": parts[0] if len(parts) >= 1 else None,
-        "source_client_folder": parts[1] if len(parts) >= 2 else None,
+        "source_date_folder": None,
+        "source_client_folder": None,
         "source_dataset_folder": source_dir.name,
     }
 
