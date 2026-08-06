@@ -34,7 +34,9 @@ from rich import box
 DEFAULT_DB      = Path("data/pipeline.db")
 DEFAULT_LOGS    = Path("data/logs")
 DEFAULT_SURVEYS = [
-    "AH-026004", "AH-026005", "AH-026006", "AH-026007", "AH-026008", "AH-026009",
+    "AH-026010", "AH-026011", "AH-026012", "AH-026013", "AH-026014", "AH-026015", "AH-026016", 
+    "AH-026017", "AH-026018", "AH-026019", "AH-026020", "AH-026021", "AH-026022", "AH-026023",
+    "AH-026024", "AH-026025", "AH-026026", 
 ]
 
 STAGE_ORDER = [
@@ -601,15 +603,35 @@ def analyse_survey(
 
     # ── Survey header ─────────────────────────────────────────────────────────
     survey_status = (totals or {}).get("status", "unknown")
-    survey_total  = (totals or {}).get("total_runtime_seconds")
+    survey_total = calculate_elapsed_seconds(runs)
+
+    final_finished_at = next(
+        (
+            run.get("finished_at")
+            for run in reversed(runs)
+            if run.get("finished_at")
+        ),
+        None,
+    )
+    
     header_color  = status_style(survey_status)
 
     console.print()
     console.print(Rule(
         f"[bold {header_color}]  {survey_id}  ·  {survey_status.upper()}  "
-        f"·  Total: {fmt_duration(survey_total)}  ",
+        f"·  Elapsed time: {fmt_duration(survey_total)}  ",
         style=header_color,
     ))
+
+    console.print(
+        f"  [dim]Process Started Time (Raw):[/dim] "
+        f"{runs[0].get('started_at') or '—'}"
+    )
+
+    console.print(
+        f"  [dim]Process Finished Time (Raw):[/dim] "
+        f"{final_finished_at or '—'}"
+    )
 
     # ── Resume / restart summary ──────────────────────────────────────────────
     total_runs    = len(runs)
@@ -861,7 +883,10 @@ def analyse_survey(
     best_runtimes: Dict[str, float] = {}
     for rid in run_ids:
         for s in get_stages_for_run(conn, rid):
-            if s["status"] == "completed" and s.get("runtime_seconds"):
+            if (
+                s["status"] == "completed"
+                and s.get("runtime_seconds") is not None
+            ):
                 sn = s["stage_name"]
                 if sn not in best_runtimes or s["runtime_seconds"] < best_runtimes[sn]:
                     best_runtimes[sn] = s["runtime_seconds"]
@@ -905,7 +930,12 @@ def print_comparison(
     conn: sqlite3.Connection,
 ) -> None:
     console.print()
-    console.print(Rule("[bold white]  CROSS-SURVEY COMPARISON  ", style="white"))
+    console.print(
+        Rule(
+            "[bold white]  CROSS-SURVEY COMPARISON — BEST STAGES + ELAPSED TIME  ",
+            style="white",
+        )
+    )
 
     t = Table(
         box=box.ROUNDED,
@@ -913,6 +943,7 @@ def print_comparison(
         header_style="bold dim",
         padding=(0, 1),
     )
+
     t.add_column("Survey ID",   style="bold",    width=14, no_wrap=True)
     t.add_column("Status",                        width=11, no_wrap=True)
     t.add_column("Runs",        justify="center", width=5,  no_wrap=True)
@@ -923,28 +954,56 @@ def print_comparison(
     t.add_column("WebODM",      justify="right",  width=14, no_wrap=True)
     t.add_column("QGate",       justify="right",  width=10, no_wrap=True)
     t.add_column("QGIS",        justify="right",  width=12, no_wrap=True)
-    t.add_column("Total",       justify="right",  width=12, no_wrap=True)
+    t.add_column("Stage Total", justify="right",  width=12, no_wrap=True)
+    t.add_column("Elapsed",     justify="right",  width=12, no_wrap=True)
 
     for sid in survey_ids:
-        runs   = get_runs_for_survey(conn, sid)
+        runs = get_runs_for_survey(conn, sid)
         totals = get_survey_totals(conn, sid)
+
         if not runs:
-            t.add_row(sid, "[dim]no data[/dim]", *["—"] * 9)
+            t.add_row(
+                sid,
+                "[dim]no data[/dim]",
+                *["—"] * 10,
+            )
             continue
 
-        status       = (totals or {}).get("status", "?")
-        total_rt     = (totals or {}).get("total_runtime_seconds")
-        sstyle       = status_style(status)
-        total_runs   = len(runs)
-        paused_count = sum(1 for r in runs if r["status"] == "paused")
+        status = (totals or {}).get("status", "?")
+        elapsed_seconds = calculate_elapsed_seconds(runs)
 
+        sstyle = status_style(status)
+        total_runs = len(runs)
+        paused_count = sum(
+            1 for run in runs
+            if run["status"] == "paused"
+        )
+
+        # Find the fastest completed runtime for each stage.
         best: Dict[str, float] = {}
-        for r in runs:
-            for s in get_stages_for_run(conn, r["run_id"]):
-                if s["status"] == "completed" and s.get("runtime_seconds"):
-                    sn = s["stage_name"]
-                    if sn not in best or s["runtime_seconds"] < best[sn]:
-                        best[sn] = s["runtime_seconds"]
+
+        for run in runs:
+            stages = get_stages_for_run(conn, run["run_id"])
+
+            for stage in stages:
+                runtime = stage.get("runtime_seconds")
+
+                if (
+                    stage["status"] != "completed"
+                    or runtime is None
+                ):
+                    continue
+
+                stage_name = stage["stage_name"]
+
+                if (
+                    stage_name not in best
+                    or runtime < best[stage_name]
+                ):
+                    best[stage_name] = runtime
+
+        # Sum all best completed stage runtimes.
+        stage_total = sum(best.values()) if best else None
 
         t.add_row(
             sid,
@@ -957,10 +1016,51 @@ def print_comparison(
             fmt_duration(best.get("webodm")),
             fmt_duration(best.get("quality_gate")),
             fmt_duration(best.get("qgis")),
-            f"[bold]{fmt_duration(total_rt)}[/bold]",
+            f"[bold cyan]{fmt_duration(stage_total)}[/bold cyan]",
+            f"[bold]{fmt_duration(elapsed_seconds)}[/bold]",
         )
 
     console.print(t)
+
+def calculate_elapsed_seconds(runs: List[dict]) -> Optional[float]:
+    """
+    Calculate elapsed wall-clock time from the earliest run start
+    to the latest available run finish.
+
+    This includes gaps, waiting time, pauses, and restarts.
+    """
+    if not runs:
+        return None
+
+    first_started = next(
+        (
+            run.get("started_at")
+            for run in runs
+            if run.get("started_at")
+        ),
+        None,
+    )
+
+    last_finished = next(
+        (
+            run.get("finished_at")
+            for run in reversed(runs)
+            if run.get("finished_at")
+        ),
+        None,
+    )
+
+    if not first_started or not last_finished:
+        return None
+
+    try:
+        started_dt = datetime.fromisoformat(first_started)
+        finished_dt = datetime.fromisoformat(last_finished)
+    except (TypeError, ValueError):
+        return None
+
+    elapsed = (finished_dt - started_dt).total_seconds()
+    return elapsed if elapsed >= 0 else None
 
 
 # ── entrypoint ────────────────────────────────────────────────────────────────
