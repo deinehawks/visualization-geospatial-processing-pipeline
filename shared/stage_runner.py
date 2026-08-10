@@ -24,7 +24,19 @@ _PIPELINE_CONTROL_SIGNALS = frozenset(
     {"__PIPELINE_CANCELED__", "__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"}
 )
 
+class StageRequiresRecovery(RuntimeError):
+    """Signal that a stage failed after mutation and needs recovery."""
 
+    status = "requires_recovery"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        output: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.output = output
 class StageRunner:
     """
     Wraps stage execution with DB tracking, structured logging, and
@@ -178,6 +190,24 @@ class StageRunner:
                     isinstance(exc, RuntimeError)
                     and message in _PIPELINE_CONTROL_SIGNALS
                 ):
+                    raise
+
+                if isinstance(exc, StageRequiresRecovery):
+                    runtime = time.perf_counter() - wall_start
+                    recovery_output = exc.output
+                    if state is not None and output_key and recovery_output is not None:
+                        state[output_key] = recovery_output
+                    self.repo.finish_stage_with_status(
+                        stage_id=stage_id,
+                        status=exc.status,
+                        runtime_seconds=runtime,
+                        output=recovery_output,
+                        error_message=str(exc),
+                    )
+                    log_stage_fail(self.logger, stage_name, runtime)
+                    for _lg in self.extra_loggers:
+                        set_stage_context(_lg, "")
+                    self.logger.exception(exc)
                     raise
 
                 attempt += 1

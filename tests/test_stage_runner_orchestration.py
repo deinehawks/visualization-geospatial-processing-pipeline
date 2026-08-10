@@ -1,3 +1,4 @@
+import json
 import logging
 import sqlite3
 
@@ -5,7 +6,7 @@ import pytest
 
 from shared.db.repo import PipelineRepo
 from shared.logging import get_logger
-from shared.stage_runner import StageRunner
+from shared.stage_runner import StageRequiresRecovery, StageRunner
 from tests.fakes import FakeWebODM, PermanentWebODMError
 
 
@@ -175,6 +176,37 @@ def test_stage_runner_records_permanent_webodm_runtime_failure(
     assert stage["error_message"] == (
         "Permanent WebODM failure: create_task_with_images"
     )
+
+
+def test_stage_runner_records_requires_recovery_status_and_output(
+    temporary_path_layout,
+):
+    repo, runner = build_runner(temporary_path_layout.database_path)
+    state = {}
+
+    def needs_recovery():
+        raise StageRequiresRecovery(
+            "controlled recovery required",
+            output={"status": "requires_recovery", "evidence": "journal.json"},
+        )
+
+    with pytest.raises(StageRequiresRecovery, match="controlled recovery required"):
+        runner.run(
+            STAGE_NAME,
+            needs_recovery,
+            output_key="recovery_probe",
+            state=state,
+            retry_attempts=1,
+            retry_delay_seconds=0,
+        )
+
+    stage = read_stage(temporary_path_layout.database_path)
+    output = json.loads(stage["output_json"])
+    assert stage["status"] == "requires_recovery"
+    assert stage["error_message"] == "controlled recovery required"
+    assert output == {"status": "requires_recovery", "evidence": "journal.json"}
+    assert state["recovery_probe"] == output
+    assert repo.get_latest_stage_output(RUN_ID, STAGE_NAME) is None
 
 
 def test_stage_runner_records_generic_non_cancellation_runtime_failure(

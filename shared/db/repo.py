@@ -231,8 +231,26 @@ class PipelineRepo:
         output: Optional[Dict[str, Any]] = None,
         error_message: Optional[str] = None,
     ) -> None:
-        now = utc_now_iso()
         status = "completed" if success else "failed"
+        self.finish_stage_with_status(
+            stage_id=stage_id,
+            status=status,
+            runtime_seconds=runtime_seconds,
+            output=output,
+            error_message=error_message,
+        )
+
+    def finish_stage_with_status(
+        self,
+        stage_id: int,
+        status: str,
+        runtime_seconds: float,
+        output: Optional[Dict[str, Any]] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        if not status:
+            raise ValueError("stage status is required")
+        now = utc_now_iso()
         output_json = json.dumps(output) if output is not None else None
         with connect(self.db_file) as conn:
             conn.execute(

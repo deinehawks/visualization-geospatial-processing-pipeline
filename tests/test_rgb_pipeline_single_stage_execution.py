@@ -2187,6 +2187,286 @@ def test_activate_publication_explicit_existing_lock_blocks_before_mutation(
     assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
     assert not (paths["survey_path"] / "publication.json").exists()
 
+def test_run_wires_activate_publication_after_qgis(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-RUN-PUBLISH",
+    )
+    qgis_state = dict(pipeline.state["qgis"])
+    calls = []
+
+    pipeline._preflight_stage = lambda stage_name: None
+    pipeline.control.start_hotkeys = lambda logger: None
+
+    def quality_gate_passes():
+        calls.append("quality_gate")
+        return {"passed": True}
+
+    def qgis_completes(resume=False):
+        calls.append("qgis")
+        return qgis_state
+
+    pipeline.stage_quality_gate = quality_gate_passes
+    pipeline.stage_qgis = qgis_completes
+
+    result = pipeline.run(
+        selected_stages={"quality_gate", "qgis", "activate_publication"},
+        publication_confirmation=pipeline.expected_publication_confirmation(),
+        raise_on_error=True,
+    )
+
+    stage_names = all_stage_names(temporary_path_layout.database_path)
+    assert calls == ["quality_gate", "qgis"]
+    assert stage_names == ["quality_gate", "qgis", "activate_publication"]
+    assert result["activate_publication"]["status"] == "activated"
+    assert repository.get_latest_stage(
+        pipeline.run_id,
+        "activate_publication",
+    )["status"] == "completed"
+    assert (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "workspace geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "workspace tile"
+
+
+def test_run_activate_publication_requires_exact_confirmation_before_publish(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-RUN-PUBLISH-CONFIRM",
+    )
+    qgis_state = dict(pipeline.state["qgis"])
+
+    pipeline._preflight_stage = lambda stage_name: None
+    pipeline.control.start_hotkeys = lambda logger: None
+    pipeline.stage_quality_gate = lambda: {"passed": True}
+    pipeline.stage_qgis = lambda resume=False: qgis_state
+
+    with pytest.raises(RuntimeError, match="confirmation must exactly match"):
+        pipeline.run(
+            selected_stages={"quality_gate", "qgis", "activate_publication"},
+            publication_confirmation="publish please",
+            raise_on_error=True,
+        )
+
+    stage = repository.get_latest_stage(pipeline.run_id, "activate_publication")
+    assert stage["status"] == "failed"
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+def test_activate_publication_stage_records_completed_stage(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-STAGE-OK",
+    )
+    pipeline.prepare_publication_staging()
+
+    result = pipeline.activate_publication_stage(
+        confirmation=pipeline.expected_publication_confirmation(),
+    )
+
+    stage = repository.get_latest_stage(pipeline.run_id, "activate_publication")
+    output = repository.get_latest_stage_output(
+        pipeline.run_id,
+        "activate_publication",
+    )
+    assert result["status"] == "activated"
+    assert pipeline.state["activate_publication"] == result
+    assert stage["status"] == "completed"
+    assert output["status"] == "activated"
+    assert output["publication_manifest"] == str(paths["survey_path"] / "publication.json")
+    assert (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "workspace geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "workspace tile"
+
+
+def test_activate_publication_stage_records_confirmation_block_as_failed(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-STAGE-CONFIRM",
+    )
+    pipeline.prepare_publication_staging()
+
+    with pytest.raises(RuntimeError, match="confirmation must exactly match"):
+        pipeline.activate_publication_stage(confirmation="publish please")
+
+    stage = repository.get_latest_stage(pipeline.run_id, "activate_publication")
+    assert stage["status"] == "failed"
+    assert "confirmation must exactly match" in stage["error_message"]
+    assert repository.get_latest_stage_output(
+        pipeline.run_id,
+        "activate_publication",
+    ) is None
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+
+def test_activate_publication_stage_records_missing_manifest_as_failed(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-STAGE-MISSING",
+    )
+
+    with pytest.raises(RuntimeError, match="staged publication manifest is missing"):
+        pipeline.activate_publication_stage(
+            confirmation=pipeline.expected_publication_confirmation(),
+        )
+
+    stage = repository.get_latest_stage(pipeline.run_id, "activate_publication")
+    assert stage["status"] == "failed"
+    assert "staged publication manifest is missing" in stage["error_message"]
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+
+def test_activate_publication_stage_records_existing_lock_as_failed(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-STAGE-LOCKED",
+    )
+    pipeline.prepare_publication_staging()
+    acquire_publication_lock(
+        published_root=paths["survey_path"],
+        run_id="other-run",
+        survey_id="TEST-SURVEY-PUBLISH-STAGE-LOCKED",
+        owner_token="other-owner",
+        created_at="2026-07-30T00:00:00Z",
+    )
+
+    with pytest.raises(PublicationLockedError):
+        pipeline.activate_publication_stage(
+            confirmation=pipeline.expected_publication_confirmation(),
+        )
+
+    stage = repository.get_latest_stage(pipeline.run_id, "activate_publication")
+    assert stage["status"] == "failed"
+    assert "already locked" in stage["error_message"].lower()
+    assert not (paths["survey_path"] / "publication.json").exists()
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "legacy geojson"
+    assert paths["published_tile"].read_text(encoding="utf-8") == "legacy tile"
+
+def test_activate_publication_stage_records_post_mutation_failure_as_requires_recovery(
+    temporary_path_layout,
+    sample_dataset_dir,
+    monkeypatch,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    paths = _seed_simple_publication_state(
+        pipeline,
+        temporary_path_layout,
+        "TEST-SURVEY-PUBLISH-STAGE-RECOVERY",
+    )
+    pipeline.prepare_publication_staging()
+
+    def fail_after_visible_mutation(*, workspace, published):
+        paths["published_geojson"].write_text("partially activated", encoding="utf-8")
+        evidence_dir = published.root / ".activation" / pipeline.run_id
+        evidence_dir.mkdir(parents=True, exist_ok=True)
+        (evidence_dir / "publication-set.json").write_text(
+            json.dumps({"status": "activated", "run_id": pipeline.run_id}),
+            encoding="utf-8",
+        )
+        raise OSError("simulated post-mutation activation failure")
+
+    monkeypatch.setattr(
+        rgb_module,
+        "activate_publication_set_with_lock",
+        fail_after_visible_mutation,
+    )
+
+    with pytest.raises(rgb_module.StageRequiresRecovery):
+        pipeline.activate_publication_stage(
+            confirmation=pipeline.expected_publication_confirmation(),
+        )
+
+    stage = repository.get_latest_stage(pipeline.run_id, "activate_publication")
+    output = json.loads(stage["output_json"])
+    assert stage["status"] == "requires_recovery"
+    assert "requires recovery" in stage["error_message"]
+    assert repository.get_latest_stage_output(
+        pipeline.run_id,
+        "activate_publication",
+    ) is None
+    assert output["status"] == "requires_recovery"
+    assert output["error_type"] == "OSError"
+    assert output["error_message"] == "simulated post-mutation activation failure"
+    assert pipeline.state["activate_publication"] == output
+    assert paths["published_geojson"].read_text(encoding="utf-8") == "partially activated"
+    assert not (paths["survey_path"] / "publication.json").exists()
+
 def test_publication_dry_run_blocks_non_workspace_source(
     temporary_path_layout,
     sample_dataset_dir,
