@@ -1,13 +1,13 @@
-# Refactor Current Status
+﻿# Refactor Current Status
 
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning
 - **Current phase:** Phase 3 - Run-scoped workspace ownership, with tested dormant file, directory, and mixed publication-set activation boundaries, directory and mixed publication-set restart reconciliation, explicit operator-authorized stale-lock recovery, fail-closed publication ownership, lock-owned activation composition, and manifest-aware map-export compatibility
 - **Completed work:** Phase 1 safety baseline, Phase 2 logger isolation and observability, plus Phase 3 artifact planning, RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace-to-legacy mirroring, KML boundary workspace-to-legacy mirroring, WebODM orthomosaic workspace-to-legacy mirroring, QGIS clipped orthomosaic/tile workspace-to-legacy mirroring, WebODM pointcloud/all-assets ZIP workspace-to-legacy mirroring, map-export publication-manifest compatibility, file and directory publish activation helpers, file activation recovery, directory restart reconciliation, a dormant same-survey publication lock, explicit operator-authorized stale-lock diagnosis/recovery, dormant exception-safe lock-owned activation composition, dormant lock-owned mixed file/directory publication-set activation, dormant mixed publication-set restart reconciliation, non-destructive artifact cleanup planning, guarded artifact cleanup execution, and an opt-in controlled filesystem validation protocol
-- **Current task:** Controlled filesystem validation now has an opt-in disposable-root protocol; live RGBPipeline publication wiring remains deferred until local/cross-volume/SMB validation is run and reviewed in the intended environment
+- **Current task:** Phase 3 publication staging now places directory artifacts at hidden activation paths to avoid a second full directory copy during activation; live RGBPipeline publication wiring remains deferred until legacy mirrors, cleanup metadata, and remaining SMB/runtime risks are addressed
 - **Production code changed:** Yes - observability changes in shared/logging.py, shared/stage_runner.py, pipelines/rgb_pipeline.py, modules/qgis/qgis_tools.py, query_survey_stats.py, plus Phase 3 artifact planning, file and directory activation, activation journaling/reconciliation, lock-owned activation composition, non-destructive cleanup planning, and guarded cleanup execution in shared/artifacts.py, fail-closed publication ownership and explicit stale-lock recovery in shared/publication_lock.py, the operator recovery command in tools/publication_lock_recovery.py, the RGBPipeline workspace layout seam, data segregation workspace metadata, cross-run filter workspace mirroring, KML boundary workspace mirroring, WebODM orthomosaic workspace mirroring, QGIS workspace mirroring, WebODM pointcloud/all-assets workspace mirroring, and map-export publication-manifest resolution
-- **Next recommended task:** Run and review controlled local/cross-volume/SMB filesystem validation on disposable operator-approved roots before any live RGBPipeline publication wiring
+- **Next recommended task:** Decide the smallest safe runtime integration shape for publication activation as a formal, auditable pipeline step while preserving explicit operator control
 
 ## Completed tasks
 
@@ -2110,10 +2110,10 @@ Date: 2026-07-30.
 
 The following gaps remain intentionally tracked before publication should be wired into normal runtime behavior:
 
-- Activation exists as an explicit method and operator CLI, but it is not a normal `RGBPipeline.run()` stage.
-- Publication activation is not yet recorded as a formal `StageRunner` stage row with retry/attempt history.
-- The official publication artifact allowlist still needs review; the current planner scans mirrored workspace/published pairs and may include bulky or non-final artifacts.
-- Tile staging can duplicate large tile directories and should be optimized before production-scale live use.
+- Activation exists as an explicit method, guarded `RGBPipeline.run()` stage, and CLI handoff when explicit confirmation is supplied; default runs still do not activate publication.
+- Publication activation is now recorded through a guarded `activate_publication` StageRunner row when explicit confirmation is supplied; UI/API mutation, recovery wiring, and cleanup wiring remain deferred.
+- Publication artifact allowlist is now explicit; future artifact families must be intentionally added with tests and documentation before they can be activated.
+- Directory/tile staging now avoids the second full activation copy by staging directory artifacts at hidden activation paths; production-scale timing and interrupted hidden-candidate cleanup still need operational review.
 - WebODM and QGIS stages still mirror outputs into legacy published paths during stage execution, so the pipeline is not yet workspace-only-until-publish.
 - SMB validation has covered disposable primitives and a 1,000-file tree, but not full production tile counts, open handles, disconnect/reconnect, host loss, antivirus/indexer interference, or huge cleanup workloads.
 - Successful-run workspace cleanup metadata archiving is documented but not implemented.
@@ -2126,3 +2126,98 @@ Date: 2026-07-30.
 `tools/publication_activate.py` now provides a small operator-facing JSON CLI for activating an already staged Phase 3 publication. The command requires explicit `--workspace-root`, `--published-root`, exact confirmation phrase `PUBLISH <survey_id> <run_id>`, and `--allow-activation` before it mutates published artifacts.
 
 The CLI validates the staged manifest identity against the supplied roots before delegating to the existing lock-owned mixed publication-set activation helper. It does not construct `RGBPipeline`, run pipeline stages, recover stale locks, perform cleanup, or infer production paths.
+
+## Phase 3 RGBPipeline publication artifact allowlist
+
+Date: 2026-07-30.
+
+`RGBPipeline` publication dry-run and staging now use an explicit allowlist instead of publishing every mirrored workspace/published pair discovered in stage state.
+
+Allowed publication artifacts are currently limited to:
+
+- KML boundary GeoJSON and CSV processed files;
+- WebODM orthomosaic outputs;
+- WebODM 3D outputs with `.laz`, `.ply`, or `.pcd` extensions;
+- the WebODM task2 all-assets ZIP;
+- the QGIS clipped orthomosaic; and
+- the QGIS tile directory.
+
+Cross-run image directories, unknown WebODM sidecars, and other unapproved mirrored pairs are reported in `skipped_artifacts` and do not block the plan merely by existing. Unsafe allowed artifacts still fail closed through the existing blocked-reason path when their source is outside the run workspace, missing, duplicated, or targets outside the published survey root.
+
+This slice does not activate publication automatically, does not remove legacy mirrors, does not stage or publish production artifacts, does not run the real pipeline, and does not change cleanup behavior.
+
+## Phase 3 directory/tile staging optimization
+
+Date: 2026-07-30.
+
+`prepare_publication()` now supports `stage_directories_for_activation=True`. When enabled, directory artifacts are copied once to the exact hidden same-filesystem activation path beside the final published directory, then recorded in the staged manifest from that location. Activation can therefore rename the prepared directory into place instead of copying a large tile tree a second time.
+
+`RGBPipeline.prepare_publication_staging()` enables this option for its explicit publication staging bridge. File artifacts still stage under the run workspace `publish/staged` tree. Directory artifacts, such as QGIS tiles, stage under the published root `.activation/<run-id>/...tmp` path but remain hidden and non-authoritative until explicit activation writes the published `publication.json`.
+
+This slice does not call activation automatically, does not write the visible publication manifest during staging, does not change legacy stage mirrors, does not run QGIS/GDAL, does not clean abandoned hidden candidates, and does not touch production survey roots.
+## Phase 3 explicit Activate Publication stage boundary
+
+Date: 2026-08-03.
+
+`RGBPipeline.activate_publication_stage()` now provides an explicit opt-in StageRunner boundary for the approved `Activate Publication` contract. The method wraps the existing exact-confirmation activation helper in one `activate_publication` stage record, stores successful output under `state["activate_publication"]`, persists successful activation output JSON, and records pre-mutation blocks such as confirmation mismatch, missing staged manifest, or existing publication lock as failed stage attempts.
+
+This slice deliberately does not wire activation into `RGBPipeline.run()`, does not add UI/API mutation, does not change run final-status behavior, does not add stale-lock recovery or cleanup mutation, and does not persist `requires_recovery` as a stage status yet. Post-mutation `requires_recovery` persistence remains a later StageRunner/status-mapping slice.
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "activate_publication_stage"` - 4 passed, 28 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 13 passed, 19 deselected.
+
+No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or automatic publication activation was run.
+## StageRunner requires_recovery status mapping
+
+Date: 2026-08-03.
+
+`StageRunner` now recognizes `StageRequiresRecovery`, a typed terminal signal for stages that fail after mutation and require recovery. `PipelineRepo.finish_stage_with_status()` preserves existing `finish_stage()` behavior while allowing explicit terminal statuses such as `requires_recovery` without a schema migration. The existing completed-output resume accessor remains completed-only.
+
+`RGBPipeline.activate_publication_explicit()` now translates non-lock activation-helper exceptions into `StageRequiresRecovery` with bounded recovery output. Pre-mutation blocks still fail normally: confirmation mismatch and missing staged manifest return blocked from the explicit helper and become failed in the stage wrapper; existing publication locks still propagate as failed stage attempts. Post-mutation publication activation failures now persist an `activate_publication` stage row with status `requires_recovery` and recovery evidence in `output_json`.
+
+This slice does not wire activation into `RGBPipeline.run()`, does not add UI/API mutation, does not recover stale locks, does not run cleanup, and does not change run final-status behavior.
+
+### Validation
+
+- `python -m py_compile shared\db\repo.py shared\stage_runner.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py tests\test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py -k "requires_recovery"` - 1 passed, 9 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "activate_publication_stage"` - 5 passed, 28 deselected.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 10 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 14 passed, 19 deselected.
+
+No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or automatic publication activation was run.
+## Phase 3 guarded RGBPipeline run publication wiring
+
+Date: 2026-08-03.
+
+`RGBPipeline.run()` now includes the tested `activate_publication` StageRunner boundary when publication confirmation is supplied or when `activate_publication` is explicitly selected. The runtime activation stage prepares publication staging and activates it within the same stage record after the existing quality-gate and QGIS stages. Activation retries are disabled for this boundary because staging/activation can mutate filesystem evidence and is not safe to retry blindly.
+
+The default run path remains backward-compatible: if no publication confirmation is supplied and the caller does not explicitly select `activate_publication`, normal runs do not attempt publication activation. CLI/UI/API wiring for supplying the confirmation phrase remains separate. Publication activation still requires exact phrase `PUBLISH <survey_id> <run_id>` when invoked.
+
+This slice does not add UI/API mutation endpoints, does not recover stale locks, does not run cleanup, does not change run final-status behavior beyond existing failure handling, and does not remove legacy stage mirroring.
+
+### Validation
+
+- `python -m py_compile shared\db\repo.py shared\stage_runner.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py tests\test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "run_wires_activate_publication or run_activate_publication or activate_publication_stage"` - 7 passed, 28 deselected.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 10 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 16 passed, 19 deselected.
+
+No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+## Phase 3 guarded publication activation CLI surface
+
+Date: 2026-08-03.
+
+`main.py` now exposes the guarded runtime publication activation path through explicit operator CLI flags. `--activate-publication` must be paired with `--publication-confirmation "PUBLISH <survey_id> <run_id>"`; either half by itself fails before config loading, source resolution, pipeline construction, or visible publication mutation. Default CLI runs continue to pass `publication_confirmation=None` and do not activate publication.
+
+The CLI surface only passes the confirmation phrase into the already-tested `RGBPipeline.run()` activation boundary. It does not add UI/API mutation endpoints, does not recover stale locks, does not run cleanup, does not change default WebODM task selection, and does not remove legacy stage mirroring.
+
+### Validation
+
+- `python -m py_compile main.py tests\test_main_publication_activation_cli.py` - passed.
+- `python -m pytest -q tests\test_main_publication_activation_cli.py tests\test_main_resume_source.py` - 7 passed.
+
+No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.

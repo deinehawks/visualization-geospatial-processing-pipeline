@@ -1617,6 +1617,59 @@ def _prepare_tiles_directory_publication(tmp_path, *, existing_final=False):
     return workspace, published, manifest_path, staged
 
 
+
+def test_prepare_publication_can_stage_directory_directly_for_activation(tmp_path):
+    workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    source = workspace.qgis_tiles_round
+    (source / "metadata.json").write_text("meta", encoding="utf-8")
+    (source / "11" / "0").mkdir(parents=True)
+    (source / "11" / "0" / "tile.png").write_bytes(b"new-tile")
+    expected = publication_activation_path(
+        published_path=published.tiles_ortho_round,
+        run_id="run-001",
+    )
+
+    manifest_path = prepare_publication(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        published=published,
+        artifacts=[
+            PublicationArtifact(
+                "round_tiles",
+                source,
+                Path("tiles/ortho/round-corners"),
+                "directory",
+                required_paths=("metadata.json", "11"),
+            )
+        ],
+        stage_directories_for_activation=True,
+    )
+
+    staged_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    staged_path = Path(staged_manifest["artifacts"][0]["staged_path"])
+    assert staged_path.resolve(strict=False) == expected.resolve(strict=False)
+    assert (expected / "11" / "0" / "tile.png").read_bytes() == b"new-tile"
+    assert not (workspace.publish / "staged" / "tiles" / "ortho" / "round-corners").exists()
+
+    def unexpected_copytree(source_path, destination_path):
+        pytest.fail("activation should rename the prepared directory without copytree")
+
+    result = activate_publication(
+        workspace=workspace,
+        published=published,
+        copy_tree=unexpected_copytree,
+    )
+
+    active = json.loads(result.read_text(encoding="utf-8"))
+    assert active["artifacts"][0]["zero_copy_activation"] is True
+    assert not expected.exists()
+    assert (
+        published.tiles_ortho_round / "11" / "0" / "tile.png"
+    ).read_bytes() == b"new-tile"
+
 def test_activate_publication_zero_copy_reuses_exact_activation_path(tmp_path):
     workspace = plan_run_workspace(tmp_path / "workspaces", "run-001")
     create_run_workspace(workspace)

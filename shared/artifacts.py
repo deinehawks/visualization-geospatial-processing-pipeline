@@ -200,12 +200,16 @@ def prepare_publication(
     artifacts: Iterable[PublicationArtifact],
     copy_file: Callable[[Path, Path], object] = shutil.copy2,
     copy_tree: Callable[[Path, Path], object] | None = None,
+    stage_directories_for_activation: bool = False,
 ) -> Path:
     """Stage a complete publish set inside the run workspace.
 
     This function prepares a validated, manifest-backed publish set for later
     activation. Directory output already generated at the exact run-specific
-    hidden activation path is recorded in place without copying it again.
+    hidden activation path is recorded in place without copying it again. When
+    stage_directories_for_activation is enabled, directory artifacts are copied
+    directly to that hidden same-filesystem activation path so activation can
+    rename them into place without a second full directory copy.
     """
 
     workspace_root = workspace.root.resolve()
@@ -240,6 +244,17 @@ def prepare_publication(
         )
         if direct_activation_source:
             staged_path = source_path
+        elif artifact.kind == "directory" and stage_directories_for_activation:
+            staged_path = publication_activation_path(
+                published_path=published_path,
+                run_id=run_id,
+            )
+            staged_resolved = staged_path.resolve(strict=False)
+            _require_within(staged_resolved, published.root.resolve(strict=False))
+            if staged_path.exists():
+                raise FileExistsError(staged_path)
+            staged_path.parent.mkdir(parents=True, exist_ok=True)
+            tree_copier(source_path, staged_path)
         else:
             staged_path = staging_dir / relative_path
             _require_within(staged_path.resolve(strict=False), staging_resolved)

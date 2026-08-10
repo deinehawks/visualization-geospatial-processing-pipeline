@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import logging
@@ -16,7 +16,6 @@ def resolve_cli_source_dir(
     survey: str,
     resume: bool,
     run_id: str | None,
-    field_data_root: Path,
     logger: logging.Logger,
     date_hint: str | None = None,
     repository: PipelineRepo | None = None,
@@ -40,9 +39,9 @@ def resolve_cli_source_dir(
         return resolved
 
     survey_arg = Path(survey)
-    source_input = survey_arg if survey_arg.is_absolute() else field_data_root / survey
+
     return resolve_source_dataset_dir(
-        source_input,
+        survey_arg,
         logger,
         date_hint=date_hint,
     )
@@ -57,6 +56,16 @@ def main() -> None:
     parser.add_argument("--survey-id", default=None, help="Optional fixed survey ID, e.g. AH-026002")
     parser.add_argument("--node-id", type=int, default=None)
     parser.add_argument("--force-stage", action="append", default=[], help="Force a completed stage to rerun during resume. Can be used multiple times.",)
+    parser.add_argument(
+        "--activate-publication",
+        action="store_true",
+        help="Activate publication after quality approval when paired with the exact confirmation phrase.",
+    )
+    parser.add_argument(
+        "--publication-confirmation",
+        default=None,
+        help='Exact confirmation phrase required with --activate-publication, e.g. "PUBLISH AH-026019 run-001".',
+    )
     parser.add_argument(
         "--date",
         default=None,
@@ -84,13 +93,16 @@ def main() -> None:
 
     if args.resume and not args.run_id:
         parser.error("--run-id is required when using --resume")
+    if args.activate_publication and not args.publication_confirmation:
+        parser.error("--publication-confirmation is required when using --activate-publication")
+    if args.publication_confirmation and not args.activate_publication:
+        parser.error("--publication-confirmation requires --activate-publication")
 
     config: dict[str, Any] = load_pipeline_config()
 
     if args.node_id is not None:
         config["webodm"]["node_id"] = args.node_id
 
-    field_data_root = Path(config["paths"]["field_data_root"])
     surveys_root = Path(config["paths"]["surveys_root"])
 
     resolver_logger = logging.getLogger("rgb.source_resolver")
@@ -99,7 +111,6 @@ def main() -> None:
         survey=args.survey,
         resume=args.resume,
         run_id=args.run_id,
-        field_data_root=field_data_root,
         logger=resolver_logger,
         date_hint=args.date,
     )
@@ -149,12 +160,15 @@ def main() -> None:
     result = pipeline.run(
         resume=args.resume,
         force_stages=set(args.force_stage or []),
+        publication_confirmation=(
+            args.publication_confirmation if args.activate_publication else None
+        ),
     )
 
     print("\n===== PIPELINE RESULT =====")
     print(f"Success : {result.get('success')}")
     print(f"Run ID  : {result.get('run_id')}")
-    print(f"Error   : {result.get('error', '—')}")
+    print(f"Error   : {result.get('error', 'â€”')}")
     print("===========================\n")
 
 

@@ -1,4 +1,4 @@
-# Test Strategy for the Scalability and Concurrency Refactor
+﻿# Test Strategy for the Scalability and Concurrency Refactor
 
 ## Safety objective
 
@@ -81,19 +81,19 @@ Suggested logical layout:
 
 ```text
 tests/
-├── unit/
-├── component/
-├── integration/
-├── external/
-├── smoke/
-├── fakes/
-├── fixtures/
-└── safety/
+â”œâ”€â”€ unit/
+â”œâ”€â”€ component/
+â”œâ”€â”€ integration/
+â”œâ”€â”€ external/
+â”œâ”€â”€ smoke/
+â”œâ”€â”€ fakes/
+â”œâ”€â”€ fixtures/
+â””â”€â”€ safety/
 ```
 
 Operational cleanup/query scripts should not remain discoverable test modules. Their long-term location and safety interface require a separate approved task.
 
-### Level 1 — Unit tests
+### Level 1 â€” Unit tests
 
 **Scope:** Pure functions and small classes with all I/O replaced by passed collaborators or temporary resources.
 
@@ -114,7 +114,7 @@ Requirements:
 - Deterministic time/UUID/random behavior through injected fakes where relevant.
 - Table-driven edge cases for state transitions and idempotency classifications.
 
-### Level 2 — Component tests
+### Level 2 â€” Component tests
 
 **Scope:** One repository component with real local implementation details but controlled boundaries.
 
@@ -134,7 +134,7 @@ Requirements:
 - Database tests use a fresh database or an explicitly copied migration fixture.
 - Failures can be injected before and after each state/artifact boundary.
 
-### Level 3 — Integration tests using fakes or mocks
+### Level 3 â€” Integration tests using fakes or mocks
 
 **Scope:** Multiple real pipeline components wired together, with WebODM, QGIS/GDAL/PDAL, keyboard hooks, time, and production storage replaced.
 
@@ -152,7 +152,7 @@ Required scenarios:
 
 The fake WebODM service should record task creation, expose controlled statuses, simulate timeouts after commit, and reject duplicate/idempotency violations. The fake subprocess runner should support progress, failure, hanging, cancellation, and partial-output simulation.
 
-### Level 4 — Explicit opt-in external integration tests
+### Level 4 â€” Explicit opt-in external integration tests
 
 **Scope:** Compatibility checks against installed QGIS/GDAL/PDAL and a dedicated non-production WebODM environment.
 
@@ -167,7 +167,7 @@ Requirements:
 
 These tests validate compatibility, not every error path.
 
-### Level 5 — Small-dataset pipeline smoke tests
+### Level 5 â€” Small-dataset pipeline smoke tests
 
 **Scope:** A complete pipeline over a tiny committed/generated fixture, normally with fake external services and optionally in the dedicated external environment.
 
@@ -1073,3 +1073,111 @@ Coverage proves that:
 - the publication lock is released after successful CLI activation.
 
 The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, or touch production survey roots.
+
+## Phase 3 RGBPipeline publication artifact allowlist coverage
+
+Date: 2026-07-30.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the RGBPipeline publication allowlist using only pytest-owned workspace and survey roots.
+
+Coverage proves that dry-run planning and staging include only the intended final publication families, skip cross-run image directories and unknown sidecars, report skipped logical names through `skipped_artifacts`, preserve the existing blocked behavior for unsafe allowed sources, and avoid writing the published survey `publication.json` during staging.
+
+Validation for this slice:
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 9 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, activate publication automatically, recover stale locks, run cleanup, or mutate production survey roots.
+
+## Phase 3 directory/tile staging optimization coverage
+
+Date: 2026-07-30.
+
+`tests/test_phase3_artifact_workspace.py` and `tests/test_rgb_pipeline_single_stage_execution.py` now cover optimized directory publication staging using pytest-owned roots.
+
+Coverage proves that `prepare_publication(stage_directories_for_activation=True)` stages a workspace directory directly at the exact hidden activation path, writes that path into the staged manifest, and allows activation to rename the prepared directory without invoking `copytree`. RGBPipeline staged publication now records QGIS tiles at that hidden activation path while preserving file staging under the run workspace and avoiding writes to the visible published `publication.json`.
+
+Validation for this slice:
+
+- `python -m py_compile shared\artifacts.py pipelines\rgb_pipeline.py tests\test_phase3_artifact_workspace.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_phase3_artifact_workspace.py -k "stage_directory or zero_copy"` - 3 passed, 70 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 9 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, activate publication automatically, clean hidden activation candidates, or mutate production survey roots.
+## Phase 3 explicit Activate Publication stage boundary coverage
+
+Date: 2026-08-03.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers the explicit `RGBPipeline.activate_publication_stage()` wrapper using pytest-owned workspace and published roots.
+
+Coverage proves that:
+
+- confirmed activation records one completed `activate_publication` stage and persists activation output JSON;
+- confirmation mismatch records the activation stage as failed before visible publication changes;
+- missing staged manifest records the activation stage as failed before visible publication changes; and
+- an existing publication lock records the activation stage as failed before visible publication changes.
+
+Validation for this slice:
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "activate_publication_stage"` - 4 passed, 28 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 13 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, wire activation into `RGBPipeline.run()`, or mutate production survey roots. Persisted `requires_recovery` remains unimplemented pending a StageRunner/status-mapping slice.
+## StageRunner requires_recovery status coverage
+
+Date: 2026-08-03.
+
+`tests/test_stage_runner_orchestration.py` now covers the generic `StageRequiresRecovery` signal. The regression proves that StageRunner persists `requires_recovery`, stores bounded output evidence in the latest stage row, updates in-memory state when an output key is supplied, and keeps `get_latest_stage_output()` completed-only for resume compatibility.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers post-mutation publication activation failure by monkeypatching the activation helper to mutate a pytest-owned published artifact, write recovery evidence, and raise. The activation stage persists `requires_recovery` with recovery output while leaving visible production resources untouched.
+
+Validation for this slice:
+
+- `python -m py_compile shared\db\repo.py shared\stage_runner.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py tests\test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py -k "requires_recovery"` - 1 passed, 9 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "activate_publication_stage"` - 5 passed, 28 deselected.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 10 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 14 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, wire activation into `RGBPipeline.run()`, or mutate production survey roots.
+## Phase 3 guarded RGBPipeline run publication wiring coverage
+
+Date: 2026-08-03.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers guarded `RGBPipeline.run()` publication wiring using monkeypatched safe stage callables, pytest-owned workspaces, and pytest-owned published roots.
+
+Coverage proves that:
+
+- when confirmation is supplied and `activate_publication` is selected, `run()` executes quality gate, QGIS, and one activation stage in order;
+- the runtime activation stage stages publication and publishes the manifest/artifacts through the existing guarded helper;
+- wrong confirmation records the activation stage as failed before visible publication changes; and
+- activation retries are disabled for this non-idempotent boundary.
+
+Validation for this slice:
+
+- `python -m py_compile shared\db\repo.py shared\stage_runner.py pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py tests\test_stage_runner_orchestration.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "run_wires_activate_publication or run_activate_publication or activate_publication_stage"` - 7 passed, 28 deselected.
+- `python -m pytest -q tests\test_stage_runner_orchestration.py` - 10 passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 16 passed, 19 deselected.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, or mutate production survey roots.
+## Phase 3 guarded publication activation CLI coverage
+
+Date: 2026-08-03.
+
+`tests/test_main_publication_activation_cli.py` covers the operator CLI handoff into guarded `RGBPipeline.run()` using monkeypatched config/source resolution and a fake `RGBPipeline` module.
+
+Coverage proves that:
+
+- default CLI runs leave `publication_confirmation` unset;
+- `--activate-publication --publication-confirmation "PUBLISH <survey_id> <run_id>"` passes the phrase into `pipeline.run()`;
+- `--activate-publication` without a confirmation phrase fails before pipeline construction; and
+- `--publication-confirmation` without `--activate-publication` also fails before pipeline construction.
+
+Validation for this slice:
+
+- `python -m py_compile main.py tests\test_main_publication_activation_cli.py` - passed.
+- `python -m pytest -q tests\test_main_publication_activation_cli.py tests\test_main_resume_source.py` - 7 passed.
+
+The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, or mutate production survey roots.

@@ -6,7 +6,7 @@ from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer
 from shared.constants import WEBODM_RESTART_STAGES, WEBODM_RESTART_STAGE_NAMES
 from shared.logging import get_logger
 from shared.db.repo import PipelineRepo
-from shared.stage_runner import StageRunner
+from shared.stage_runner import StageRequiresRecovery, StageRunner
 from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
@@ -23,6 +23,7 @@ from shared.artifacts import (
     activate_publication_set_with_lock,
 )
 
+from shared.publication_lock import PublicationLockedError
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
 from modules.webodm.webodm_processor import WebODMProcessor
 from modules.cross_run_image_filter.cross_run_image_filter import run_filter
@@ -358,6 +359,7 @@ class RGBPipeline(
         logical_prefix: str,
         artifacts: list[PublicationArtifact],
         blocked_reasons: list[str],
+        skipped_artifacts: list[str],
         seen_targets: set[str],
     ) -> None:
         if workspace_node is None or published_node is None:
@@ -372,6 +374,7 @@ class RGBPipeline(
                     logical_prefix=f"{logical_prefix}.{key}",
                     artifacts=artifacts,
                     blocked_reasons=blocked_reasons,
+                    skipped_artifacts=skipped_artifacts,
                     seen_targets=seen_targets,
                 )
             return
@@ -387,6 +390,7 @@ class RGBPipeline(
                     logical_prefix=logical_prefix,
                     artifacts=artifacts,
                     blocked_reasons=blocked_reasons,
+                    skipped_artifacts=skipped_artifacts,
                     seen_targets=seen_targets,
                 )
             if len(workspace_node) != len(published_node):
@@ -400,7 +404,12 @@ class RGBPipeline(
         if not workspace_node or not published_node:
             return
 
+        logical_name = f"{stage_name}.{logical_prefix}"
         source = Path(workspace_node)
+        if not self._publication_artifact_is_allowed(logical_name, source):
+            skipped_artifacts.append(logical_name)
+            return
+
         target = Path(published_node)
         try:
             source = self._require_workspace_owned_path(source)
@@ -436,16 +445,32 @@ class RGBPipeline(
 
         artifacts.append(
             PublicationArtifact(
-                logical_name=f"{stage_name}.{logical_prefix}",
+                logical_name=logical_name,
                 source_path=source,
                 published_relative_path=relative_target,
                 kind=kind,
             )
         )
 
+    def _publication_artifact_is_allowed(self, logical_name: str, source_path: Path) -> bool:
+        allowed_exact = {
+            "kml_boundary.published.processed_files.geojson",
+            "kml_boundary.published.processed_files.csv",
+            "webodm.published.webodm_odm.task2_all_assets_zip",
+            "qgis.published.qgis_clipped_ortho",
+            "qgis.published.tiles_dir",
+        }
+        if logical_name in allowed_exact:
+            return True
+        if logical_name.startswith("webodm.published.webodm_ortho."):
+            return True
+        if logical_name.startswith("webodm.published.webodm_3d."):
+            return source_path.suffix.lower() in {".laz", ".ply", ".pcd"}
+        return False
+
     def _build_publication_artifact_plan(
         self,
-    ) -> tuple[list[PublicationArtifact], list[str]]:
+    ) -> tuple[list[PublicationArtifact], list[str], list[str]]:
         if not self.survey_id or self.rgb_path is None or self.published_layout is None:
             self._hydrate_from_state()
         if not self.survey_id:
@@ -455,6 +480,7 @@ class RGBPipeline(
 
         artifacts: list[PublicationArtifact] = []
         blocked_reasons: list[str] = []
+        skipped_artifacts: list[str] = []
         seen_targets: set[str] = set()
 
         for stage_name in (
@@ -473,10 +499,11 @@ class RGBPipeline(
                 logical_prefix="published",
                 artifacts=artifacts,
                 blocked_reasons=blocked_reasons,
+                skipped_artifacts=skipped_artifacts,
                 seen_targets=seen_targets,
             )
 
-        return artifacts, blocked_reasons
+        return artifacts, blocked_reasons, sorted(set(skipped_artifacts))
 
     def _publication_artifact_payload(
         self,
@@ -508,7 +535,7 @@ class RGBPipeline(
         publication manifest, or mutate pipeline state.
         """
 
-        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        artifacts, blocked_reasons, skipped_artifacts = self._build_publication_artifact_plan()
         artifact_payload = [
             dict(artifact_record)
             for artifact_record in self._publication_artifact_payload(artifacts)
@@ -523,6 +550,7 @@ class RGBPipeline(
             "artifact_count": len(artifact_payload),
             "artifacts": artifact_payload,
             "blocked_reasons": blocked_reasons,
+            "skipped_artifacts": skipped_artifacts,
             "status": "blocked" if blocked_reasons else "planned",
         }
         log_event(
@@ -544,7 +572,7 @@ class RGBPipeline(
         published survey publication.json.
         """
 
-        artifacts, blocked_reasons = self._build_publication_artifact_plan()
+        artifacts, blocked_reasons, skipped_artifacts = self._build_publication_artifact_plan()
         if not artifacts and not blocked_reasons:
             blocked_reasons.append("publication plan contains no artifacts")
         artifact_payload = [
@@ -563,6 +591,7 @@ class RGBPipeline(
             "artifact_count": len(artifact_payload),
             "artifacts": artifact_payload,
             "blocked_reasons": blocked_reasons,
+            "skipped_artifacts": skipped_artifacts,
         }
         if blocked_reasons:
             result["status"] = "blocked"
@@ -581,6 +610,7 @@ class RGBPipeline(
             workspace=self.workspace_layout,
             published=self.published_layout,
             artifacts=artifacts,
+            stage_directories_for_activation=True,
         )
         result["status"] = "staged"
         result["staged_manifest"] = str(staged_manifest)
@@ -654,10 +684,27 @@ class RGBPipeline(
                 ],
             }
 
-        publication_manifest = activate_publication_set_with_lock(
-            workspace=self.workspace_layout,
-            published=self.published_layout,
-        )
+        try:
+            publication_manifest = activate_publication_set_with_lock(
+                workspace=self.workspace_layout,
+                published=self.published_layout,
+            )
+        except PublicationLockedError:
+            raise
+        except Exception as exc:
+            raise StageRequiresRecovery(
+                "publication activation requires recovery: " + str(exc),
+                output={
+                    "run_id": self.run_id,
+                    "survey_id": self.survey_id,
+                    "published_root": str(self.published_layout.root),
+                    "publication_manifest": str(self.published_layout.publication_manifest),
+                    "activation_enabled": True,
+                    "status": "requires_recovery",
+                    "error_type": type(exc).__name__,
+                    "error_message": str(exc),
+                },
+            ) from exc
         result: Dict[str, Any] = {
             "run_id": self.run_id,
             "survey_id": self.survey_id,
@@ -674,6 +721,56 @@ class RGBPipeline(
             activation_enabled="true",
         )
         return result
+
+    def _activate_publication_stage_body(
+        self,
+        *,
+        confirmation: str,
+        prepare_staging: bool = False,
+    ) -> Dict[str, Any]:
+        if prepare_staging:
+            staging_result = self.prepare_publication_staging()
+            if staging_result.get("status") == "blocked":
+                blocked_reasons = staging_result.get("blocked_reasons") or [
+                    "publication staging blocked"
+                ]
+                raise RuntimeError("; ".join(str(reason) for reason in blocked_reasons))
+
+        result = self.activate_publication_explicit(
+            confirmation=confirmation,
+        )
+        if result.get("status") == "blocked":
+            blocked_reasons = result.get("blocked_reasons") or [
+                "publication activation blocked"
+            ]
+            raise RuntimeError("; ".join(str(reason) for reason in blocked_reasons))
+        return result
+
+    def activate_publication_stage(
+        self,
+        *,
+        confirmation: str,
+        prepare_staging: bool = False,
+    ) -> Dict[str, Any]:
+        """Run explicit publication activation as one tracked pipeline stage.
+
+        This method is the first formal stage boundary for the approved
+        `Activate Publication` contract. ``RGBPipeline.run()`` now uses the
+        same body after QGIS, while this wrapper remains useful for tests and
+        operator tooling.
+        """
+
+        return self.runner.run(
+            "activate_publication",
+            lambda: self._activate_publication_stage_body(
+                confirmation=confirmation,
+                prepare_staging=prepare_staging,
+            ),
+            output_key="activate_publication",
+            state=self.state,
+            retry_attempts=1,
+            retry_delay_seconds=0,
+        )
 
     def _preflight_stage(self, stage_name: str) -> None:
         result = self.preflight.check_stage(
@@ -3144,6 +3241,7 @@ class RGBPipeline(
         force_stages: Optional[Set[str]] = None,
         selected_stages: Optional[Set[str]] = None,
         raise_on_error: bool = False,
+        publication_confirmation: Optional[str] = None,
     ) -> Dict[str, Any]:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
@@ -3216,7 +3314,25 @@ class RGBPipeline(
                 "output_key": "qgis",
                 "stale_running_policy": "rerun",
             },
+
         ]
+        if publication_confirmation is not None or (
+            selected_stages is not None and "activate_publication" in selected_stages
+        ):
+            stage_steps.append(
+                {
+                    "name": "activate_publication",
+                    "fn": lambda: self._activate_publication_stage_body(
+                        confirmation=publication_confirmation or "",
+                        prepare_staging=True,
+                    ),
+                    "output_key": "activate_publication",
+                    "stale_running_policy": "rerun",
+                    "retry_attempts": 1,
+                    "retry_delay_seconds": 0,
+                }
+            )
+
         default_stage_names = {step["name"] for step in stage_steps}
         if selected_stages is None:
             stages_to_run = default_stage_names
@@ -3252,6 +3368,10 @@ class RGBPipeline(
                     runner_kwargs["stale_running_policy"] = step[
                         "stale_running_policy"
                     ]
+                if "retry_attempts" in step:
+                    runner_kwargs["retry_attempts"] = step["retry_attempts"]
+                if "retry_delay_seconds" in step:
+                    runner_kwargs["retry_delay_seconds"] = step["retry_delay_seconds"]
 
                 self.runner.run(stage_name, step["fn"], **runner_kwargs)
                 self._hydrate_from_state()
