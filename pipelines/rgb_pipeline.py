@@ -1892,6 +1892,50 @@ class RGBPipeline(
                 else:
                     logger.warning("Could not download orthomosaic for Task 1.")
 
+            # ---------------- TASK 4 (primary, not fallback) ----------------
+            skip_task4 = bool(getattr(self, "skip_task4_webodm", True))
+
+            if skip_task4:
+                logger.info("Skipping WebODM Task 4 by request.")
+            elif not boundary_available:
+                msg = "Boundary not available. Skipping Task 4 (requires bounded model)."
+                logger.warning(msg)
+                result["task4_skip_reason"] = msg
+            elif not boundary_geojson_path or not Path(boundary_geojson_path).exists():
+                msg = "Boundary GeoJSON path is missing. Skipping Task 4."
+                logger.warning(msg)
+                result["task4_skip_reason"] = msg
+            else:
+                # Task 4 can run - boundary is available and not skipped
+                logger.info(
+                    "Running Task 4 as primary task "
+                    f"(webodm_mode={getattr(self, 'webodm_mode', 'both')})."
+                )
+                try:
+                    t4_result = self.run_webodm_fallback_task(
+                        task_key="task4",
+                        fallback_reason="primary_task4",
+                    )
+                    result["task4"] = t4_result.get("task4")
+                    result["downloads"]["task4"] = t4_result.get("downloads") or {}
+                    result["selected_webodm_task"] = t4_result.get("selected_webodm_task")
+                    result["selected_orthomosaic"] = t4_result.get("selected_orthomosaic")
+                except RuntimeError as e:
+                    if str(e) in ("__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"):
+                        raise
+                    logger.exception("Task 4 primary run failed.")
+                    result["task4_failed"] = True
+                    result["task4_error"] = str(e)
+
+                    # Combined mode and task4-only mode both stop immediately on Task 4 failure.
+                    if (not skip_task2) or (skip_task1 and skip_task2):
+                        logger.error(
+                            "Task 4 failed in a mode that requires it to succeed before continuing. "
+                            "Failing the WebODM stage."
+                        )
+                        self._clear_webodm_checkpoint()
+                        raise
+
             # ---------------- TASK 2 ----------------
             if skip_task2:
                 logger.info("Skipping WebODM Task 2 by request.")
@@ -2209,75 +2253,15 @@ class RGBPipeline(
                                 "All-assets zip was not downloaded (endpoint missing or failed)."
                             )
 
-            # ---------------- Quality Gate after Task 2 (when both tasks run) ----------------
-            # If both Task 2 and Task 4 are enabled, run a quality gate after Task 2
-            # to allow user to review before continuing to Task 4
-            if not skip_task2 and not skip_task4:
-                logger.info("Running intermediate quality gate after Task 2 (before Task 4)...")
-                # Call the quality gate stage method directly
-                try:
-                    qg_result = self.stage_quality_gate()
-                    if not qg_result.get("passed"):
-                        logger.warning(
-                            "Intermediate quality gate failed. Skipping Task 4 and returning."
-                        )
-                        result["quality_gate_intermediate"] = qg_result
-                        result["task4_skip_reason"] = "Quality gate failed after Task 2"
-                        self._clear_webodm_checkpoint()
-                        return result
-                    else:
-                        logger.info("Intermediate quality gate passed. Continuing to Task 4...")
-                        result["quality_gate_intermediate"] = qg_result
-                except Exception as e:
-                    logger.exception("Intermediate quality gate failed with exception.")
-                    result["quality_gate_intermediate"] = {"passed": False, "error": str(e)}
-                    result["task4_skip_reason"] = f"Quality gate exception: {e}"
-                    self._clear_webodm_checkpoint()
-                    return result
-
-            # ---------------- TASK 4 (primary, not fallback) ----------------
-            skip_task4 = bool(getattr(self, "skip_task4_webodm", True))
-
-            if skip_task4:
-                logger.info("Skipping WebODM Task 4 by request.")
-            elif not boundary_available:
-                msg = "Boundary not available. Skipping Task 4 (requires bounded model)."
-                logger.warning(msg)
-                result["task4_skip_reason"] = msg
-            elif not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-                msg = "Boundary GeoJSON path is missing. Skipping Task 4."
-                logger.warning(msg)
-                result["task4_skip_reason"] = msg
-            else:
-                # Task 4 can run - boundary is available and not skipped
-                logger.info(
-                    "Running Task 4 as primary task "
-                    f"(webodm_mode={getattr(self, 'webodm_mode', 'both')})."
-                )
-                try:
-                    t4_result = self.run_webodm_fallback_task(
-                        task_key="task4",
-                        fallback_reason="primary_task4",
+                if (
+                    not t2_success
+                    and result.get("task4", {}).get("success") is True
+                ):
+                    logger.warning(
+                        "Task 4 succeeded but Task 2 failed. Marking run as partially_completed."
                     )
-                    result["task4"] = t4_result.get("task4")
-                    result["downloads"]["task4"] = t4_result.get("downloads") or {}
-                    result["selected_webodm_task"] = t4_result.get("selected_webodm_task")
-                    result["selected_orthomosaic"] = t4_result.get("selected_orthomosaic")
-                except RuntimeError as e:
-                    if str(e) in ("__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"):
-                        raise
-                    logger.exception("Task 4 primary run failed.")
-                    result["task4_failed"] = True
-                    result["task4_error"] = str(e)
-
-                    # If Task 4 is the only task running and it failed, fail the entire stage
-                    if skip_task1 and skip_task2:
-                        logger.error(
-                            "Task 4 was the only WebODM task enabled and it failed. "
-                            "Failing the WebODM stage."
-                        )
-                        self._clear_webodm_checkpoint()
-                        raise
+                    result["run_status"] = "partially_completed"
+                    self.state["run_status_override"] = "partially_completed"
 
             self._clear_webodm_checkpoint()
             return result
@@ -2395,31 +2379,6 @@ class RGBPipeline(
 
             return Path(fallback)
 
-        selected = self._get_selected_orthomosaic()
-
-        task_key = str(selected.get("task_key") or "").strip()
-        flag = str(selected.get("flag") or "").strip()
-        source_path = Path(str(selected.get("source_path") or ""))
-        boundary_used = bool(selected.get("boundary_used"))
-        tile_mode = "round-corners" if boundary_used else "soft-corners"
-
-        if not task_key:
-            raise RuntimeError("Selected orthomosaic is missing task_key.")
-
-        if not flag:
-            raise RuntimeError("Selected orthomosaic is missing flag.")
-
-        if not source_path.exists():
-            raise FileNotFoundError(
-                f"Selected orthomosaic does not exist: {source_path}"
-            )
-
-        logger.info(
-            "QGIS selected orthomosaic: "
-            f"task={task_key} | file={source_path.name} | "
-            f"boundary_used={boundary_used} | tile_mode={tile_mode}"
-        )
-
         boundary_geojson_path = self.state.get("boundary_geojson_path")
         boundary_geojson: Path | None = (
             Path(str(boundary_geojson_path))
@@ -2428,25 +2387,6 @@ class RGBPipeline(
         )
 
         mask_geojson: Path | None = None
-
-        if boundary_used:
-            if boundary_geojson is None or not boundary_geojson.exists():
-                raise RuntimeError(
-                    "Selected orthomosaic is marked as bounded, but boundary_geojson_path "
-                    f"is missing or invalid: {boundary_geojson_path}"
-                )
-
-            mask_geojson = boundary_geojson
-        else:
-            if not boundary_geojson or not boundary_geojson.exists():
-                logger.warning(
-                    "No boundary GeoJSON available. QGIS will skip clipping and generate soft-corners tiles."
-                )
-            else:
-                logger.info(
-                    "Boundary GeoJSON exists, but selected orthomosaic is marked as unbounded. "
-                    "QGIS will use soft-corners tile workflow."
-                )
 
         published_clipped_ortho_dir = dir_from_key(
             "qgis_clipped_ortho",
@@ -2473,7 +2413,6 @@ class RGBPipeline(
         qgis_root = str(qgis_tools_cfg.get("qgis_root") or "")
         gdalwarp_path = str(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp")
         gdal2tiles_path = str(qgis_tools_cfg.get("gdal2tiles_path") or "gdal2tiles.py")
-
         gdalinfo_path = str(qgis_tools_cfg.get("gdalinfo_path") or "gdalinfo")
 
         tiles_cfg = qgis_cfg.get("tiles") or {}
@@ -2505,16 +2444,6 @@ class RGBPipeline(
             gdalinfo_path=gdalinfo_path,
         )
 
-        # ── Local staging setup ───────────────────────────────────────────────
-        # gdalwarp and gdal2tiles both write to local disk first, then results
-        # are copied to the network share. This avoids:
-        #   - SMB write-cache corruption during clip (TIFFAppendToStrip errors)
-        #   - sustained random-access reads over the network during tiling
-        #
-        # Staging root priority:
-        #   1. QGIS_LOCAL_STAGING_DIR  (explicit override)
-        #   2. UPLOAD_CACHE_ROOT       (reuse the existing E:\cache folder)
-        #   3. tempfile.gettempdir()   (last resort — may be C:\)
         local_staging_cfg = qgis_cfg.get("local_staging") or {}
         local_staging_enabled = bool(local_staging_cfg.get("enabled", True))
 
@@ -2526,9 +2455,6 @@ class RGBPipeline(
             if _explicit_dir:
                 _staging_base = Path(_explicit_dir)
             else:
-                # Reuse UPLOAD_CACHE_ROOT (E:\cache) so we never fall back
-                # to C:\ temp. UPLOAD_CACHE_ROOT is already validated in
-                # config.py so it's guaranteed to exist.
                 _upload_cache_root = (
                     (self.config.get("paths") or {}).get("upload_cache_root")
                 )
@@ -2537,7 +2463,7 @@ class RGBPipeline(
                 else:
                     _staging_base = Path(tempfile.gettempdir()) / "ah-qgis-staging"
                     logger.warning(
-                        f"UPLOAD_CACHE_ROOT not set — QGIS staging will use "
+                        f"UPLOAD_CACHE_ROOT not set - QGIS staging will use "
                         f"temp dir: {_staging_base}. Set UPLOAD_CACHE_ROOT in "
                         f".env to use your E:\\cache folder instead."
                     )
@@ -2546,227 +2472,368 @@ class RGBPipeline(
             local_staging_root = _staging_base / "tiles" / self.run_id
             logger.info(f"QGIS local staging root: {_staging_base}")
 
-        # ── Clip ─────────────────────────────────────────────────────────────
-        clipped_path: Path
-        workspace_clipped_path: Path | None = None
-        published_clipped_path: Path | None = None
-
-        if boundary_used and clip_enabled:
-            clipped_filename = self._clipped_orthomosaic_filename(
-                task_key=task_key,
-                flag=flag,
-            )
-            workspace_clipped_path = workspace_clipped_ortho_dir / clipped_filename
-            published_clipped_path = published_clipped_ortho_dir / clipped_filename
-
-            logger.info(
-                f"Clipping selected orthomosaic ({task_key}) -> {workspace_clipped_path.name}"
-            )
-
-            if mask_geojson is None:
-                raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
-
-            skip_clip = False
-            if resume and workspace_clipped_path.exists():
-                logger.info(
-                    f"Resume: clipped orthomosaic already exists "
-                    f"({workspace_clipped_path.name}); verifying before reuse..."
-                )
+        def _successful_qgis_task_keys() -> list[str]:
+            web = self.state.get("webodm") or {}
+            task_keys: list[str] = []
+            for candidate in ("task4", "task2"):
+                task_state = web.get(candidate) or {}
+                if not task_state or not bool(task_state.get("success")):
+                    continue
+                task_flag = str(task_state.get("flag") or "").strip()
+                if not task_flag:
+                    continue
                 try:
-                    tools.verify_raster_readable(
-                        workspace_clipped_path,
-                        retries=1,
-                        delay_s=2.0,
+                    self._select_existing_task_orthomosaic(
+                        task_key=candidate,
+                        flag=task_flag,
+                        boundary_used=True,
+                        require_exists=True,
                     )
-                    skip_clip = True
-                    logger.info(
-                        f"Existing clip verified OK, skipping re-clip: {workspace_clipped_path.name}"
-                    )
-                except RuntimeError as e:
-                    logger.warning(
-                        f"Existing clipped file failed verification, will re-clip: {e}"
-                    )
+                except RuntimeError:
+                    continue
+                task_keys.append(candidate)
+            return task_keys
 
-            if not skip_clip:
-                tools.clip_raster_by_mask(
-                    input_tif=source_path,
-                    mask_geojson=mask_geojson,
-                    output_tif=workspace_clipped_path,
-                    dst_nodata=dst_nodata,
-                    local_staging_dir=clip_staging_dir,
+        def _run_qgis_operation(
+            selected_input: Dict[str, Any],
+            *,
+            publish_legacy_alias: bool,
+            use_task_scoped_tiles: bool,
+        ) -> Dict[str, Any]:
+            selected = dict(selected_input)
+            task_key = str(selected.get("task_key") or "").strip()
+            flag = str(selected.get("flag") or "").strip()
+            source_path = Path(str(selected.get("source_path") or ""))
+            boundary_used = bool(selected.get("boundary_used"))
+            tile_mode = "round-corners" if boundary_used else "soft-corners"
+
+            if not task_key:
+                raise RuntimeError("Selected orthomosaic is missing task_key.")
+            if not flag:
+                raise RuntimeError("Selected orthomosaic is missing flag.")
+            if not source_path.exists():
+                raise FileNotFoundError(
+                    f"Selected orthomosaic does not exist: {source_path}"
                 )
 
-            self._replace_legacy_file_after_success(
-                source_file=workspace_clipped_path,
-                target_file=published_clipped_path,
-            )
-            clipped_path = published_clipped_path
-
-        elif boundary_used and not clip_enabled:
-            logger.warning(
-                "QGIS clip disabled (qgis.clip.enabled=false). "
-                "Using selected bounded orthomosaic directly for tile generation."
-            )
-            clipped_path = source_path
-
-        else:
             logger.info(
-                "Selected orthomosaic is unbounded. "
-                "Skipping clip and using source orthomosaic for soft-corners tiles."
+                "QGIS selected orthomosaic: "
+                f"task={task_key} | file={source_path.name} | "
+                f"boundary_used={boundary_used} | tile_mode={tile_mode}"
             )
-            clipped_path = source_path
 
-        selected["clipped_path"] = str(clipped_path)
-        selected["clipped_filename"] = clipped_path.name
-        selected["tile_mode"] = tile_mode
-
-        self.state["selected_orthomosaic"] = selected
-
-        workspace_tiles_dir = (
-            workspace_tiles_round_dir if boundary_used else workspace_tiles_soft_dir
-        )
-        published_tiles_dir = (
-            published_tiles_round_dir if boundary_used else published_tiles_soft_dir
-        )
-
-        # ── Tile generation ──────────────────────────────────────────────────
-        _staging_root: Optional[Path] = None
-        if tiles_enabled:
-            tile_resume = bool(resume)
-            tile_clean = not tile_resume
-
-            tiling_input_path = workspace_clipped_path or clipped_path
-            tiling_output_dir = workspace_tiles_dir
-            _local_tile_staging_active = False
-
-            if local_staging_root is not None:
-                _staging_root = local_staging_root 
-                try:
-                    _local_ortho_staging = local_staging_root / "ortho"
-                    tiling_input_path = tools.stage_local_copy(
-                        workspace_clipped_path or clipped_path,
-                        _local_ortho_staging,
+            current_mask_geojson: Path | None = None
+            if boundary_used:
+                if boundary_geojson is None or not boundary_geojson.exists():
+                    raise RuntimeError(
+                        "Selected orthomosaic is marked as bounded, but boundary_geojson_path "
+                        f"is missing or invalid: {boundary_geojson_path}"
                     )
-                    tiling_output_dir = local_staging_root / "tiles" / tile_mode
-                    _local_tile_staging_active = True
-                    logger.info(
-                        f"Local staging enabled: tiling will read/write on "
-                        f"local disk ({tiling_output_dir}) and copy results "
-                        f"to {workspace_tiles_dir} afterward."
-                    )
-                except Exception as e:
+                current_mask_geojson = boundary_geojson
+            else:
+                if not boundary_geojson or not boundary_geojson.exists():
                     logger.warning(
-                        f"Local staging setup failed ({e}); falling back to "
-                        f"tiling directly against {workspace_clipped_path or clipped_path}."
+                        "No boundary GeoJSON available. QGIS will skip clipping and generate soft-corners tiles."
                     )
-                    tiling_input_path = workspace_clipped_path or clipped_path
-                    tiling_output_dir = workspace_tiles_dir
-                    _local_tile_staging_active = False
-
-            logger.info(
-                f"Generating tiles ({tile_mode}) from "
-                f"{tiling_input_path.name} -> {tiling_output_dir}"
-            )
-
-            tools.generate_tiles(
-                input_tif=tiling_input_path,
-                output_dir=tiling_output_dir,
-                zoom=zoom,
-                profile=profile,
-                webviewer=webviewer,
-                copyright_text=copyright_text,
-                clean=tile_clean,
-                resume=tile_resume,
-            )
-
-            if _local_tile_staging_active:
-                logger.info(
-                    f"Copying tiles from local staging to run workspace: "
-                    f"{tiling_output_dir} -> {workspace_tiles_dir}"
-                )
-                t0 = time.perf_counter()
-                if tile_resume:
-                    workspace_tiles_dir.mkdir(parents=True, exist_ok=True)
                 else:
-                    self._reset_workspace_directory(workspace_tiles_dir)
-                shutil.copytree(
-                    tiling_output_dir,
-                    workspace_tiles_dir,
-                    dirs_exist_ok=True,
+                    logger.info(
+                        "Boundary GeoJSON exists, but selected orthomosaic is marked as unbounded. "
+                        "QGIS will use soft-corners tile workflow."
+                    )
+
+            clipped_path: Path
+            workspace_clipped_path: Path | None = None
+            published_clipped_path: Path | None = None
+
+            if boundary_used and clip_enabled:
+                clipped_filename = self._clipped_orthomosaic_filename(
+                    task_key=task_key,
+                    flag=flag,
                 )
+                workspace_clipped_path = workspace_clipped_ortho_dir / clipped_filename
+                published_clipped_path = published_clipped_ortho_dir / clipped_filename
+
                 logger.info(
-                    f"Tile copy-back complete in {time.perf_counter() - t0:.1f}s"
+                    f"Clipping selected orthomosaic ({task_key}) -> {workspace_clipped_path.name}"
                 )
 
-                # ── Cleanup local staging ────────────────────────────────────
-                # Remove all staging dirs for this run now that tiles are
-                # safely on the network share. Done here (after copy-back)
-                # so that a failed copy-back leaves the local tiles intact
-                # for manual recovery.
-                for _stale_dir, _label in [
-                    (clip_staging_dir,          "clip staging"),
-                    (_staging_root / "ortho" if _staging_root else None, "ortho staging"),
-                    (tiling_output_dir,          "tile staging"),
-                ]:
-                    if _stale_dir is not None and _stale_dir.exists():
-                        try:
-                            shutil.rmtree(_stale_dir)
-                            logger.info(f"Cleaned up {_label}: {_stale_dir}")
-                        except Exception as _e:
-                            logger.warning(
-                                f"Could not clean up {_label} ({_stale_dir}): {_e}"
-                            )
+                if current_mask_geojson is None:
+                    raise RuntimeError("QGIS clipping requires a valid boundary GeoJSON mask.")
 
-            self._replace_legacy_directory_after_success(
-                source_dir=workspace_tiles_dir,
-                target_dir=published_tiles_dir,
+                skip_clip = False
+                if resume and workspace_clipped_path.exists():
+                    logger.info(
+                        f"Resume: clipped orthomosaic already exists "
+                        f"({workspace_clipped_path.name}); verifying before reuse..."
+                    )
+                    try:
+                        tools.verify_raster_readable(
+                            workspace_clipped_path,
+                            retries=1,
+                            delay_s=2.0,
+                        )
+                        skip_clip = True
+                        logger.info(
+                            f"Existing clip verified OK, skipping re-clip: {workspace_clipped_path.name}"
+                        )
+                    except RuntimeError as e:
+                        logger.warning(
+                            f"Existing clipped file failed verification, will re-clip: {e}"
+                        )
+
+                if not skip_clip:
+                    tools.clip_raster_by_mask(
+                        input_tif=source_path,
+                        mask_geojson=current_mask_geojson,
+                        output_tif=workspace_clipped_path,
+                        dst_nodata=dst_nodata,
+                        local_staging_dir=clip_staging_dir,
+                    )
+
+                self._replace_legacy_file_after_success(
+                    source_file=workspace_clipped_path,
+                    target_file=published_clipped_path,
+                )
+                clipped_path = published_clipped_path
+            elif boundary_used and not clip_enabled:
+                logger.warning(
+                    "QGIS clip disabled (qgis.clip.enabled=false). "
+                    "Using selected bounded orthomosaic directly for tile generation."
+                )
+                clipped_path = source_path
+            else:
+                logger.info(
+                    "Selected orthomosaic is unbounded. "
+                    "Skipping clip and using source orthomosaic for soft-corners tiles."
+                )
+                clipped_path = source_path
+
+            selected["clipped_path"] = str(clipped_path)
+            selected["clipped_filename"] = clipped_path.name
+            selected["tile_mode"] = tile_mode
+
+            workspace_tiles_root = (
+                workspace_tiles_round_dir if boundary_used else workspace_tiles_soft_dir
             )
-            selected["tiles_dir"] = str(published_tiles_dir)
-        else:
-            logger.warning(
-                "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation."
+            published_tiles_root = (
+                published_tiles_round_dir if boundary_used else published_tiles_soft_dir
             )
-            selected["tiles_dir"] = None
+            workspace_tiles_dir = (
+                workspace_tiles_root / task_key if use_task_scoped_tiles else workspace_tiles_root
+            )
+            published_tiles_dir = (
+                published_tiles_root / task_key if use_task_scoped_tiles else published_tiles_root
+            )
+            legacy_tiles_dir = published_tiles_root
 
-        self.state["selected_orthomosaic"] = selected
+            _staging_root: Optional[Path] = None
+            if tiles_enabled:
+                tile_resume = bool(resume)
+                tile_clean = not tile_resume
 
-        return {
-            "boundary_geojson": str(boundary_geojson) if boundary_geojson else None,
-            "selected_webodm_task": task_key,
-            "selected_orthomosaic": selected,
-            "tools": {
-                "gdalwarp_path": gdalwarp_path,
-                "gdal2tiles_path": gdal2tiles_path,
-            },
-            "clip": {
-                "enabled": clip_enabled,
-                "dst_nodata": dst_nodata,
-                "input": str(source_path),
-                "output": str(clipped_path),
-            },
-            "tiles": {
-                "enabled": tiles_enabled,
-                "mode": tile_mode,
-                "output_dir": str(published_tiles_dir) if tiles_enabled else None,
-                "zoom": zoom,
-                "profile": profile,
-                "webviewer": webviewer,
-                "copyright": copyright_text,
-            },
-            "workspace": {
-                "qgis_clipped_ortho": (
-                    str(workspace_clipped_path) if workspace_clipped_path else None
-                ),
-                "tiles_dir": str(workspace_tiles_dir) if tiles_enabled else None,
-            },
-            "published": {
-                "qgis_clipped_ortho": (
-                    str(published_clipped_path) if published_clipped_path else None
-                ),
-                "tiles_dir": str(published_tiles_dir) if tiles_enabled else None,
-            },
+                tiling_input_path = workspace_clipped_path or clipped_path
+                tiling_output_dir = workspace_tiles_dir
+                _local_tile_staging_active = False
+
+                if local_staging_root is not None:
+                    _staging_root = local_staging_root / task_key
+                    try:
+                        _local_ortho_staging = _staging_root / "ortho"
+                        tiling_input_path = tools.stage_local_copy(
+                            workspace_clipped_path or clipped_path,
+                            _local_ortho_staging,
+                        )
+                        tiling_output_dir = _staging_root / "tiles" / tile_mode
+                        _local_tile_staging_active = True
+                        logger.info(
+                            f"Local staging enabled: tiling will read/write on "
+                            f"local disk ({tiling_output_dir}) and copy results "
+                            f"to {workspace_tiles_dir} afterward."
+                        )
+                    except Exception as e:
+                        logger.warning(
+                            f"Local staging setup failed ({e}); falling back to "
+                            f"tiling directly against {workspace_clipped_path or clipped_path}."
+                        )
+                        tiling_input_path = workspace_clipped_path or clipped_path
+                        tiling_output_dir = workspace_tiles_dir
+                        _local_tile_staging_active = False
+
+                logger.info(
+                    f"Generating tiles ({tile_mode}) from "
+                    f"{tiling_input_path.name} -> {tiling_output_dir}"
+                )
+
+                tools.generate_tiles(
+                    input_tif=tiling_input_path,
+                    output_dir=tiling_output_dir,
+                    zoom=zoom,
+                    profile=profile,
+                    webviewer=webviewer,
+                    copyright_text=copyright_text,
+                    clean=tile_clean,
+                    resume=tile_resume,
+                )
+
+                if _local_tile_staging_active:
+                    logger.info(
+                        f"Copying tiles from local staging to run workspace: "
+                        f"{tiling_output_dir} -> {workspace_tiles_dir}"
+                    )
+                    t0 = time.perf_counter()
+                    if tile_resume:
+                        workspace_tiles_dir.mkdir(parents=True, exist_ok=True)
+                    else:
+                        self._reset_workspace_directory(workspace_tiles_dir)
+                    shutil.copytree(
+                        tiling_output_dir,
+                        workspace_tiles_dir,
+                        dirs_exist_ok=True,
+                    )
+                    logger.info(
+                        f"Tile copy-back complete in {time.perf_counter() - t0:.1f}s"
+                    )
+
+                    for _stale_dir, _label in [
+                        (clip_staging_dir, "clip staging"),
+                        (_staging_root / "ortho" if _staging_root else None, "ortho staging"),
+                        (tiling_output_dir, "tile staging"),
+                    ]:
+                        if _stale_dir is not None and _stale_dir.exists():
+                            try:
+                                shutil.rmtree(_stale_dir)
+                                logger.info(f"Cleaned up {_label}: {_stale_dir}")
+                            except Exception as _e:
+                                logger.warning(
+                                    f"Could not clean up {_label} ({_stale_dir}): {_e}"
+                                )
+
+                self._replace_legacy_directory_after_success(
+                    source_dir=workspace_tiles_dir,
+                    target_dir=published_tiles_dir,
+                )
+                if publish_legacy_alias and published_tiles_dir != legacy_tiles_dir:
+                    self._replace_legacy_directory_after_success(
+                        source_dir=workspace_tiles_dir,
+                        target_dir=legacy_tiles_dir,
+                    )
+                selected["tiles_dir"] = str(
+                    legacy_tiles_dir if publish_legacy_alias else published_tiles_dir
+                )
+            else:
+                logger.warning(
+                    "QGIS tiles disabled (qgis.tiles.enabled=false). Skipping tile generation."
+                )
+                selected["tiles_dir"] = None
+
+            return {
+                "boundary_geojson": str(boundary_geojson) if boundary_geojson else None,
+                "selected_webodm_task": task_key,
+                "selected_orthomosaic": selected,
+                "tools": {
+                    "gdalwarp_path": gdalwarp_path,
+                    "gdal2tiles_path": gdal2tiles_path,
+                },
+                "clip": {
+                    "enabled": clip_enabled,
+                    "dst_nodata": dst_nodata,
+                    "input": str(source_path),
+                    "output": str(clipped_path),
+                },
+                "tiles": {
+                    "enabled": tiles_enabled,
+                    "mode": tile_mode,
+                    "output_dir": (
+                        str(legacy_tiles_dir if publish_legacy_alias else published_tiles_dir)
+                        if tiles_enabled
+                        else None
+                    ),
+                    "zoom": zoom,
+                    "profile": profile,
+                    "webviewer": webviewer,
+                    "copyright": copyright_text,
+                },
+                "workspace": {
+                    "qgis_clipped_ortho": (
+                        str(workspace_clipped_path) if workspace_clipped_path else None
+                    ),
+                    "tiles_dir": str(workspace_tiles_dir) if tiles_enabled else None,
+                },
+                "published": {
+                    "qgis_clipped_ortho": (
+                        str(published_clipped_path) if published_clipped_path else None
+                    ),
+                    "tiles_dir": (
+                        str(legacy_tiles_dir if publish_legacy_alias else published_tiles_dir)
+                        if tiles_enabled
+                        else None
+                    ),
+                },
+                "published_operation": {
+                    "qgis_clipped_ortho": (
+                        str(published_clipped_path) if published_clipped_path else None
+                    ),
+                    "tiles_dir": str(published_tiles_dir) if tiles_enabled else None,
+                },
+            }
+
+        selected = self._get_selected_orthomosaic()
+        successful_task_keys = _successful_qgis_task_keys()
+        selected_task_key = str(selected.get("task_key") or "").strip()
+        multi_operation_mode = (
+            len(successful_task_keys) > 1 and selected_task_key in successful_task_keys
+        )
+
+        if not multi_operation_mode:
+            result = _run_qgis_operation(
+                selected,
+                publish_legacy_alias=True,
+                use_task_scoped_tiles=False,
+            )
+            self.state["selected_webodm_task"] = result["selected_webodm_task"]
+            self.state["selected_orthomosaic"] = result["selected_orthomosaic"]
+            return result
+
+        web = self.state.get("webodm") or {}
+        operations: Dict[str, Any] = {}
+        final_result: Dict[str, Any] | None = None
+
+        for index, task_key in enumerate(successful_task_keys):
+            task_state = web.get(task_key) or {}
+            task_flag = str(task_state.get("flag") or "").strip()
+            selected_for_task = self._select_existing_task_orthomosaic(
+                task_key=task_key,
+                flag=task_flag,
+                boundary_used=True,
+                require_exists=True,
+            )
+            op_result = _run_qgis_operation(
+                selected_for_task,
+                publish_legacy_alias=False,
+                use_task_scoped_tiles=True,
+            )
+            operations[task_key] = op_result
+            final_result = op_result
+
+        if final_result is None:
+            raise RuntimeError(
+                "QGIS could not identify a successful WebODM operation to process."
+            )
+
+        final_result = dict(final_result)
+        final_result["operations"] = operations
+        final_result["workspace"] = dict(final_result.get("workspace") or {})
+        final_result["published"] = dict(final_result.get("published") or {})
+        final_result["workspace"]["operations"] = {
+            key: value.get("workspace") for key, value in operations.items()
         }
-    
+        final_result["published"]["operations"] = {
+            key: value.get("published_operation") for key, value in operations.items()
+        }
+        self.state["selected_webodm_task"] = final_result["selected_webodm_task"]
+        self.state["selected_orthomosaic"] = final_result["selected_orthomosaic"]
+        return final_result
+
     def run_webodm_fallback_task(
         self,
         *,
@@ -3384,15 +3451,23 @@ class RGBPipeline(
                             f"Pipeline stopped: Quality Gate failed ({reason})."
                         )
 
+            final_status = str(self.state.get("run_status_override") or "completed")
             self.state["success"] = True
+            self.state["status"] = final_status
             total_runtime = time.perf_counter() - total_start
 
             self.repo.mark_run_finished(
-                self.run_id, success=True, total_runtime_seconds=total_runtime
+                self.run_id,
+                success=True,
+                total_runtime_seconds=total_runtime,
+                status=final_status,
             )
             if self.survey_id:
                 self.repo.mark_survey_finished(
-                    self.survey_id, success=True, total_runtime_seconds=total_runtime
+                    self.survey_id,
+                    success=True,
+                    total_runtime_seconds=total_runtime,
+                    status=final_status,
                 )
 
             self.control.cleanup_flags()
@@ -3401,6 +3476,7 @@ class RGBPipeline(
                 "run_completed",
                 elapsed_seconds=f"{total_runtime:.2f}",
                 survey_id=self.survey_id,
+                status=final_status,
             )
             pipeline_footer(pipeline_logger, total_runtime, success=True)
             return self.state

@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import logging
@@ -55,6 +55,11 @@ def main() -> None:
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--survey-id", default=None, help="Optional fixed survey ID, e.g. AH-026002")
     parser.add_argument("--node-id", type=int, default=None)
+    parser.add_argument(
+        "--disable-cross-run",
+        action="store_true",
+        help="Disable the cross-run filter stage and copy raw images directly into path output.",
+    )
     parser.add_argument("--force-stage", action="append", default=[], help="Force a completed stage to rerun during resume. Can be used multiple times.",)
     parser.add_argument(
         "--activate-publication",
@@ -88,6 +93,11 @@ def main() -> None:
         action="store_true",
         help="Run WebODM Task 4 only (bounded orthomosaic, default)",
     )
+    task_group.add_argument(
+        "--both-tasks",
+        action="store_true",
+        help="Run WebODM Task 4 then Task 2 (Orthomosaic + 3D).",
+    )
 
     args = parser.parse_args()
 
@@ -119,6 +129,9 @@ def main() -> None:
     if args.task2:
         webodm_mode = "task2"
         mode_display = "Task 2 only (3d)"
+    elif args.both_tasks:
+        webodm_mode = "both"
+        mode_display = "Orthomosaic + 3D (Task 4 then Task 2)"
     elif args.task4:
         webodm_mode = "task4"
         mode_display = "Task 4 only (bounded orthomosaic)"
@@ -133,6 +146,7 @@ def main() -> None:
     print(f"Year         : {args.year}")
     print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
     print(f"WebODM mode  : {mode_display}")
+    print(f"Cross-run    : {'disabled' if args.disable_cross_run else 'enabled'}")
     print("===================================\n")
 
     from pipelines.rgb_pipeline import RGBPipeline
@@ -149,6 +163,7 @@ def main() -> None:
         # production mode
         use_year_subdir_override=True,
         export_name_overrides=None, # using naming templates
+        crossrun_enabled_override=False if args.disable_cross_run else None,
 
         # WebODM task mode
         skip_task1_webodm=True,
@@ -168,9 +183,10 @@ def main() -> None:
     print("\n===== PIPELINE RESULT =====")
     print(f"Success : {result.get('success')}")
     print(f"Run ID  : {result.get('run_id')}")
-    print(f"Error   : {result.get('error', 'â€”')}")
+    print(f"Error   : {result.get('error', '—')}")
     print("===========================\n")
 
 
 if __name__ == "__main__":
     main()
+

@@ -49,3 +49,5 @@ data/*.db-wal
 
 address this issues.txt
 codes.txt
+data/workspaces/
+data/*.flag
