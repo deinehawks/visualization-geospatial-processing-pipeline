@@ -454,15 +454,27 @@ def prepare_webodm_ortho_context(pipeline, temporary_path_layout, survey_id="TES
 
 
 
-def prepare_qgis_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-QGIS"):
+def prepare_qgis_context(
+    pipeline,
+    temporary_path_layout,
+    survey_id="TEST-SURVEY-QGIS",
+    *,
+    task_key="task2",
+    task_label="t2",
+    task_id="task-0001",
+    flag="xcb",
+    boundary_used=True,
+):
     survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
-    source_ortho = survey_path / "ortho" / "orthomosaic--xcb-t2.tif"
+    source_ortho = survey_path / "ortho" / f"orthomosaic--{flag}-{task_label}.tif"
     source_ortho.parent.mkdir(parents=True)
     source_ortho.write_text("source ortho", encoding="utf-8")
 
     boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
     boundary_path.parent.mkdir(parents=True)
     boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+
+    tile_mode = "round-corners" if boundary_used else "soft-corners"
 
     pipeline._set_survey_artifact_context(survey_id, survey_path)
     pipeline.state.update(
@@ -482,17 +494,17 @@ def prepare_qgis_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY
             },
             "boundary_available": True,
             "boundary_geojson_path": str(boundary_path),
-            "selected_webodm_task": "task2",
+            "selected_webodm_task": task_key,
             "selected_orthomosaic": {
-                "task_key": "task2",
-                "task_label": "t2",
-                "task_id": "task-0001",
-                "task_name": "TEST-SURVEY-QGIS-RGB--xcb-t2",
-                "flag": "xcb",
+                "task_key": task_key,
+                "task_label": task_label,
+                "task_id": task_id,
+                "task_name": f"{survey_id}-RGB--{flag}-{task_label}",
+                "flag": flag,
                 "source_path": str(source_ortho),
                 "source_filename": source_ortho.name,
-                "boundary_used": True,
-                "tile_mode": "round-corners",
+                "boundary_used": boundary_used,
+                "tile_mode": tile_mode,
                 "fallback_used": False,
                 "fallback_reason": None,
             },
@@ -1541,6 +1553,160 @@ def test_qgis_outputs_workspace_then_mirrors_legacy_paths(
         assert_within(path_to_check, temporary_path_layout.application_root)
 
 
+def test_qgis_outputs_workspace_then_mirrors_legacy_paths_for_task4_selection(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, source_ortho, boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+        survey_id="TEST-SURVEY-QGIS-T4",
+        task_key="task4",
+        task_label="t4",
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = False
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    legacy_clipped = (
+        survey_path / "qgis" / "clipped" / "ortho" / "orthomosaic-clipped--xcb-t4.tif"
+    )
+    legacy_clipped.parent.mkdir(parents=True)
+    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
+    legacy_clipped.write_text("old clipped", encoding="utf-8")
+    legacy_stale_tile = legacy_tiles / "stale.png"
+    legacy_stale_tile.parent.mkdir(parents=True)
+    legacy_stale_tile.write_text("old tile", encoding="utf-8")
+
+    result = pipeline.stage_qgis()
+
+    workspace_clipped = (
+        pipeline.workspace_layout.qgis_clipped_ortho / "orthomosaic-clipped--xcb-t4.tif"
+    )
+    workspace_tile = pipeline.workspace_layout.qgis_tiles_round / "12" / "345" / "678.png"
+    legacy_tile = legacy_tiles / "12" / "345" / "678.png"
+    fake_tools = FakeQGISTools.instances[-1]
+
+    assert [call["method"] for call in fake_tools.calls] == [
+        "clip_raster_by_mask",
+        "generate_tiles",
+    ]
+    assert fake_tools.calls[0]["input_tif"] == source_ortho
+    assert fake_tools.calls[0]["mask_geojson"] == boundary_path
+    assert fake_tools.calls[0]["output_tif"] == workspace_clipped
+    assert fake_tools.calls[1]["input_tif"] == workspace_clipped
+    assert result["selected_webodm_task"] == "task4"
+    assert workspace_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert legacy_clipped.read_text(encoding="utf-8") == "workspace clipped ortho"
+    assert workspace_tile.read_text(encoding="utf-8") == "workspace tile"
+    assert legacy_tile.read_text(encoding="utf-8") == "workspace tile"
+    assert not legacy_stale_tile.exists()
+
+
+def test_qgis_both_mode_runs_once_per_successful_webodm_operation(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_path, task4_source, _boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+        survey_id="TEST-SURVEY-QGIS-BOTH",
+        task_key="task4",
+        task_label="t4",
+        task_id="task-0004",
+    )
+    task2_source = survey_path / "ortho" / "orthomosaic--xcb-t2.tif"
+    task2_source.write_text("source ortho task2", encoding="utf-8")
+    pipeline.state["webodm"] = {
+        "task4": {
+            "id": "task-0004",
+            "name": "TEST-SURVEY-QGIS-BOTH-RGB--xcb-t4",
+            "success": True,
+            "flag": "xcb",
+            "task_label": "t4",
+        },
+        "task2": {
+            "id": "task-0002",
+            "name": "TEST-SURVEY-QGIS-BOTH-RGB--xcb-t2",
+            "success": True,
+            "flag": "xcb",
+            "task_label": "t2",
+        },
+        "downloads": {
+            "task4": {"orthomosaic": str(task4_source)},
+            "task2": {"orthomosaic": str(task2_source)},
+        },
+    }
+    pipeline.state["selected_webodm_task"] = "task2"
+    pipeline.state["selected_orthomosaic"] = {
+        "task_key": "task2",
+        "task_label": "t2",
+        "task_id": "task-0002",
+        "task_name": "TEST-SURVEY-QGIS-BOTH-RGB--xcb-t2",
+        "flag": "xcb",
+        "source_path": str(task2_source),
+        "source_filename": task2_source.name,
+        "boundary_used": True,
+        "tile_mode": "round-corners",
+        "fallback_used": False,
+        "fallback_reason": None,
+    }
+
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = False
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    result = pipeline.stage_qgis()
+
+    fake_tools = FakeQGISTools.instances[-1]
+    workspace_task4_tiles = pipeline.workspace_layout.qgis_tiles_round / "task4"
+    workspace_task2_tiles = pipeline.workspace_layout.qgis_tiles_round / "task2"
+    published_task4_tiles = survey_path / "tiles" / "ortho" / "round-corners" / "task4"
+    published_task2_tiles = survey_path / "tiles" / "ortho" / "round-corners" / "task2"
+
+    assert [call["method"] for call in fake_tools.calls] == [
+        "clip_raster_by_mask",
+        "generate_tiles",
+        "clip_raster_by_mask",
+        "generate_tiles",
+    ]
+    assert fake_tools.calls[0]["input_tif"] == task4_source
+    assert fake_tools.calls[2]["input_tif"] == task2_source
+    assert result["selected_webodm_task"] == "task2"
+    assert sorted(result["operations"]) == ["task2", "task4"]
+    assert result["operations"]["task4"]["workspace"]["tiles_dir"] == str(workspace_task4_tiles)
+    assert result["operations"]["task2"]["workspace"]["tiles_dir"] == str(workspace_task2_tiles)
+    assert result["published"]["operations"]["task4"]["tiles_dir"] == str(published_task4_tiles)
+    assert result["published"]["operations"]["task2"]["tiles_dir"] == str(published_task2_tiles)
+    assert result["selected_orthomosaic"]["tiles_dir"] == str(published_task2_tiles)
+    assert (workspace_task4_tiles / "12" / "345" / "678.png").is_file()
+    assert (workspace_task2_tiles / "12" / "345" / "678.png").is_file()
+    assert (published_task4_tiles / "12" / "345" / "678.png").is_file()
+    assert (published_task2_tiles / "12" / "345" / "678.png").is_file()
+    assert pipeline.state["selected_webodm_task"] == "task2"
+    assert pipeline.state["selected_orthomosaic"]["source_path"] == str(task2_source)
+
+
 def test_qgis_clip_failure_leaves_legacy_outputs_untouched(
     monkeypatch,
     temporary_path_layout,
@@ -1568,7 +1734,6 @@ def test_qgis_clip_failure_leaves_legacy_outputs_untouched(
     )
     legacy_clipped.parent.mkdir(parents=True)
     legacy_clipped.write_text("old clipped", encoding="utf-8")
-    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
     legacy_tile = legacy_tiles / "keep.png"
     legacy_tile.parent.mkdir(parents=True)
     legacy_tile.write_text("old tile", encoding="utf-8")
@@ -2511,3 +2676,99 @@ def test_publication_dry_run_blocks_non_workspace_source(
     assert staging_result["artifact_count"] == 0
     assert "not run-workspace owned" in staging_result["blocked_reasons"][0]
     assert not (pipeline.workspace_layout.publish / "staged" / "publication.json").exists()
+
+
+def test_webodm_both_mode_runs_task4_before_task2(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = False
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    result = pipeline.stage_webodm()
+
+    create_task_calls = fake_webodm.calls_for("create_task_with_images")
+    assert [call.args[1] for call in create_task_calls] == [
+        result["task4"]["name"],
+        result["task2"]["name"],
+    ]
+    assert result["task4"]["id"] == "task-0001"
+    assert result["task2"]["id"] == "task-0002"
+
+
+def test_run_marks_both_mode_task4_success_task2_failure_as_partially_completed(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    pipeline._preflight_stage = lambda stage_name: None
+    pipeline.control.start_hotkeys = lambda logger: None
+
+    survey_id = "TEST-SURVEY-BOTH"
+    survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    pipeline._set_survey_artifact_context(survey_id, survey_path)
+    pipeline.survey_id = survey_id
+
+    def segregation():
+        repository.attach_survey_id(RUN_ID, survey_id)
+        return {
+            "survey_id": survey_id,
+            "survey_path": str(survey_path),
+            "dirs": {"path": str(survey_path / "images" / "path")},
+        }
+
+    def cross_run():
+        return {"crossrun_flag": "c"}
+
+    def kml():
+        return {
+            "boundary_available": True,
+            "boundary_geojson_path": str(survey_path / "boundary" / f"{survey_id}.geojson"),
+        }
+
+    def webodm():
+        pipeline.state["run_status_override"] = "partially_completed"
+        pipeline.state["selected_webodm_task"] = "task4"
+        pipeline.state["selected_orthomosaic"] = {"source_path": str(survey_path / "ortho" / "task4.tif")}
+        return {
+            "task4": {"id": "task4-1", "name": "task4", "success": True},
+            "task2": {"id": "task2-1", "name": "task2", "success": False},
+            "run_status": "partially_completed",
+            "selected_webodm_task": "task4",
+            "selected_orthomosaic": {"source_path": str(survey_path / "ortho" / "task4.tif")},
+        }
+
+    pipeline.stage_data_segregation = segregation
+    pipeline.stage_cross_run_image_filter = cross_run
+    pipeline.stage_kml_boundary = kml
+    pipeline.stage_webodm = webodm
+    pipeline.stage_quality_gate = lambda: {"passed": True, "selected_webodm_task": "task4", "selected_orthomosaic": {"source_path": str(survey_path / "ortho" / "task4.tif")}}
+    pipeline.stage_qgis = lambda resume=False: {"selected_webodm_task": "task4"}
+
+    result = pipeline.run(raise_on_error=True, resume=False)
+
+    assert result["status"] == "partially_completed"
+    assert repository.get_run(RUN_ID)["status"] == "partially_completed"
+    assert repository.get_run(RUN_ID)["survey_id"] == survey_id
+

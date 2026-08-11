@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import sys
 import types
@@ -58,6 +58,33 @@ def test_cli_leaves_publication_activation_disabled_by_default(monkeypatch, tmp_
 
     [pipeline] = FakeRGBPipeline.instances
     assert pipeline.run_kwargs["publication_confirmation"] is None
+    assert pipeline.init_kwargs["crossrun_enabled_override"] is None
+
+
+def test_cli_disables_cross_run_when_flag_is_present(monkeypatch, tmp_path):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", "--disable-cross-run"],
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.init_kwargs["crossrun_enabled_override"] is False
+
+
+def test_cli_selects_both_tasks_mode_when_flag_is_present(monkeypatch, tmp_path):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", "--both-tasks"],
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.init_kwargs["webodm_mode"] == "both"
 
 
 def test_cli_passes_publication_confirmation_when_activation_is_explicit(
@@ -111,3 +138,4 @@ def test_cli_rejects_half_enabled_publication_activation(
     assert exc_info.value.code == 2
     assert expected_message in capsys.readouterr().err
     assert FakeRGBPipeline.instances == []
+

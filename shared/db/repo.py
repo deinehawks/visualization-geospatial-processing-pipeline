@@ -88,9 +88,16 @@ class PipelineRepo:
             )
             conn.commit()
 
-    def mark_run_finished(self, run_id: str, success: bool, total_runtime_seconds: float) -> None:
+    def mark_run_finished(
+        self,
+        run_id: str,
+        success: bool,
+        total_runtime_seconds: float,
+        *,
+        status: Optional[str] = None,
+    ) -> None:
         now = utc_now_iso()
-        status = "completed" if success else "failed"
+        status = status or ("completed" if success else "failed")
         with connect(self.db_file) as conn:
             conn.execute(
                 """
@@ -168,9 +175,16 @@ class PipelineRepo:
             )
             conn.commit()
 
-    def mark_survey_finished(self, survey_id: str, success: bool, total_runtime_seconds: float) -> None:
+    def mark_survey_finished(
+        self,
+        survey_id: str,
+        success: bool,
+        total_runtime_seconds: float,
+        *,
+        status: Optional[str] = None,
+    ) -> None:
         now = utc_now_iso()
-        status = "completed" if success else "failed"
+        status = status or ("completed" if success else "failed")
         with connect(self.db_file) as conn:
             conn.execute(
                 """

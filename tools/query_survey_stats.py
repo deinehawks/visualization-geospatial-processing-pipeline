@@ -6,9 +6,9 @@ Query runtime statistics and resume history for one or more survey IDs
 from pipeline.db and the shared log files.
 
 Usage:
-    python query_survey_stats.py
-    python query_survey_stats.py --surveys AH-026005 AH-026006
-    python query_survey_stats.py --db path/to/pipeline.db --logs-dir path/to/logs
+    python tools/query_survey_stats.py
+    python tools/query_survey_stats.py --surveys AH-026005 AH-026006
+    python tools/query_survey_stats.py --db path/to/pipeline.db --logs-dir path/to/logs
 
 Output: rich console tables — no files written.
 """
@@ -30,9 +30,15 @@ from rich.rule import Rule
 from rich.table import Table
 from rich import box
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+# Defaults
+DEFAULT_DB      = REPO_ROOT / "data" / "pipeline.db"
+DEFAULT_LOGS    = REPO_ROOT / "data" / "logs"
+
 # ── defaults ────────────────────────────────────────────────────────────────
-DEFAULT_DB      = Path("data/pipeline.db")
-DEFAULT_LOGS    = Path("data/logs")
 DEFAULT_SURVEYS = [
     "AH-026010", "AH-026011", "AH-026012", "AH-026013", "AH-026014", "AH-026015", "AH-026016", 
     "AH-026017", "AH-026018", "AH-026019", "AH-026020", "AH-026021", "AH-026022", "AH-026023",
