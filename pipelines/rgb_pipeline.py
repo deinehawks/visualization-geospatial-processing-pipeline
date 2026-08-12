@@ -969,10 +969,11 @@ class RGBPipeline(
 
         temp_target = target_parent / f".{target.name}.tmp-{self.run_id}"
         backup_target = target_parent / f".{target.name}.bak-{self.run_id}"
-        if temp_target.exists() or backup_target.exists():
-            raise FileExistsError(
-                f"Stale publish mirror path exists: {temp_target} or {backup_target}"
-            )
+        self._reconcile_stale_legacy_directory_mirror(
+            target=target,
+            temp_target=temp_target,
+            backup_target=backup_target,
+        )
 
         shutil.copytree(source, temp_target)
         try:
@@ -986,6 +987,31 @@ class RGBPipeline(
         else:
             if backup_target.exists():
                 shutil.rmtree(backup_target)
+
+    def _reconcile_stale_legacy_directory_mirror(
+        self,
+        *,
+        target: Path,
+        temp_target: Path,
+        backup_target: Path,
+    ) -> None:
+        if temp_target.exists():
+            if not temp_target.is_dir():
+                raise NotADirectoryError(
+                    f"Stale publish mirror temp path is not a directory: {temp_target}"
+                )
+            shutil.rmtree(temp_target)
+
+        if not backup_target.exists():
+            return
+        if not backup_target.is_dir():
+            raise NotADirectoryError(
+                f"Stale publish mirror backup path is not a directory: {backup_target}"
+            )
+        if target.exists():
+            shutil.rmtree(backup_target)
+        else:
+            backup_target.rename(target)
 
     def _replace_legacy_file_after_success(
         self,
@@ -1005,10 +1031,11 @@ class RGBPipeline(
 
         temp_target = target_parent / f".{target.name}.tmp-{self.run_id}"
         backup_target = target_parent / f".{target.name}.bak-{self.run_id}"
-        if temp_target.exists() or backup_target.exists():
-            raise FileExistsError(
-                f"Stale publish mirror path exists: {temp_target} or {backup_target}"
-            )
+        self._reconcile_stale_legacy_file_mirror(
+            target=target,
+            temp_target=temp_target,
+            backup_target=backup_target,
+        )
 
         shutil.copy2(source, temp_target)
         try:
@@ -1022,6 +1049,31 @@ class RGBPipeline(
         else:
             if backup_target.exists():
                 backup_target.unlink()
+
+    def _reconcile_stale_legacy_file_mirror(
+        self,
+        *,
+        target: Path,
+        temp_target: Path,
+        backup_target: Path,
+    ) -> None:
+        if temp_target.exists():
+            if not temp_target.is_file():
+                raise IsADirectoryError(
+                    f"Stale publish mirror temp path is not a file: {temp_target}"
+                )
+            temp_target.unlink()
+
+        if not backup_target.exists():
+            return
+        if not backup_target.is_file():
+            raise IsADirectoryError(
+                f"Stale publish mirror backup path is not a file: {backup_target}"
+            )
+        if target.exists():
+            backup_target.unlink()
+        else:
+            backup_target.rename(target)
 
     def _export_orthomosaic_to_workspace(
         self,

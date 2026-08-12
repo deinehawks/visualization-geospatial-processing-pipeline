@@ -567,6 +567,172 @@ def enable_only_orthomosaic_export(pipeline):
     }
 
 
+
+def test_legacy_directory_mirror_removes_same_run_temp_before_replace(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    source = pipeline.workspace_layout.root / "qgis" / "tiles" / "round-corners"
+    source_tile = source / "12" / "345" / "678.png"
+    source_tile.parent.mkdir(parents=True)
+    source_tile.write_text("workspace tile", encoding="utf-8")
+    target = (
+        temporary_path_layout.surveys_dir
+        / "2026"
+        / "TEST-MIRROR-DIR"
+        / "rgb"
+        / "tiles"
+        / "ortho"
+        / "round-corners"
+    )
+    old_tile = target / "old.png"
+    old_tile.parent.mkdir(parents=True)
+    old_tile.write_text("old tile", encoding="utf-8")
+    stale_temp = target.parent / f".{target.name}.tmp-{pipeline.run_id}"
+    stale_temp_tile = stale_temp / "stale.png"
+    stale_temp_tile.parent.mkdir(parents=True)
+    stale_temp_tile.write_text("stale temp", encoding="utf-8")
+
+    pipeline._replace_legacy_directory_after_success(
+        source_dir=source,
+        target_dir=target,
+    )
+
+    assert (target / "12" / "345" / "678.png").read_text(encoding="utf-8") == (
+        "workspace tile"
+    )
+    assert not old_tile.exists()
+    assert not stale_temp.exists()
+    assert not (target.parent / f".{target.name}.bak-{pipeline.run_id}").exists()
+    assert_within(target, temporary_path_layout.application_root)
+
+
+def test_legacy_directory_mirror_restores_same_run_backup_before_replace(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    source = pipeline.workspace_layout.root / "qgis" / "tiles" / "round-corners"
+    source_tile = source / "12" / "345" / "678.png"
+    source_tile.parent.mkdir(parents=True)
+    source_tile.write_text("workspace tile", encoding="utf-8")
+    target = (
+        temporary_path_layout.surveys_dir
+        / "2026"
+        / "TEST-MIRROR-DIR-BAK"
+        / "rgb"
+        / "tiles"
+        / "ortho"
+        / "round-corners"
+    )
+    backup = target.parent / f".{target.name}.bak-{pipeline.run_id}"
+    backup_tile = backup / "old.png"
+    backup_tile.parent.mkdir(parents=True)
+    backup_tile.write_text("backup tile", encoding="utf-8")
+
+    pipeline._replace_legacy_directory_after_success(
+        source_dir=source,
+        target_dir=target,
+    )
+
+    assert (target / "12" / "345" / "678.png").read_text(encoding="utf-8") == (
+        "workspace tile"
+    )
+    assert not (target / "old.png").exists()
+    assert not backup.exists()
+    assert not (target.parent / f".{target.name}.tmp-{pipeline.run_id}").exists()
+    assert_within(target, temporary_path_layout.application_root)
+
+
+def test_legacy_file_mirror_removes_same_run_temp_before_replace(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    source = pipeline.workspace_layout.root / "qgis" / "clipped" / "ortho.tif"
+    source.parent.mkdir(parents=True)
+    source.write_text("workspace ortho", encoding="utf-8")
+    target = (
+        temporary_path_layout.surveys_dir
+        / "2026"
+        / "TEST-MIRROR-FILE"
+        / "rgb"
+        / "qgis"
+        / "clipped"
+        / "ortho.tif"
+    )
+    target.parent.mkdir(parents=True)
+    target.write_text("old ortho", encoding="utf-8")
+    stale_temp = target.parent / f".{target.name}.tmp-{pipeline.run_id}"
+    stale_temp.write_text("stale temp", encoding="utf-8")
+
+    pipeline._replace_legacy_file_after_success(
+        source_file=source,
+        target_file=target,
+    )
+
+    assert target.read_text(encoding="utf-8") == "workspace ortho"
+    assert not stale_temp.exists()
+    assert not (target.parent / f".{target.name}.bak-{pipeline.run_id}").exists()
+    assert_within(target, temporary_path_layout.application_root)
+
+
+def test_legacy_file_mirror_restores_same_run_backup_before_replace(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    source = pipeline.workspace_layout.root / "qgis" / "clipped" / "ortho.tif"
+    source.parent.mkdir(parents=True)
+    source.write_text("workspace ortho", encoding="utf-8")
+    target = (
+        temporary_path_layout.surveys_dir
+        / "2026"
+        / "TEST-MIRROR-FILE-BAK"
+        / "rgb"
+        / "qgis"
+        / "clipped"
+        / "ortho.tif"
+    )
+    backup = target.parent / f".{target.name}.bak-{pipeline.run_id}"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("backup ortho", encoding="utf-8")
+
+    pipeline._replace_legacy_file_after_success(
+        source_file=source,
+        target_file=target,
+    )
+
+    assert target.read_text(encoding="utf-8") == "workspace ortho"
+    assert not backup.exists()
+    assert not (target.parent / f".{target.name}.tmp-{pipeline.run_id}").exists()
+    assert_within(target, temporary_path_layout.application_root)
+
 def test_rgb_pipeline_executes_one_selected_stage_successfully(
     monkeypatch,
     temporary_path_layout,
@@ -1734,6 +1900,7 @@ def test_qgis_clip_failure_leaves_legacy_outputs_untouched(
     )
     legacy_clipped.parent.mkdir(parents=True)
     legacy_clipped.write_text("old clipped", encoding="utf-8")
+    legacy_tiles = survey_path / "tiles" / "ortho" / "round-corners"
     legacy_tile = legacy_tiles / "keep.png"
     legacy_tile.parent.mkdir(parents=True)
     legacy_tile.write_text("old tile", encoding="utf-8")

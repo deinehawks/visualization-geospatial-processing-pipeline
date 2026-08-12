@@ -1,4 +1,4 @@
-﻿# Test Strategy for the Scalability and Concurrency Refactor
+# Test Strategy for the Scalability and Concurrency Refactor
 
 ## Safety objective
 
@@ -1181,3 +1181,24 @@ Validation for this slice:
 - `python -m pytest -q tests\test_main_publication_activation_cli.py tests\test_main_resume_source.py` - 7 passed.
 
 The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover stale locks, run cleanup, or mutate production survey roots.
+## Phase 3 same-run legacy mirror recovery coverage
+
+Date: 2026-08-12.
+
+`tests/test_rgb_pipeline_single_stage_execution.py` now covers same-run stale legacy mirror reconciliation for both directory and file replacement helpers using only pytest-owned workspace and survey roots.
+
+Coverage proves that:
+
+- same-run stale directory temp paths are removed before a fresh workspace directory is copied into the legacy mirror target;
+- same-run stale directory backup paths are restored when the visible target is missing before the new workspace directory replaces them;
+- same-run stale file temp paths are removed before a fresh workspace file is copied into the legacy mirror target; and
+- same-run stale file backup paths are restored when the visible target is missing before the new workspace file replaces them.
+
+The relevant QGIS mirror tests continue to prove workspace outputs are mirrored to legacy paths while stale visible legacy content is replaced. The tests do not run the real RGB pipeline, contact WebODM, execute QGIS/GDAL, access network shares, open production databases, recover production stale paths, run cleanup, or mutate production survey roots.
+
+Validation for this slice:
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "legacy_directory_mirror or legacy_file_mirror or qgis_outputs_workspace_then_mirrors_legacy_paths"` - 6 passed, 37 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 43 passed.
+- `git diff --check -- pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.

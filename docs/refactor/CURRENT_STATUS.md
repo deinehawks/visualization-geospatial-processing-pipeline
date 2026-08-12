@@ -1,4 +1,4 @@
-﻿# Refactor Current Status
+# Refactor Current Status
 
 ## Summary
 
@@ -2219,5 +2219,24 @@ The CLI surface only passes the confirmation phrase into the already-tested `RGB
 
 - `python -m py_compile main.py tests\test_main_publication_activation_cli.py` - passed.
 - `python -m pytest -q tests\test_main_publication_activation_cli.py tests\test_main_resume_source.py` - 7 passed.
+
+No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+## Phase 3 same-run legacy mirror recovery
+
+Date: 2026-08-12.
+
+`RGBPipeline` legacy workspace-to-published mirror replacement now reconciles same-run hidden temp and backup paths before copying a replacement artifact. Directory mirrors remove stale `.tmp-<run_id>` directories, restore `.bak-<run_id>` directories when the final target is missing, or delete same-run backup leftovers when the final target already exists. File mirrors now apply the equivalent file behavior. Wrong-type stale evidence still fails closed.
+
+This fixes resumability for interrupted QGIS tile and clipped-orthomosaic mirror swaps such as `.round-corners.tmp-<run_id>` or `.round-corners.bak-<run_id>` without weakening workspace ownership checks or touching any path outside the intended legacy mirror parent.
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "legacy_directory_mirror or legacy_file_mirror or qgis_outputs_workspace_then_mirrors_legacy_paths"` - 6 passed, 37 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 43 passed.
+- `git diff --check -- pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest --collect-only -q --ignore=tests/test_logging_context_ownership.py` - 208 tests collected.
+
+Full unignored collection remains blocked by an unrelated `tests/test_logging_context_ownership.py` import of missing root module `query_survey_stats`. The default suite with that file ignored reached 205 passed and 3 unrelated failures in `tests/test_main_resume_source.py` because `resolve_cli_source_dir()` no longer accepts `field_data_root`.
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
