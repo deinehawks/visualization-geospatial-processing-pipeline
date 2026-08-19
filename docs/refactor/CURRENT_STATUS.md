@@ -2207,6 +2207,73 @@ This slice does not add UI/API mutation endpoints, does not recover stale locks,
 - `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 16 passed, 19 deselected.
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+
+## Phase 3 completed-run workspace cleanup
+
+Date: 2026-08-19.
+
+Full normal and resumed runs now clean only their owned run workspace after final status `completed`, required output verification, persisted run/survey success, and durable cleanup-audit preparation. The CLI exposes `--keep-workspace`; selected-stage and every non-completed path retain workspace evidence. Cleanup failures do not reverse processing success.
+
+New workspaces carry `.run-workspace.json` ownership evidence. Cleanup archives relative file inventory, counts, bytes, stage summaries, verified legacy/publication mappings, and available cross-run image classifications under the published survey's `.artifact-cleanup-audit` directory before deletion. Older workspaces without ownership evidence fail closed and remain available for resume or operator review.
+
+### Validation
+
+- Focused cleanup, CLI, filter metadata, and pipeline tests: 135 passed.
+- Default suite excluding the two pre-existing incompatible test files: 218 passed.
+- `python -m py_compile main.py pipelines\rgb_pipeline.py shared\artifacts.py modules\cross_run_image_filter\cross_run_image_filter.py tests\test_cross_run_filter_metadata.py` - passed.
+- Scoped `git diff --check` for changed implementation and test files - passed.
+
+Unignored collection remains blocked because `tests/test_logging_context_ownership.py` imports absent root module `query_survey_stats` while the tracked implementation is `tools/query_survey_stats.py`. The remaining three unrelated failures are in `tests/test_main_resume_source.py`, which still passes removed `field_data_root` arguments.
+
+No real pipeline, external service, production database, network share, production survey root, or production cleanup was accessed.
+
+## Default test-suite compatibility restored
+
+Date: 2026-08-19.
+
+The stale logging parser import now uses the tracked `tools.query_survey_stats` module, and resume-source tests now exercise the current `resolve_cli_source_dir()` signature and direct survey-argument resolver contract. These were test-only compatibility corrections; production behavior did not change.
+
+### Validation
+
+- `python -m pytest -q tests\test_logging_context_ownership.py tests\test_main_resume_source.py` - 11 passed.
+- `python -m pytest --collect-only -q` - 229 tests collected without exclusions.
+- `python -m pytest -q` - 229 passed.
+- Python compilation and scoped `git diff --check` for both changed tests - passed.
+
+No real pipeline, external service, production database, network share, production survey root, or destructive operation was accessed.
+
+## Combined WebODM separate operation-stage persistence
+
+Date: 2026-08-19.
+
+Combined `--both-tasks` processing now retains the compatibility `webodm`
+coordinator while persisting Task 4 and Task 2 as separate `webodm_task4` and
+`webodm_task2` stage attempts. Operation outputs include task identity, status,
+runtime-bearing task data, download and artifact mappings, selected output, and
+failure evidence.
+
+Task 4 still runs before Task 2. A Task 4 failure stops the sequence. Task 4
+success followed by Task 2 failure records Task 2 as failed, records the
+coordinator and run as `partially_completed`, preserves Task 4 output, and
+leaves the coordinator resume-eligible. A later resume skips completed Task 4
+and retries Task 2; success clears the partial override.
+
+No schema migration, production dependency, live API/UI mutation, or external
+operation was added. The existing aggregate `webodm` state remains compatible
+for QGIS, quality gate, publication, and legacy consumers.
+
+### Validation
+
+- `python -m py_compile shared\stage_runner.py pipelines\rgb_pipeline.py tests\test_stage_runner_orchestration.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- Combined-mode Task 4 ordering, stop, partial completion, and resume regressions - 3 passed.
+- Complete StageRunner and RGBPipeline orchestration files - 63 passed.
+- `python -m pytest --collect-only -q` - 233 tests collected without exclusions.
+- `python -m pytest -q` - 233 passed.
+- Scoped `git diff --check` - passed.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, production survey
+root, network share, production workspace, or destructive operation was used.
+
 ## Phase 3 guarded publication activation CLI surface
 
 Date: 2026-08-03.

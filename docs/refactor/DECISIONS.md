@@ -496,3 +496,39 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   - If staging is abandoned, hidden activation candidates may need operator-reviewed cleanup; visible published artifacts and `publication.json` remain unchanged.
   - Legacy mirrors, automatic runtime activation, cleanup metadata archival, and production-scale SMB behavior remain separate follow-up concerns.
 - **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `tests/test_phase3_artifact_workspace.py`; `tests/test_rgb_pipeline_single_stage_execution.py`; ADR-016; ADR-018; ADR-023; Phase 3.
+
+### ADR-025 - Clean verified completed-run workspaces by default
+
+- **Decision ID:** ADR-025
+- **Date:** 2026-08-19
+- **Status:** Accepted and implemented
+- **Context:** Run workspaces duplicate large image, WebODM, and QGIS outputs. ADR-022 required persistent lightweight evidence before removing those copies.
+- **Decision:**
+  - Full normal and resumed runs with final status exactly `completed` clean their owned workspace by default.
+  - `--keep-workspace`, selected-stage execution, and every non-completed terminal status retain the workspace.
+  - Persist run/survey success before cleanup, verify mirrored or activated outputs, write cleanup audit evidence, and delete only the exact owned `<workspace-root>/<run-id>` directory.
+  - Cleanup blocks for missing ownership, output mismatch, unsafe containment, or audit-write failure.
+  - Cleanup failure leaves run status `completed` and emits a warning/audit outcome.
+- **Consequences:**
+  - New workspaces carry `.run-workspace.json`; older workspaces remain resumable but are not automatically deleted without ownership evidence.
+  - Cleanup audits retain relative filenames, counts, bytes, stage summaries, verified output mappings, and available cross-run classification reasons.
+  - Legacy survey outputs are not deleted, so this does not reduce storage occupied by required published paths.
+- **Related files or issues:** ADR-019; ADR-020; ADR-022; `main.py`; `pipelines/rgb_pipeline.py`; `shared/artifacts.py`; Phase 3.
+
+### ADR-026 - Persist combined WebODM operations as separate resumable stages
+
+- **Decision ID:** ADR-026
+- **Date:** 2026-08-19
+- **Status:** Accepted and implemented
+- **Approval context:** The user approved hardening the existing `--both-tasks` runtime after completed-run workspace cleanup.
+- **Decision:**
+  - Keep `webodm` as a compatibility coordinator while recording Task 4 and Task 2 as `webodm_task4` and `webodm_task2` stage attempts.
+  - Execute Task 4 before Task 2 and stop before Task 2 when Task 4 fails.
+  - Persist failed operation output evidence without classifying an ordinary operation failure as `requires_recovery`.
+  - Record the coordinator as `partially_completed` after Task 4 success / Task 2 failure so resume re-enters it, loads completed Task 4 evidence, and retries only Task 2.
+  - Preserve the aggregate `state["webodm"]` shape for QGIS, publication, checkpoints, and existing consumers.
+- **Consequences:**
+  - No database migration is required; existing append-only `stages` rows carry the new operation records.
+  - Successful Task 4 work is not rerun by default when Task 2 is retried.
+  - Dedicated external-operation IDs, full option snapshots/metrics, and API/UI read projection remain follow-up work.
+- **Related files or issues:** `pipelines/rgb_pipeline.py`; `shared/stage_runner.py`; `docs/architecture/decisions.md`; `docs/architecture/run-state-model.md`; CW-ADR-005.

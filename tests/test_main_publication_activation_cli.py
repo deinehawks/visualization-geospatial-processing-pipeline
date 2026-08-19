@@ -58,7 +58,21 @@ def test_cli_leaves_publication_activation_disabled_by_default(monkeypatch, tmp_
 
     [pipeline] = FakeRGBPipeline.instances
     assert pipeline.run_kwargs["publication_confirmation"] is None
+    assert pipeline.run_kwargs["keep_workspace"] is False
     assert pipeline.init_kwargs["crossrun_enabled_override"] is None
+
+
+def test_cli_passes_keep_workspace_opt_out(monkeypatch, tmp_path):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", "--keep-workspace"],
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.run_kwargs["keep_workspace"] is True
 
 
 def test_cli_disables_cross_run_when_flag_is_present(monkeypatch, tmp_path):

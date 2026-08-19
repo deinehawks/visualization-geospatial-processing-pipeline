@@ -37,6 +37,23 @@ class StageRequiresRecovery(RuntimeError):
     ) -> None:
         super().__init__(message)
         self.output = output
+
+
+class StageFailedWithOutput(RuntimeError):
+    """Signal a normal stage failure while preserving diagnostic output."""
+
+    status = "failed"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        output: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.output = output
+
+
 class StageRunner:
     """
     Wraps stage execution with DB tracking, structured logging, and
@@ -77,6 +94,7 @@ class StageRunner:
         stale_running_policy: str = "fail_then_rerun",
         retry_attempts: int = 3,
         retry_delay_seconds: int = 5,
+        result_status: Optional[Callable[[Any], str]] = None,
     ) -> Any:
         """
         Execute *fn* as a named pipeline stage.
@@ -95,6 +113,8 @@ class StageRunner:
             retry_attempts:       Number of attempts before giving up on
                                   transient errors (default 3).
             retry_delay_seconds:  Seconds to wait between retry attempts.
+            result_status:        Optional mapping from a successful return
+                                  value to its persisted terminal status.
         """
         latest = self.repo.get_latest_stage(self.run_id, stage_name)
 
@@ -150,9 +170,12 @@ class StageRunner:
                 if state is not None and output_key:
                     state[output_key] = result
 
-                self.repo.finish_stage(
+                terminal_status = result_status(result) if result_status else "completed"
+                if not terminal_status:
+                    raise ValueError("result_status must return a non-empty status")
+                self.repo.finish_stage_with_status(
                     stage_id=stage_id,
-                    success=True,
+                    status=terminal_status,
                     runtime_seconds=runtime,
                     output=result if isinstance(result, dict) else None,
                     error_message=None,
@@ -192,16 +215,16 @@ class StageRunner:
                 ):
                     raise
 
-                if isinstance(exc, StageRequiresRecovery):
+                if isinstance(exc, (StageRequiresRecovery, StageFailedWithOutput)):
                     runtime = time.perf_counter() - wall_start
-                    recovery_output = exc.output
-                    if state is not None and output_key and recovery_output is not None:
-                        state[output_key] = recovery_output
+                    failure_output = exc.output
+                    if state is not None and output_key and failure_output is not None:
+                        state[output_key] = failure_output
                     self.repo.finish_stage_with_status(
                         stage_id=stage_id,
                         status=exc.status,
                         runtime_seconds=runtime,
-                        output=recovery_output,
+                        output=failure_output,
                         error_message=str(exc),
                     )
                     log_stage_fail(self.logger, stage_name, runtime)

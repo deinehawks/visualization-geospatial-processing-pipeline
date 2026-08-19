@@ -75,7 +75,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 - **Implementation dependency:** Pipeline implementation must add CLI parsing, fixed operation ordering, separate stage records, per-operation resume/retry behavior, operation-level artifacts and publication eligibility, one quality-gate boundary after selected operations, QGIS-per-successful-operation behavior, and `partially_completed` persistence/API mapping.
 ### CW-ADR-005 implementation note - 2026-08-11
 
-The pipeline workstream has implemented the canonical `--both-tasks` CLI/runtime path, Task 4 then Task 2 ordering, `partially_completed` persistence for Task 4 success followed by Task 2 failure, and operation-aware QGIS behavior that runs once per successful WebODM operation in combined mode. Separate per-operation stage records, complete operation metrics, and API/UI projection hardening remain in progress.
+The pipeline workstream has implemented the canonical `--both-tasks` CLI/runtime path, Task 4 then Task 2 ordering, separate `webodm_task4` and `webodm_task2` stage records, resume that preserves completed Task 4 while retrying failed Task 2, `partially_completed` persistence for Task 4 success followed by Task 2 failure, and operation-aware QGIS behavior. Complete operation metrics, durable operation identities, and API/UI projection hardening remain in progress.
 
 ## CW-ADR-006 - Activate Publication Stage
 

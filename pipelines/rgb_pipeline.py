@@ -6,7 +6,7 @@ from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer
 from shared.constants import WEBODM_RESTART_STAGES, WEBODM_RESTART_STAGE_NAMES
 from shared.logging import get_logger
 from shared.db.repo import PipelineRepo
-from shared.stage_runner import StageRequiresRecovery, StageRunner
+from shared.stage_runner import StageFailedWithOutput, StageRequiresRecovery, StageRunner
 from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
@@ -21,6 +21,7 @@ from shared.artifacts import (
     plan_run_workspace,
     prepare_publication,
     activate_publication_set_with_lock,
+    cleanup_completed_run_workspace,
 )
 
 from shared.publication_lock import PublicationLockedError
@@ -523,6 +524,169 @@ class RGBPipeline(
             }
             for artifact in artifacts
         ]
+
+    @staticmethod
+    def _collect_completed_output_pairs(
+        workspace_node: object,
+        published_node: object,
+    ) -> list[tuple[Path, Path]]:
+        pairs: list[tuple[Path, Path]] = []
+        if isinstance(workspace_node, Mapping) and isinstance(published_node, Mapping):
+            for key in sorted(set(workspace_node).intersection(published_node)):
+                pairs.extend(
+                    RGBPipeline._collect_completed_output_pairs(
+                        workspace_node[key],
+                        published_node[key],
+                    )
+                )
+            return pairs
+        if isinstance(workspace_node, (str, Path)) and isinstance(
+            published_node, (str, Path)
+        ):
+            pairs.append((Path(workspace_node), Path(published_node)))
+        return pairs
+
+    def _completed_run_output_pairs(self) -> list[tuple[Path, Path]]:
+        pairs: list[tuple[Path, Path]] = []
+        for stage_name in ("cross_run_filter", "kml_boundary", "webodm", "qgis"):
+            stage_state = self.state.get(stage_name)
+            if not isinstance(stage_state, Mapping):
+                continue
+            pairs.extend(
+                self._collect_completed_output_pairs(
+                    stage_state.get("workspace"),
+                    stage_state.get("published"),
+                )
+            )
+        return pairs
+
+    def _completed_run_stage_summaries(self) -> dict[str, object]:
+        summaries: dict[str, object] = {}
+        excluded_keys = {
+            "image_classifications",
+            "workspace",
+            "published",
+        }
+        for stage_name in (
+            "data_segregation",
+            "cross_run_filter",
+            "kml_boundary",
+            "webodm",
+            "webodm_task4",
+            "webodm_task2",
+            "quality_gate",
+            "qgis",
+            "activate_publication",
+        ):
+            stage_state = self.state.get(stage_name)
+            if not isinstance(stage_state, Mapping):
+                continue
+            summary = {
+                key: value
+                for key, value in stage_state.items()
+                if key not in excluded_keys
+                and isinstance(value, (str, int, float, bool, type(None)))
+            }
+            summaries[stage_name] = summary
+        return summaries
+
+    def _workspace_cleanup_result(
+        self,
+        *,
+        final_status: str,
+        selected_stages: Optional[Set[str]],
+        keep_workspace: bool,
+    ) -> Dict[str, Any]:
+        logger = self.loggers["pipeline"]
+        reason = None
+        if final_status != "completed":
+            reason = f"run_status_{final_status}"
+        elif selected_stages is not None:
+            reason = "selected_stage_execution"
+        elif keep_workspace:
+            reason = "keep_workspace_requested"
+
+        if reason is not None:
+            result: Dict[str, Any] = {
+                "status": "skipped",
+                "reason": reason,
+                "workspace": str(self.workspace_layout.root),
+            }
+            log_event(
+                logger,
+                "workspace_cleanup_skipped",
+                status="skipped",
+                reason=reason,
+            )
+            return result
+
+        if not self.survey_id or self.published_layout is None:
+            self._hydrate_from_state()
+        if not self.survey_id or self.published_layout is None:
+            error = "survey and published layout are required for workspace cleanup"
+            log_event(
+                logger,
+                "workspace_cleanup_failed",
+                level=logging.WARNING,
+                status="failed",
+                error_type="RuntimeError",
+                error_message=error,
+            )
+            return {
+                "status": "failed",
+                "workspace": str(self.workspace_layout.root),
+                "error_type": "RuntimeError",
+                "error": error,
+            }
+
+        cross_run_state = self.state.get("cross_run_filter")
+        image_classifications = []
+        if isinstance(cross_run_state, Mapping):
+            value = cross_run_state.get("image_classifications")
+            if isinstance(value, list):
+                image_classifications = [
+                    item for item in value if isinstance(item, Mapping)
+                ]
+
+        try:
+            result = cleanup_completed_run_workspace(
+                run_id=self.run_id,
+                survey_id=self.survey_id,
+                workspace=self.workspace_layout,
+                workspace_root=self.workspace_root,
+                published=self.published_layout,
+                output_pairs=self._completed_run_output_pairs(),
+                stage_summaries=self._completed_run_stage_summaries(),
+                image_classifications=image_classifications,
+            )
+        except Exception as exc:
+            result = {
+                "status": "failed",
+                "workspace": str(self.workspace_layout.root),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
+
+        event_name = (
+            "workspace_cleanup_completed"
+            if result.get("status") == "completed"
+            else "workspace_cleanup_failed"
+        )
+        log_event(
+            logger,
+            event_name,
+            level=(
+                logging.INFO
+                if result.get("status") == "completed"
+                else logging.WARNING
+            ),
+            status=result.get("status"),
+            file_count=result.get("file_count"),
+            total_bytes=result.get("total_bytes"),
+            error_type=result.get("error_type"),
+            error_message=str(result.get("error") or "")[:240],
+        )
+        return dict(result)
 
     def plan_publication_dry_run(self) -> Dict[str, Any]:
         """Build the current RGB publication intent without activating it.
@@ -1350,6 +1514,14 @@ class RGBPipeline(
                     "output_dir": str(legacy_output_dir),
                     "excluded_dir": str(legacy_excluded_dir),
                 },
+                "image_classifications": [
+                    {
+                        "relative_path": image.name,
+                        "disposition": "kept",
+                        "reasons": ["filter_disabled"],
+                    }
+                    for image in images
+                ],
             }
 
             self.state["crossrun_flag"] = "c"
@@ -1551,7 +1723,148 @@ class RGBPipeline(
 
         return summary
 
+    @staticmethod
+    def _merge_webodm_state(
+        target: Dict[str, Any],
+        incoming: Mapping[str, Any],
+    ) -> Dict[str, Any]:
+        for key, value in incoming.items():
+            existing = target.get(key)
+            if isinstance(existing, dict) and isinstance(value, Mapping):
+                RGBPipeline._merge_webodm_state(existing, value)
+            elif isinstance(value, Mapping):
+                target[key] = RGBPipeline._merge_webodm_state({}, value)
+            else:
+                target[key] = value
+        return target
+
+    def _run_webodm_operation(self, task_key: str) -> Dict[str, Any]:
+        previous_web = self.state.get("webodm")
+        aggregate: Dict[str, Any] = {}
+        if isinstance(previous_web, Mapping):
+            self._merge_webodm_state(aggregate, previous_web)
+
+        original_skip_task1 = self.skip_task1_webodm
+        original_skip_task2 = self.skip_task2_webodm
+        original_skip_task4 = self.skip_task4_webodm
+        try:
+            self.skip_task1_webodm = original_skip_task1 or (
+                task_key == "task2" and not original_skip_task4
+            )
+            self.skip_task2_webodm = task_key != "task2"
+            self.skip_task4_webodm = task_key != "task4"
+            self.state["webodm"] = aggregate
+
+            sequence_result = self._stage_webodm_sequence()
+            sequence_state = self.state.get("webodm")
+            if isinstance(sequence_state, Mapping):
+                self._merge_webodm_state(aggregate, sequence_state)
+            if isinstance(sequence_result, Mapping):
+                self._merge_webodm_state(aggregate, sequence_result)
+
+            task_state = aggregate.get(task_key)
+            operation_succeeded = (
+                isinstance(task_state, Mapping)
+                and task_state.get("success") is True
+            )
+            operation_output: Dict[str, Any] = {
+                "operation_key": task_key,
+                "status": "completed" if operation_succeeded else "failed",
+                "success": operation_succeeded,
+                "project_id": aggregate.get("project_id"),
+                "project_name": aggregate.get("project_name"),
+                "task": task_state,
+                "mode": self.webodm_mode,
+                "downloads": (aggregate.get("downloads") or {}).get(task_key, {}),
+                "workspace": aggregate.get("workspace") or {},
+                "published": aggregate.get("published") or {},
+                "selected_webodm_task": aggregate.get("selected_webodm_task"),
+                "selected_orthomosaic": aggregate.get("selected_orthomosaic"),
+                "webodm": aggregate,
+            }
+            if not operation_succeeded:
+                error = str(
+                    aggregate.get(f"{task_key}_error")
+                    or aggregate.get(f"{task_key}_skip_reason")
+                    or (
+                        aggregate.get("boundary_reason")
+                        if task_key == "task2"
+                        else None
+                    )
+                    or f"WebODM {task_key} did not complete successfully"
+                )
+                operation_output["error"] = error
+                raise StageFailedWithOutput(error, output=operation_output)
+            return operation_output
+        finally:
+            self.skip_task1_webodm = original_skip_task1
+            self.skip_task2_webodm = original_skip_task2
+            self.skip_task4_webodm = original_skip_task4
+
     def stage_webodm(self) -> Dict[str, Any]:
+        selected_operations = []
+        if not self.skip_task4_webodm:
+            selected_operations.append("task4")
+        if not self.skip_task2_webodm:
+            selected_operations.append("task2")
+
+        if not selected_operations:
+            return self._stage_webodm_sequence()
+
+        aggregate: Dict[str, Any] = {}
+        existing_web = self.state.get("webodm")
+        if isinstance(existing_web, Mapping):
+            self._merge_webodm_state(aggregate, existing_web)
+
+        task4_completed = False
+        force_operations = bool(getattr(self, "_force_webodm_operations", False))
+        for task_key in selected_operations:
+            self.state["webodm"] = aggregate
+            stage_name = f"webodm_{task_key}"
+            try:
+                operation_result = self.runner.run(
+                    stage_name,
+                    lambda task_key=task_key: self._run_webodm_operation(task_key),
+                    output_key=stage_name,
+                    state=self.state,
+                    force=force_operations,
+                    stale_running_policy="rerun",
+                    retry_attempts=1,
+                    retry_delay_seconds=0,
+                )
+            except StageFailedWithOutput as exc:
+                operation_result = exc.output or {}
+                operation_web = operation_result.get("webodm")
+                if isinstance(operation_web, Mapping):
+                    aggregate = self._merge_webodm_state({}, operation_web)
+                self.state["webodm"] = aggregate
+
+                if task_key == "task2" and task4_completed:
+                    aggregate["run_status"] = "partially_completed"
+                    self.state["run_status_override"] = "partially_completed"
+                    return aggregate
+                raise
+            finally:
+                for stage_logger in self.loggers.values():
+                    set_stage_context(stage_logger, "webodm")
+
+            if not isinstance(operation_result, Mapping):
+                raise RuntimeError(f"Missing persisted output for {stage_name}")
+            operation_web = operation_result.get("webodm")
+            if not isinstance(operation_web, Mapping):
+                raise RuntimeError(f"Invalid persisted output for {stage_name}")
+            aggregate = self._merge_webodm_state({}, operation_web)
+            self.state["webodm"] = aggregate
+            if task_key == "task4":
+                task4_completed = True
+
+        if self.state.get("run_status_override") == "partially_completed":
+            self.state.pop("run_status_override", None)
+        aggregate.pop("run_status", None)
+        self.state["webodm"] = aggregate
+        return aggregate
+
+    def _stage_webodm_sequence(self) -> Dict[str, Any]:
         logger = self.loggers["webodm"]
         logger.info("Stage: WebODM Processing")
 
@@ -3361,6 +3674,7 @@ class RGBPipeline(
         selected_stages: Optional[Set[str]] = None,
         raise_on_error: bool = False,
         publication_confirmation: Optional[str] = None,
+        keep_workspace: bool = False,
     ) -> Dict[str, Any]:
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
@@ -3491,8 +3805,23 @@ class RGBPipeline(
                     runner_kwargs["retry_attempts"] = step["retry_attempts"]
                 if "retry_delay_seconds" in step:
                     runner_kwargs["retry_delay_seconds"] = step["retry_delay_seconds"]
+                if stage_name == "webodm":
+                    runner_kwargs["result_status"] = lambda result: (
+                        "partially_completed"
+                        if isinstance(result, Mapping)
+                        and result.get("run_status") == "partially_completed"
+                        else "completed"
+                    )
 
-                self.runner.run(stage_name, step["fn"], **runner_kwargs)
+                if stage_name == "webodm":
+                    self._force_webodm_operations = _force(stage_name)
+                try:
+                    self.runner.run(stage_name, step["fn"], **runner_kwargs)
+                finally:
+                    if stage_name == "webodm" and hasattr(
+                        self, "_force_webodm_operations"
+                    ):
+                        del self._force_webodm_operations
                 self._hydrate_from_state()
 
                 if stage_name == "quality_gate":
@@ -3521,6 +3850,12 @@ class RGBPipeline(
                     total_runtime_seconds=total_runtime,
                     status=final_status,
                 )
+
+            self.state["workspace_cleanup"] = self._workspace_cleanup_result(
+                final_status=final_status,
+                selected_stages=selected_stages,
+                keep_workspace=keep_workspace,
+            )
 
             self.control.cleanup_flags()
             log_event(

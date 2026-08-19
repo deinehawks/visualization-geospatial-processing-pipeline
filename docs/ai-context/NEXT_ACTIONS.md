@@ -2,21 +2,19 @@
 
 ## Highest Priority
 
-1. Implement default completed-run workspace cleanup with `--keep-workspace` opt-out.
+1. Complete WebODM operation observability and read projection.
 
-Why this is first: retained run workspaces can consume hundreds of GB per run. The accepted target is to clean fully `completed` run workspaces by default while preserving partial, failed, paused, aborted, canceled, and recovery-required evidence.
+Why this is first: completed-run cleanup and separate Task 4/Task 2 stage persistence are implemented. The remaining operation-model gap is complete metrics/events and a read-only API projection; mutation controls remain deferred.
 
 ## Recommended Pipeline Sequence
 
-1. Add `--keep-workspace` without changing failure, pause, abort, cancellation, or recovery retention behavior.
+1. Add complete Task 4 and Task 2 boundary events and bounded operation metrics.
 
-2. Add guarded cleanup for fully `completed` runs only, after final success state persistence and after required outputs are already mirrored or published.
+2. Define stable read-only operation IDs and project existing stage evidence through the documented API schema.
 
-3. Preserve workspaces by default for `partially_completed`, failed, paused, aborted, canceled, and `requires_recovery` paths.
+3. Verify `partially_completed` and per-operation evidence in read-only UI/API consumers.
 
-4. Validate cleanup with pytest-owned workspaces, ownership checks, containment checks, and regression coverage proving published/legacy outputs remain.
-
-5. Continue hardening the approved combined WebODM `--both-tasks` runtime contract, especially separate per-operation stage records and API/UI projection.
+4. Keep operational UI controls disabled until mutation semantics are approved and implemented.
 
 ## Recommended Web/API/UI Sequence
 

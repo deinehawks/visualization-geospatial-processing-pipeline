@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-- Snapshot date: 2026-08-11
+- Snapshot date: 2026-08-19
 - Repository state: pipeline refactor in progress; shared API/UI contracts have been added for coordinated pipeline and web-app workstreams.
 - Current pipeline phase: Phase 3, run-scoped workspace ownership and publication activation preparation.
 - Current implementation posture: guarded publication activation is wired through `RGBPipeline.run()` and an explicit CLI confirmation surface; default runs still do not activate publication.
@@ -25,6 +25,9 @@
 - StageRunner failure classification records non-control runtime failures instead of leaving stages stuck as `running`, and now supports typed `requires_recovery` terminal stage attempts.
 - RGBPipeline has injection seams for hermetic construction and fake WebODM use in tests.
 - Run workspace and publication helper boundaries exist for planning, staging, explicit staged activation, a tracked explicit `activate_publication` method, guarded `RGBPipeline.run()` activation, CLI confirmation handoff, reconciliation, stale-lock recovery, cleanup planning/execution, and filesystem validation.
+- Fully completed full runs now clean their exact owned workspace by default after success persistence, output verification, and cleanup-audit archival; `--keep-workspace` opts out.
+- Combined WebODM runs now persist separate `webodm_task4` and `webodm_task2` stage attempts while retaining the aggregate `webodm` compatibility state; resume preserves completed Task 4 and retries failed Task 2.
+- Workspace cleanup records relative inventory, bytes, stage summaries, verified output mappings, and available cross-run image classification reasons without deleting legacy survey outputs.
 - Publication artifact allowlist is documented and implemented for current dry-run/staging bridge behavior.
 - Shared contracts now describe run state, API, metrics, events, artifacts, compatibility policy, and UI requirements.
 
@@ -32,9 +35,10 @@
 
 - Publication activation runtime and CLI handoff are implemented behind explicit confirmation: default runs without confirmation do not activate publication, and UI/API mutation remains deferred.
 - WebODM combined `Orthomosaic + 3D` mode is now wired in CLI/runtime via `--both-tasks` with Task 4 then Task 2 ordering.
-- `partially_completed` is now mapped in runtime persistence for combined WebODM runs where Task 4 succeeds and Task 2 fails; broader API/UI projection remains to be verified.
+- `partially_completed` is mapped for the run, survey, and compatibility WebODM coordinator when Task 4 succeeds and Task 2 fails; dedicated API/UI operation projection remains deferred.
 - WebODM/QGIS stages still mirror outputs into legacy paths during stage execution; pipeline is not workspace-only-until-publish.
-- Default completed-run workspace cleanup and the `--keep-workspace` opt-out are accepted target behavior but not implemented.
+- Older workspaces without `.run-workspace.json` ownership evidence remain resumable but are retained rather than automatically deleted.
+- Default collection and the full hermetic suite are healthy: 233 tests collect and pass without exclusions.
 - Full production-scale SMB/open-handle/disconnect validation remains incomplete.
 
 ## Working Tree Notes

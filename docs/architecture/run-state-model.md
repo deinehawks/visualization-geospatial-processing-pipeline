@@ -32,14 +32,16 @@ Status: **Implemented and verified** for the listed values.
 | Entity | Current status values | Notes |
 |---|---|---|
 | `runs.status` | `running`, `paused`, `completed`, `failed`, `partially_completed` | WebODM UI cancellation currently marks the run paused with reason `webodm_ui_cancel`; `partially_completed` is used for the approved combined-mode Task 4 success / Task 2 failure case |
-| `stages.status` | `running`, `completed`, `failed`, `requires_recovery` | WebODM UI cancellation records the stage as `failed` with error `Canceled in WebODM UI`; `requires_recovery` is implemented for typed post-mutation publication activation failures |
+| `stages.status` | `running`, `completed`, `failed`, `partially_completed`, `requires_recovery` | `webodm_task4` and `webodm_task2` record operation outcomes separately; the compatibility `webodm` coordinator uses `partially_completed` so resume re-enters it after Task 4 success / Task 2 failure |
 | `surveys.status` | `running`, `completed`, `failed`, `partially_completed` | Survey status is updated after run success/failure when `survey_id` is known |
 | Publication manifest status | `staged`, `published` | Helper-level and explicit activation path only |
 | Activation journals | helper-specific statuses such as `prepared`, `activated`, `committed`, `rolled_back`, `failed` | Partially implemented in artifact helpers |
 
 `partially_completed` is implemented in runtime persistence for combined
 `Orthomosaic + 3D` runs where Task 4 succeeds and Task 2 fails, but broader
-operation-level API/UI projection remains incomplete.
+operation-level API/UI projection remains incomplete. Current SQLite persistence
+now includes separate `webodm_task4` and `webodm_task2` stage rows with task,
+status, runtime, download, workspace, published-path, and error evidence.
 
 ## Workspace Cleanup Eligibility
 
@@ -122,7 +124,7 @@ Status: **Partially implemented**.
 | `--task4 --task2` | Not accepted by CLI because flags are mutually exclusive | May be accepted as equivalent to `--both-tasks` after deliberate CLI change | Preserve existing `--task4` and `--task2` meanings | UI should prefer `Orthomosaic + 3D`, not raw flag wording | CLI parser change |
 | Combined order | Implemented as Task 4 followed by Task 2 | Fixed Task 4 followed by Task 2 | Preserve existing single-task behavior | UI can show deterministic operation order once projection is available | Per-operation projection hardening |
 | Shared preprocessing | Some preprocessing is common before the `webodm` stage | Common preprocessing should run once when technically valid | Preserve stage outputs and resume behavior | UI may show one pipeline run with multiple operations | Operation split model |
-| Per-task records | One `webodm` stage output may contain multiple task keys; `webodm_tasks` table is limited | Task 4 and Task 2 use separate stage records plus separate operation data | Do not collapse successful operation evidence when another fails | UI needs operation-level rows | Stage split and external operation model |
+| Per-task records | `webodm_task4` and `webodm_task2` stage rows are implemented; the aggregate `webodm` row remains for compatibility and `webodm_tasks` remains limited | Task 4 and Task 2 use separate stage records plus a future dedicated operation projection | Do not collapse successful operation evidence when another fails | UI needs operation-level rows | API read projection and complete external operation model |
 | Task 4 failure in combined mode | Implemented in current combined flow | Stop combined WebODM immediately; do not run Task 2 | Preserve existing failure recording | UI shows Task 2 as not started due to Task 4 failure | Per-operation projection hardening |
 | Task 2 failure after Task 4 success | Runtime status persistence implemented as `partially_completed` | Run status becomes `partially_completed`; Task 4 output remains eligible for publication | Preserve Task 4 evidence and outputs | UI shows partial completion and publishable Task 4 artifacts | API/UI projection hardening |
 | QGIS behavior | Operation-aware QGIS stage runs once per successful WebODM operation in combined mode | Run QGIS once per successful WebODM operation in combined mode | Do not rerun successful operation outputs by default | UI shows QGIS outputs per operation | API/UI projection hardening |

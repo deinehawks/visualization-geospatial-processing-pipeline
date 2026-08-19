@@ -72,6 +72,11 @@ def main() -> None:
         help='Exact confirmation phrase required with --activate-publication, e.g. "PUBLISH AH-026019 run-001".',
     )
     parser.add_argument(
+        "--keep-workspace",
+        action="store_true",
+        help="Retain the completed run workspace instead of cleaning it after verified success.",
+    )
+    parser.add_argument(
         "--date",
         default=None,
         metavar="YYYYMMDD",
@@ -178,6 +183,7 @@ def main() -> None:
         publication_confirmation=(
             args.publication_confirmation if args.activate_publication else None
         ),
+        keep_workspace=args.keep_workspace,
     )
 
     print("\n===== PIPELINE RESULT =====")

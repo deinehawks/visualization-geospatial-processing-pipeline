@@ -7,7 +7,7 @@ import stat
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Callable, Iterable, Literal
+from typing import Callable, Iterable, Literal, Mapping
 
 from shared.publication_lock import (
     PUBLICATION_LOCK_NAME,
@@ -22,6 +22,7 @@ PUBLICATION_MANIFEST_NAME = "publication.json"
 ACTIVATION_JOURNAL_NAME = "activation.json"
 ARTIFACT_CLEANUP_SENTINEL_NAME = ".artifact-cleanup-root"
 ARTIFACT_CLEANUP_AUDIT_DIR = ".artifact-cleanup-audit"
+RUN_WORKSPACE_OWNERSHIP_NAME = ".run-workspace.json"
 
 
 @dataclass(frozen=True)
@@ -185,10 +186,201 @@ def plan_published_survey_from_rgb_path(rgb_path: Path) -> PublishedSurveyLayout
 def create_run_workspace(layout: RunWorkspaceLayout) -> None:
     root = layout.root.resolve()
     _reject_filesystem_root(root)
+    root_existed = root.exists()
     for directory in layout.required_dirs():
         resolved = directory.resolve(strict=False)
         _require_within(resolved, root)
         resolved.mkdir(parents=True, exist_ok=True)
+
+    ownership_path = root / RUN_WORKSPACE_OWNERSHIP_NAME
+    if ownership_path.exists():
+        ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+        expected_run_id = _safe_path_component(root.name, "workspace run_id")
+        if ownership.get("run_id") != expected_run_id:
+            raise ValueError(
+                f"Run workspace ownership does not match its directory: {ownership_path}"
+            )
+        return
+
+    # Existing workspaces predate ownership evidence. Leave them usable for
+    # resume, but do not retroactively authorize automatic deletion.
+    if root_existed:
+        return
+
+    _write_json_atomic(
+        ownership_path,
+        {
+            "version": 1,
+            "run_id": _safe_path_component(root.name, "workspace run_id"),
+            "workspace_root": str(root.parent),
+            "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        },
+    )
+
+
+def cleanup_completed_run_workspace(
+    *,
+    run_id: str,
+    survey_id: str,
+    workspace: RunWorkspaceLayout,
+    workspace_root: Path,
+    published: PublishedSurveyLayout,
+    output_pairs: Iterable[tuple[Path, Path]],
+    stage_summaries: Mapping[str, object],
+    image_classifications: Iterable[Mapping[str, object]] = (),
+    remove_tree: Callable[[Path], object] = shutil.rmtree,
+    write_json: Callable[[Path, dict[str, object]], object] | None = None,
+) -> dict[str, object]:
+    """Archive evidence and delete exactly one verified completed-run workspace."""
+
+    safe_run_id = _safe_path_component(run_id, "run_id")
+    safe_survey_id = _safe_path_component(survey_id, "survey_id")
+    owner_root = Path(workspace_root).resolve(strict=False)
+    target = workspace.root.resolve(strict=False)
+    expected_target = (owner_root / safe_run_id).resolve(strict=False)
+    published_root = published.root.resolve(strict=False)
+    _reject_filesystem_root(owner_root)
+    _reject_filesystem_root(target)
+    _reject_filesystem_root(published_root)
+    _require_within(target, owner_root)
+    if target != expected_target:
+        raise ValueError(
+            f"Run workspace does not match configured workspace root and run_id: {target}"
+        )
+    if not target.is_dir():
+        raise ValueError(f"Run workspace is missing or is not a directory: {target}")
+
+    ownership_path = target / RUN_WORKSPACE_OWNERSHIP_NAME
+    if not ownership_path.is_file():
+        raise ValueError(f"Run workspace ownership evidence is missing: {ownership_path}")
+    ownership = json.loads(ownership_path.read_text(encoding="utf-8"))
+    if ownership.get("run_id") != safe_run_id:
+        raise ValueError(f"Run workspace ownership run_id does not match: {ownership_path}")
+    recorded_owner_root = Path(str(ownership.get("workspace_root") or "")).resolve(
+        strict=False
+    )
+    if recorded_owner_root != owner_root:
+        raise ValueError(
+            f"Run workspace ownership root does not match configured root: {ownership_path}"
+        )
+
+    verified_outputs: list[dict[str, object]] = []
+    seen_pairs: set[tuple[str, str]] = set()
+    for source_value, published_value in output_pairs:
+        source = Path(source_value).resolve(strict=False)
+        destination = Path(published_value).resolve(strict=False)
+        _require_within(source, target)
+        _require_within(destination, published_root)
+        key = (str(source), str(destination))
+        if key in seen_pairs or not source.exists():
+            continue
+        seen_pairs.add(key)
+        if source.is_file():
+            if not destination.is_file():
+                raise ValueError(f"Required published file is missing: {destination}")
+            if destination.stat().st_size != source.stat().st_size:
+                raise ValueError(
+                    f"Required published file size does not match: {destination}"
+                )
+            kind = "file"
+        elif source.is_dir():
+            if not destination.is_dir():
+                raise ValueError(f"Required published directory is missing: {destination}")
+            kind = "directory"
+            source_files = [
+                path
+                for path in source.rglob("*")
+                if path.is_file()
+            ]
+            for source_file in source_files:
+                relative_path = source_file.relative_to(source)
+                published_file = destination / relative_path
+                if not published_file.is_file():
+                    raise ValueError(
+                        f"Required published file is missing: {published_file}"
+                    )
+                if published_file.stat().st_size != source_file.stat().st_size:
+                    raise ValueError(
+                        f"Required published file size does not match: {published_file}"
+                    )
+        else:
+            raise ValueError(f"Workspace output has unsupported type: {source}")
+        output_record: dict[str, object] = {
+            "workspace_relative_path": source.relative_to(target).as_posix(),
+            "published_relative_path": destination.relative_to(published_root).as_posix(),
+            "kind": kind,
+        }
+        if kind == "directory":
+            output_record["file_count"] = len(source_files)
+        verified_outputs.append(output_record)
+    if not verified_outputs:
+        raise ValueError("No run workspace outputs were available for publication verification")
+
+    inventory: list[dict[str, object]] = []
+    total_bytes = 0
+    for path in sorted(target.rglob("*"), key=lambda item: str(item).lower()):
+        if not path.is_file():
+            continue
+        stat_result = path.stat()
+        total_bytes += stat_result.st_size
+        inventory.append(
+            {
+                "relative_path": path.relative_to(target).as_posix(),
+                "size_bytes": stat_result.st_size,
+                "modified_at_epoch": stat_result.st_mtime,
+            }
+        )
+
+    audit_path = (
+        published_root
+        / ARTIFACT_CLEANUP_AUDIT_DIR
+        / f"completed-run-{safe_run_id}.json"
+    )
+    writer = write_json or _write_json_atomic
+    payload: dict[str, object] = {
+        "version": 1,
+        "status": "prepared",
+        "run_id": safe_run_id,
+        "survey_id": safe_survey_id,
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "workspace_root": str(target),
+        "file_count": len(inventory),
+        "total_bytes": total_bytes,
+        "files": inventory,
+        "image_classifications": [dict(item) for item in image_classifications],
+        "stage_summaries": dict(stage_summaries),
+        "verified_outputs": verified_outputs,
+    }
+    writer(audit_path, payload)
+
+    try:
+        remove_tree(target)
+    except Exception as exc:
+        payload["status"] = "failed"
+        payload["error_type"] = type(exc).__name__
+        payload["error"] = str(exc)
+        payload["finished_at"] = time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime()
+        )
+        writer(audit_path, payload)
+        return {
+            "status": "failed",
+            "workspace": str(target),
+            "audit_path": str(audit_path),
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
+
+    payload["status"] = "completed"
+    payload["finished_at"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    writer(audit_path, payload)
+    return {
+        "status": "completed",
+        "workspace": str(target),
+        "audit_path": str(audit_path),
+        "file_count": len(inventory),
+        "total_bytes": total_bytes,
+    }
 
 
 def prepare_publication(

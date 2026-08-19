@@ -1202,3 +1202,9 @@ Validation for this slice:
 - `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "legacy_directory_mirror or legacy_file_mirror or qgis_outputs_workspace_then_mirrors_legacy_paths"` - 6 passed, 37 deselected.
 - `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 43 passed.
 - `git diff --check -- pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+
+## Default suite compatibility restoration
+
+Added on 2026-08-19, test imports and resolver expectations were aligned with the tracked module layout and current public helper signature. `tests/test_logging_context_ownership.py` imports parser helpers from `tools.query_survey_stats`; `tests/test_main_resume_source.py` passes the survey argument directly and no longer supplies removed `field_data_root` arguments.
+
+Validation collected 229 tests without exclusions and passed the full default suite 229/229. Focused coverage passed 11/11, compilation passed, and scoped `git diff --check` passed. No external service, subprocess, production path, production database, or real pipeline was used.

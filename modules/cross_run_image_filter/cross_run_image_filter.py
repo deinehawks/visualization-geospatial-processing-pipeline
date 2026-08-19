@@ -615,6 +615,22 @@ def run_filter(
     all_excluded = set(close_clusters) | set(too_close) | set(range_excluded)
     kept_files = [f for f in files if f not in all_excluded]
     excluded_files = [f for f in files if f in all_excluded]
+    image_classifications = []
+    for fname in files:
+        reasons = []
+        if fname in close_clusters:
+            reasons.append("cluster")
+        if fname in too_close:
+            reasons.append("too_close")
+        if fname in range_excluded:
+            reasons.append("cross_run_range")
+        image_classifications.append(
+            {
+                "relative_path": fname,
+                "disposition": "excluded" if reasons else "kept",
+                "reasons": reasons,
+            }
+        )
     total_to_copy = len(kept_files) + len(excluded_files)
     copied = 0
     t0 = time.perf_counter()
@@ -654,6 +670,7 @@ def run_filter(
         "adaptive_params":      adaptive_params,
         "cross_run_stats":      cross_run_stats,
         "reset_outputs":        bool(reset_outputs),
+        "image_classifications": image_classifications,
     }
 
     log_section(logger, "CROSS-RUN FILTER SUMMARY")

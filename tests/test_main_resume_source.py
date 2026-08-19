@@ -26,7 +26,6 @@ def test_resume_source_dir_reuses_stored_run_source_without_prompt(monkeypatch, 
         survey="ABC_001_same_dataset",
         resume=True,
         run_id="run-resume",
-        field_data_root=tmp_path / "field-data",
         logger=logging.getLogger("tests.main.resume"),
         repository=repository,
     )
@@ -54,7 +53,6 @@ def test_fresh_source_dir_still_uses_dataset_resolver(monkeypatch, tmp_path):
         survey="ABC_001_same_dataset",
         resume=False,
         run_id=None,
-        field_data_root=tmp_path / "field-data",
         logger=logging.getLogger("tests.main.fresh"),
         date_hint="20260730",
     )
@@ -62,7 +60,7 @@ def test_fresh_source_dir_still_uses_dataset_resolver(monkeypatch, tmp_path):
     assert resolved == resolved_source
     assert calls == [
         {
-            "source_input": tmp_path / "field-data" / "ABC_001_same_dataset",
+            "source_input": Path("ABC_001_same_dataset"),
             "logger": logging.getLogger("tests.main.fresh"),
             "date_hint": "20260730",
         }
@@ -77,7 +75,6 @@ def test_resume_source_dir_requires_existing_run_record(tmp_path):
             survey="ABC_001_same_dataset",
             resume=True,
             run_id="missing-run",
-            field_data_root=tmp_path / "field-data",
             logger=logging.getLogger("tests.main.missing"),
             repository=repository,
         )
