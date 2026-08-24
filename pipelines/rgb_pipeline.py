@@ -1738,6 +1738,99 @@ class RGBPipeline(
                 target[key] = value
         return target
 
+    def _log_webodm_task_created(
+        self,
+        *,
+        project_id: Any,
+        task_key: str,
+        task_id: Any,
+        task_name: str,
+    ) -> None:
+        log_event(
+            self.loggers["webodm"],
+            "webodm_task_created",
+            project_id=project_id,
+            task_key=task_key,
+            task_id=task_id,
+            task_name=task_name,
+        )
+
+    def _log_webodm_task_status(
+        self,
+        *,
+        project_id: Any,
+        task_key: str,
+        task_id: Any,
+        status: str,
+        success: bool,
+        runtime_seconds: Optional[float] = None,
+        error: Optional[BaseException] = None,
+    ) -> None:
+        fields: Dict[str, Any] = {
+            "project_id": project_id,
+            "task_key": task_key,
+            "task_id": task_id,
+            "status": status,
+            "success": bool(success),
+        }
+        if runtime_seconds is not None:
+            fields["elapsed_seconds"] = f"{float(runtime_seconds):.2f}"
+        if error is not None:
+            fields["error_type"] = type(error).__name__
+            fields["error_message"] = str(error)[:240]
+        log_event(
+            self.loggers["webodm"],
+            "webodm_task_status",
+            level=logging.ERROR if error is not None else logging.INFO,
+            **fields,
+        )
+
+    def _wait_for_webodm_task_completion(
+        self,
+        processor: Any,
+        *,
+        project_id: Any,
+        task_key: str,
+        task_id: Any,
+    ) -> Tuple[bool, float, Any]:
+        try:
+            success, runtime, info = processor.wait_for_completion(
+                project_id,
+                task_id,
+                live=False,
+                control_check=lambda: self._check_control_or_raise("webodm"),
+            )
+        except Exception as exc:
+            if str(exc) in ("__PIPELINE_PAUSED__", "__PIPELINE_ABORTED__"):
+                raise
+            self._log_webodm_task_status(
+                project_id=project_id,
+                task_key=task_key,
+                task_id=task_id,
+                status="failed",
+                success=False,
+                error=exc,
+            )
+            raise
+
+        external_status = (
+            (info or {}).get("status")
+            if isinstance(info, Mapping)
+            else None
+        )
+        self._log_webodm_task_status(
+            project_id=project_id,
+            task_key=task_key,
+            task_id=task_id,
+            status=str(
+                external_status
+                or ("completed" if success else "failed")
+            ),
+            success=bool(success),
+            runtime_seconds=float(runtime),
+        )
+        return bool(success), float(runtime), info
+
     def _run_webodm_operation(self, task_key: str) -> Dict[str, Any]:
         previous_web = self.state.get("webodm")
         aggregate: Dict[str, Any] = {}
@@ -2327,7 +2420,20 @@ class RGBPipeline(
                 if t2_already_done:
                     current_task2_id = str(prev_task2["id"])
                     t2_success = True
-                    t2_runtime = float(prev_task2.get("runtime_seconds") or 0)
+                    previous_t2_runtime = prev_task2.get("runtime_seconds")
+                    t2_runtime = float(previous_t2_runtime or 0)
+                    self._log_webodm_task_status(
+                        project_id=project_id,
+                        task_key="task2",
+                        task_id=current_task2_id,
+                        status="completed",
+                        success=True,
+                        runtime_seconds=(
+                            t2_runtime
+                            if previous_t2_runtime not in (None, "")
+                            else None
+                        ),
+                    )
                     logger.info(
                         f"Resuming: Task 2 already completed "
                         f"(id={current_task2_id}) — skipping upload and processing"
@@ -2353,6 +2459,13 @@ class RGBPipeline(
                             current_task2_id = existing_task2_id
                             t2_success = True
                             t2_runtime = 0.0
+                            self._log_webodm_task_status(
+                                project_id=project_id,
+                                task_key="task2",
+                                task_id=current_task2_id,
+                                status="completed",
+                                success=True,
+                            )
                             logger.info(
                                 f"Resuming: Task 2 already completed in WebODM "
                                 f"(id={current_task2_id}) — reusing"
@@ -2364,14 +2477,26 @@ class RGBPipeline(
                                 f"Resuming: Task 2 still {task2_status} in WebODM "
                                 f"(id={current_task2_id}) — waiting for completion"
                             )
-                            t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                                project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                            t2_success, t2_runtime, _t2_info = (
+                                self._wait_for_webodm_task_completion(
+                                    processor,
+                                    project_id=project_id,
+                                    task_key="task2",
+                                    task_id=current_task2_id,
+                                )
                             )
     
                         else:
                             logger.warning(
                                 f"Resuming: Task 2 is '{task2_status}' in WebODM "
                                 f"(id={existing_task2_id}) — deleting and re-uploading"
+                            )
+                            self._log_webodm_task_status(
+                                project_id=project_id,
+                                task_key="task2",
+                                task_id=existing_task2_id,
+                                status=str(task2_status),
+                                success=False,
                             )
                             try:
                                 processor.delete_task(project_id, existing_task2_id)
@@ -2388,8 +2513,19 @@ class RGBPipeline(
                                 options=task2_options,
                                 processing_node=webodm_cfg.get("node_id"),
                             )
-                            t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                                project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                            self._log_webodm_task_created(
+                                project_id=project_id,
+                                task_key="task2",
+                                task_id=current_task2_id,
+                                task_name=task2_name,
+                            )
+                            t2_success, t2_runtime, _t2_info = (
+                                self._wait_for_webodm_task_completion(
+                                    processor,
+                                    project_id=project_id,
+                                    task_key="task2",
+                                    task_id=current_task2_id,
+                                )
                             )
     
                     elif prev_task2.get("id") and prev_project_id:
@@ -2398,8 +2534,13 @@ class RGBPipeline(
                             f"Resuming: Task 2 exists in checkpoint but incomplete "
                             f"(id={current_task2_id}) — checking WebODM status"
                         )
-                        t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                            project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                        t2_success, t2_runtime, _t2_info = (
+                            self._wait_for_webodm_task_completion(
+                                processor,
+                                project_id=project_id,
+                                task_key="task2",
+                                task_id=current_task2_id,
+                            )
                         )
     
                     else:
@@ -2410,26 +2551,19 @@ class RGBPipeline(
                             options=task2_options,
                             processing_node=webodm_cfg.get("node_id"),
                         )
-                        log_event(
-                            logger,
-                            "webodm_task_created",
+                        self._log_webodm_task_created(
                             project_id=project_id,
                             task_key="task2",
                             task_id=current_task2_id,
                             task_name=task2_name,
                         )
-                        t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                            project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                        )
-                        log_event(
-                            logger,
-                            "webodm_task_status",
-                            project_id=project_id,
-                            task_key="task2",
-                            task_id=current_task2_id,
-                            status=(_t2_info or {}).get("status"),
-                            success=t2_success,
-                            elapsed_seconds=f"{t2_runtime:.2f}",
+                        t2_success, t2_runtime, _t2_info = (
+                            self._wait_for_webodm_task_completion(
+                                processor,
+                                project_id=project_id,
+                                task_key="task2",
+                                task_id=current_task2_id,
+                            )
                         )
                 result["task2"] = {
                     "id": current_task2_id,
@@ -3266,15 +3400,24 @@ class RGBPipeline(
             status = processor.get_task_status(int(project_id), current_task_id)
 
             if status != "completed":
-                success, runtime, _info = processor.wait_for_completion(
-                    int(project_id),
-                    current_task_id,
-                    live=False,
-                    control_check=lambda: self._check_control_or_raise("webodm"),
+                success, runtime, _info = (
+                    self._wait_for_webodm_task_completion(
+                        processor,
+                        project_id=int(project_id),
+                        task_key=task_key,
+                        task_id=current_task_id,
+                    )
                 )
             else:
                 success = True
                 runtime = 0.0
+                self._log_webodm_task_status(
+                    project_id=int(project_id),
+                    task_key=task_key,
+                    task_id=current_task_id,
+                    status="completed",
+                    success=True,
+                )
 
         else:
             upload_image_folder = self._get_reusable_webodm_upload_folder(
@@ -3324,12 +3467,19 @@ class RGBPipeline(
                 options=task_options,
                 processing_node=webodm_cfg.get("node_id"),
             )
-
-            success, runtime, _info = processor.wait_for_completion(
-                int(project_id),
-                current_task_id,
-                live=False,
-                control_check=lambda: self._check_control_or_raise("webodm"),
+            self._log_webodm_task_created(
+                project_id=int(project_id),
+                task_key=task_key,
+                task_id=current_task_id,
+                task_name=task_name,
+            )
+            success, runtime, _info = (
+                self._wait_for_webodm_task_completion(
+                    processor,
+                    project_id=int(project_id),
+                    task_key=task_key,
+                    task_id=current_task_id,
+                )
             )
 
         task_state = {
@@ -3478,9 +3628,27 @@ class RGBPipeline(
                 task_id=str(task_id_to_restart),
                 restart_from=restart_from,
             )
-            success, runtime, task_info = processor.wait_for_completion(
-                int(project_id), str(task_id_to_restart), control_check=lambda: self._check_control_or_raise("webodm"),
-            )
+            operation_task_key = None
+            if task4.get("id") and str(task4.get("id")) == str(task_id_to_restart):
+                operation_task_key = "task4"
+            elif task2.get("id") and str(task2.get("id")) == str(task_id_to_restart):
+                operation_task_key = "task2"
+
+            if operation_task_key:
+                success, runtime, task_info = (
+                    self._wait_for_webodm_task_completion(
+                        processor,
+                        project_id=int(project_id),
+                        task_key=operation_task_key,
+                        task_id=str(task_id_to_restart),
+                    )
+                )
+            else:
+                success, runtime, task_info = processor.wait_for_completion(
+                    int(project_id),
+                    str(task_id_to_restart),
+                    control_check=lambda: self._check_control_or_raise("webodm"),
+                )
 
             updated_task_state = {
                 "id": str(task_id_to_restart),

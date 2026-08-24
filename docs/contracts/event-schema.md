@@ -70,6 +70,33 @@ Stage lifecycle events now use `webodm_task4` and `webodm_task2` as distinct
 stage names. Dedicated operation-level event IDs and complete WebODM branch
 instrumentation remain deferred.
 
+## WebODM Operation Event Collection
+
+Status: **Implemented and verified** for Task 4 and Task 2 using the current
+text-log event sink.
+
+- `webodm_task_created` is emitted immediately after each Task 4 or Task 2
+  external task creation with `project_id`, `task_key`, `task_id`, and
+  `task_name`.
+- `webodm_task_status` is emitted whenever the pipeline observes a terminal
+  Task 4 or Task 2 outcome with `project_id`, `task_key`, `task_id`, `status`,
+  and `success`.
+- `elapsed_seconds` is the WebODM-reported processing duration. It is omitted
+  when a reused task has no trustworthy duration; zero must not represent an
+  unknown duration.
+- Failures after task creation include the exception class as `error_type` and
+  an `error_message` bounded to 240 characters before the original exception
+  continues through existing stage failure handling.
+- Resume does not emit another terminal operation event when StageRunner skips
+  an already-completed operation. Re-observation of the same external task may
+  produce another status event, but metric consumers deduplicate by
+  `(project_id, task_id)`.
+- A replacement or retry that creates a new `task_id` is a distinct external
+  operation.
+
+This collection contract does not add durable event storage, event IDs,
+idempotency keys, API aggregation, or UI mutation behavior.
+
 ## Target Durable Event Schema
 
 Status: **Approved target behavior**; **not implemented**.

@@ -74,6 +74,10 @@ class ControlledWebODMPointcloudFailure(Exception):
     pass
 
 
+class ControlledWebODMWaitFailure(RuntimeError):
+    pass
+
+
 class ControlledQGISFailure(Exception):
     pass
 
@@ -252,6 +256,26 @@ class Task4FailureFakeWebODM(OrthomosaicExportFakeWebODM):
         if str(task_id) == "task-0001":
             return False, runtime, {**info, "status": "failed"}
         return success, runtime, info
+
+
+class ExistingCompletedWebODM(OrthomosaicExportFakeWebODM):
+    def find_task_by_name(self, project_id, task_name):
+        self._record("find_task_by_name", project_id, task_name)
+        self.task_statuses["task-existing"] = "completed"
+        return "task-existing"
+
+
+class FailedExistingWebODM(OrthomosaicExportFakeWebODM):
+    def find_task_by_name(self, project_id, task_name):
+        self._record("find_task_by_name", project_id, task_name)
+        self.task_statuses["task-existing"] = "failed"
+        return "task-existing"
+
+
+class WaitExceptionWebODM(OrthomosaicExportFakeWebODM):
+    def wait_for_completion(self, project_id, task_id, **kwargs):
+        super().wait_for_completion(project_id, task_id, **kwargs)
+        raise ControlledWebODMWaitFailure("x" * 300)
 
 
 
@@ -3132,11 +3156,13 @@ def test_webodm_both_mode_runs_task4_before_task2(
 ):
     repository = PipelineRepo(temporary_path_layout.database_path)
     fake_webodm = OrthomosaicExportFakeWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-both-success.log"
     pipeline = build_pipeline(
         temporary_path_layout,
         sample_dataset_dir,
         repository,
         fake_webodm,
+        webodm_log_path=webodm_log_path,
     )
     _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
         pipeline,
@@ -3160,6 +3186,22 @@ def test_webodm_both_mode_runs_task4_before_task2(
     assert repository.get_latest_stage(RUN_ID, "webodm_task4")["status"] == "completed"
     assert repository.get_latest_stage(RUN_ID, "webodm_task2")["status"] == "completed"
 
+    content = webodm_log_path.read_text(encoding="utf-8")
+    expected_events = [
+        "event=webodm_task_created project_id=100 task_key=task4 task_id=task-0001",
+        (
+            "event=webodm_task_status project_id=100 task_key=task4 "
+            "task_id=task-0001 status=completed success=True elapsed_seconds=0.00"
+        ),
+        "event=webodm_task_created project_id=100 task_key=task2 task_id=task-0002",
+        (
+            "event=webodm_task_status project_id=100 task_key=task2 "
+            "task_id=task-0002 status=completed success=True elapsed_seconds=0.00"
+        ),
+    ]
+    event_positions = [content.index(event) for event in expected_events]
+    assert event_positions == sorted(event_positions)
+
 
 def test_webodm_both_mode_stops_before_task2_when_task4_fails(
     temporary_path_layout,
@@ -3167,11 +3209,13 @@ def test_webodm_both_mode_stops_before_task2_when_task4_fails(
 ):
     repository = PipelineRepo(temporary_path_layout.database_path)
     fake_webodm = Task4FailureFakeWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-task4-failure.log"
     pipeline = build_pipeline(
         temporary_path_layout,
         sample_dataset_dir,
         repository,
         fake_webodm,
+        webodm_log_path=webodm_log_path,
     )
     _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
         pipeline,
@@ -3190,6 +3234,158 @@ def test_webodm_both_mode_stops_before_task2_when_task4_fails(
     assert repository.get_latest_stage(RUN_ID, "webodm_task2") is None
     assert len(fake_webodm.calls_for("create_task_with_images")) == 1
 
+    content = webodm_log_path.read_text(encoding="utf-8")
+    assert (
+        "event=webodm_task_created project_id=100 task_key=task4 "
+        "task_id=task-0001"
+    ) in content
+    assert (
+        "event=webodm_task_status project_id=100 task_key=task4 "
+        "task_id=task-0001 status=failed success=False elapsed_seconds=0.00"
+    ) in content
+    assert "task_key=task2 task_id=" not in content
+
+
+def test_webodm_reused_completed_task_omits_unknown_runtime(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = ExistingCompletedWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-reused-task.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+        webodm_log_path=webodm_log_path,
+    )
+    _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = True
+    pipeline.skip_task4_webodm = False
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    result = pipeline.stage_webodm()
+
+    assert result["task4"]["id"] == "task-existing"
+    content = webodm_log_path.read_text(encoding="utf-8")
+    terminal_line = next(
+        line
+        for line in content.splitlines()
+        if (
+            "event=webodm_task_status" in line
+            and "task_key=task4" in line
+            and "task_id=task-existing" in line
+        )
+    )
+    assert "status=completed success=True" in terminal_line
+    assert "elapsed_seconds=" not in terminal_line
+    assert "task_id=task-existing" not in " ".join(
+        line
+        for line in content.splitlines()
+        if "event=webodm_task_created" in line
+    )
+
+
+def test_webodm_wait_exception_logs_bounded_failure_and_reraises(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = WaitExceptionWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-wait-exception.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+        webodm_log_path=webodm_log_path,
+    )
+    _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = True
+    pipeline.skip_task4_webodm = False
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+
+    with pytest.raises(ControlledWebODMWaitFailure, match="x{240}"):
+        pipeline.stage_webodm()
+
+    content = webodm_log_path.read_text(encoding="utf-8")
+    failure_line = next(
+        line
+        for line in content.splitlines()
+        if (
+            "event=webodm_task_status" in line
+            and "task_key=task4" in line
+            and "task_id=task-0001" in line
+        )
+    )
+    assert "status=failed success=False" in failure_line
+    assert "error_type=ControlledWebODMWaitFailure" in failure_line
+    assert f"error_message={'x' * 240}" in failure_line
+    assert "x" * 241 not in failure_line
+    assert "elapsed_seconds=" not in failure_line
+
+
+def test_webodm_task2_replacement_records_old_and_new_terminal_outcomes(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = FailedExistingWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-task2-replace.log"
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+        webodm_log_path=webodm_log_path,
+    )
+    _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = True
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+    pipeline.state["webodm"] = {
+        "project_id": 100,
+        "project_name": "existing-project",
+        "task1": None,
+        "task2": {},
+        "task4": {},
+        "downloads": {"task1": {}, "task2": {}, "task4": {}},
+    }
+
+    result = pipeline.stage_webodm()
+
+    assert result["task2"]["id"] == "task-0001"
+    content = webodm_log_path.read_text(encoding="utf-8")
+    expected_events = [
+        (
+            "event=webodm_task_status project_id=100 task_key=task2 "
+            "task_id=task-existing status=failed success=False"
+        ),
+        "event=webodm_task_created project_id=100 task_key=task2 task_id=task-0001",
+        (
+            "event=webodm_task_status project_id=100 task_key=task2 "
+            "task_id=task-0001 status=completed success=True elapsed_seconds=0.00"
+        ),
+    ]
+    event_positions = [content.index(event) for event in expected_events]
+    assert event_positions == sorted(event_positions)
+
 
 def test_webodm_both_mode_resume_preserves_task4_and_retries_failed_task2(
     temporary_path_layout,
@@ -3197,11 +3393,13 @@ def test_webodm_both_mode_resume_preserves_task4_and_retries_failed_task2(
 ):
     repository = PipelineRepo(temporary_path_layout.database_path)
     fake_webodm = RetryableTask2FailureFakeWebODM()
+    webodm_log_path = temporary_path_layout.logs_dir / "webodm-both-resume.log"
     pipeline = build_pipeline(
         temporary_path_layout,
         sample_dataset_dir,
         repository,
         fake_webodm,
+        webodm_log_path=webodm_log_path,
     )
     _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
         pipeline,
@@ -3259,6 +3457,24 @@ def test_webodm_both_mode_resume_preserves_task4_and_retries_failed_task2(
         call.args[1]
         for call in fake_webodm.calls_for("export_orthomosaic")
     ].count("task-0001") == 1
+
+    content = webodm_log_path.read_text(encoding="utf-8")
+    assert content.count(
+        "event=webodm_task_created project_id=100 task_key=task4 "
+        "task_id=task-0001"
+    ) == 1
+    assert content.count(
+        "event=webodm_task_status project_id=100 task_key=task4 "
+        "task_id=task-0001 status=completed success=True elapsed_seconds=0.00"
+    ) == 1
+    assert (
+        "event=webodm_task_status project_id=100 task_key=task2 "
+        "task_id=task-0002 status=failed success=False elapsed_seconds=0.00"
+    ) in content
+    assert (
+        "event=webodm_task_status project_id=100 task_key=task2 "
+        "task_id=task-0003 status=completed success=True elapsed_seconds=0.00"
+    ) in content
 
 
 def test_run_marks_both_mode_task4_success_task2_failure_as_partially_completed(

@@ -28,6 +28,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 | CW-ADR-005 | Approved target behavior | Combined WebODM mode uses `--both-tasks` / `Orthomosaic + 3D` with fixed Task 4 then Task 2 execution |
 | CW-ADR-006 | Approved target behavior | Publication runs as one `Activate Publication` stage after quality-gate approval |
 | CW-ADR-007 | Approved target behavior | Fully completed runs clean their run workspace by default, with `--keep-workspace` opt-out |
+| CW-ADR-008 | Implemented and verified | Task 4/Task 2 text events collect deduplicable external-operation outcomes and WebODM runtimes |
 
 ## CW-ADR-001 - Shared Contracts Reference Refactor Roadmap
 
@@ -96,4 +97,13 @@ The pipeline workstream has implemented the guarded `activate_publication` Stage
 - **Compatibility requirement:** This intentionally changes the default runtime retention target for successful runs. Cleanup must validate workspace ownership and resolved-path containment, and must never delete published survey outputs, production roots, WebODM state, pause flags, logs, checkpoints needed for recovery, or recovery evidence.
 - **UI/API impact:** Future read projections may expose workspace state such as `retained`, `cleaned`, `cleanup_skipped`, or `cleanup_failed`. UI mutation controls remain deferred until operational cleanup semantics are implemented safely.
 - **Implementation dependency:** Pipeline work must add `--keep-workspace`, default cleanup for fully `completed` runs only, retention for all non-completed paths, clear cleanup logging, and tests using pytest-owned workspaces and published roots.
+
+## CW-ADR-008 - WebODM Operation Observability Semantics
+
+- **Status:** Implemented and verified
+- **Context:** Separate Task 4 and Task 2 stage attempts exist, but their WebODM task creation, terminal outcomes, runtimes, resume observations, and replacement tasks were not covered consistently enough for stable read-only metrics.
+- **Decision:** Keep the existing text-log event sink and the `webodm_task_created` / `webodm_task_status` vocabulary. Runtime means WebODM-reported processing time and is omitted when a reused task has no trustworthy duration. Success and failure metrics count distinct `(project_id, task_id)` terminal outcomes; re-observing the same task on resume does not create another logical count, while a replacement or retry with a new task ID is a distinct operation. Exception type is a bounded metric dimension, while free-form error messages remain event detail only.
+- **Compatibility requirement:** Existing log columns, event names, stage statuses, aggregate WebODM state, Task 4-before-Task 2 ordering, `partially_completed`, and resume behavior remain unchanged. No event table, database migration, API aggregation, UI mutation, or durable operation ID is introduced.
+- **UI/API impact:** Read-only consumers may derive Task 4/Task 2 runtime and outcome metrics from the collected evidence, but must deduplicate by external project/task identity and treat missing runtime as unavailable rather than zero.
+- **Implementation dependency:** The next slice must define stable read-only operation IDs and project the existing stage/event evidence through the documented API schema without changing mutation behavior.
 

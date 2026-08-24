@@ -2,17 +2,20 @@
 
 ## Highest Priority
 
-1. Complete WebODM operation observability and read projection.
+1. Define stable read-only operation IDs and project operation evidence through the documented API schema.
 
-Why this is first: completed-run cleanup and separate Task 4/Task 2 stage persistence are implemented. The remaining operation-model gap is complete metrics/events and a read-only API projection; mutation controls remain deferred.
+Why this is first: completed-run cleanup, separate Task 4/Task 2 stage
+persistence, and Task 4/Task 2 event/metric collection are implemented. The
+remaining operation-model gap is stable read identity and a read-only API
+projection; mutation controls remain deferred.
 
 ## Recommended Pipeline Sequence
 
-1. Add complete Task 4 and Task 2 boundary events and bounded operation metrics.
+1. Define stable read-only operation IDs from existing run, stage-attempt, and WebODM project/task evidence.
 
-2. Define stable read-only operation IDs and project existing stage evidence through the documented API schema.
+2. Project existing stage and text-event evidence through the documented read-only API schema, including source and unavailable-data labels.
 
-3. Verify `partially_completed` and per-operation evidence in read-only UI/API consumers.
+3. Verify `partially_completed`, distinct operation outcomes, and missing-runtime behavior in read-only UI/API consumers.
 
 4. Keep operational UI controls disabled until mutation semantics are approved and implemented.
 
