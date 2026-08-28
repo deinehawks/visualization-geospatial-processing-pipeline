@@ -28,6 +28,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 | CW-ADR-005 | Approved target behavior | Combined WebODM mode uses `--both-tasks` / `Orthomosaic + 3D` with fixed Task 4 then Task 2 execution |
 | CW-ADR-006 | Approved target behavior | Publication runs as one `Activate Publication` stage after quality-gate approval |
 | CW-ADR-007 | Approved target behavior | Fully completed runs clean their run workspace by default, with `--keep-workspace` opt-out |
+| CW-ADR-008 | Implemented and verified | WebODM pause is local detach; task resume uses canonical exact-ID bindings |
 
 ## CW-ADR-001 - Shared Contracts Reference Refactor Roadmap
 
@@ -96,4 +97,13 @@ The pipeline workstream has implemented the guarded `activate_publication` Stage
 - **Compatibility requirement:** This intentionally changes the default runtime retention target for successful runs. Cleanup must validate workspace ownership and resolved-path containment, and must never delete published survey outputs, production roots, WebODM state, pause flags, logs, checkpoints needed for recovery, or recovery evidence.
 - **UI/API impact:** Future read projections may expose workspace state such as `retained`, `cleaned`, `cleanup_skipped`, or `cleanup_failed`. UI mutation controls remain deferred until operational cleanup semantics are implemented safely.
 - **Implementation dependency:** Pipeline work must add `--keep-workspace`, default cleanup for fully `completed` runs only, retention for all non-completed paths, clear cleanup logging, and tests using pytest-owned workspaces and published roots.
+
+## CW-ADR-008 - Deterministic WebODM Task Reattachment
+
+- **Status:** Implemented and verified
+- **Context:** A process restart could lose Task 4 identity, causing resume to create a new WebODM project/task or search the wrong project. Pipeline pause also left attempts running while the remote task continued.
+- **Decision:** Pipeline pause is a local detach and does not pause, cancel, or restart WebODM. The newest stage attempt controls resume. The canonical `webodm_tasks` binding stores run, operation, project ID, task UUID, expected name, remote status, and local artifact state. Normal Task 1, Task 2, and Task 4 resume fetches the exact task and fails closed on conflicts, missing identity, confirmed 404, failed/canceled state, or lookup failure. Normal orchestration does not search by name or implicitly delete/re-upload a bound task. Forced Task 4 execution means reconciliation and artifact delivery, never implicit remote replacement.
+- **Compatibility requirement:** The legacy JSON checkpoint remains an atomic recovery mirror and completed-stage output can seed legacy migration only when it does not conflict with the canonical binding. Existing databases receive additive repeatable columns; historical rows remain readable. Duplicate WebODM projects/tasks are never deleted automatically.
+- **UI/API impact:** Read projections should expose the newest stage attempt separately from binding history and should distinguish local `paused`, remote `running/completed/failed/canceled`, `requires_recovery`, and artifact readiness. Mutation endpoints remain deferred.
+- **Recovery:** `tools/repair_webodm_binding.py` validates an exact project/task read-only by default. Explicit `--apply` appends repair/audit evidence and atomically updates the compatibility checkpoint without restarting, canceling, uploading, downloading, or deleting WebODM resources.
 

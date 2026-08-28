@@ -326,8 +326,12 @@ def test_stage_runner_preserves_explicit_pipeline_control_signal(
         )
 
     stage = read_stage(temporary_path_layout.database_path)
-    assert stage["status"] == "running"
-    assert stage["error_message"] is None
+    if signal == "__PIPELINE_PAUSED__":
+        assert stage["status"] == "paused"
+        assert stage["error_message"] == "Paused by pipeline control"
+    else:
+        assert stage["status"] == "running"
+        assert stage["error_message"] is None
 
 
 def test_stage_runner_preserves_webodm_ui_cancellation_translation(

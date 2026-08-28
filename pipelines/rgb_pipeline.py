@@ -5,7 +5,7 @@ from typing import Dict, Any, Optional, Set, List, Tuple, Mapping
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context, log_event
 from shared.constants import WEBODM_RESTART_STAGES, WEBODM_RESTART_STAGE_NAMES
 from shared.logging import get_logger
-from shared.db.repo import PipelineRepo
+from shared.db.repo import PipelineRepo, WebODMBindingConflictError
 from shared.stage_runner import StageFailedWithOutput, StageRequiresRecovery, StageRunner
 from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
@@ -26,7 +26,11 @@ from shared.artifacts import (
 
 from shared.publication_lock import PublicationLockedError
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
-from modules.webodm.webodm_processor import WebODMProcessor
+from modules.webodm.webodm_processor import (
+    WebODMProcessor,
+    WebODMTaskLookupError,
+    WebODMTaskNotFound,
+)
 from modules.cross_run_image_filter.cross_run_image_filter import run_filter
 from modules.data_segregation.data_segregation import run_data_segregation
 from modules.qgis.qgis_tools import QGISTools
@@ -239,6 +243,8 @@ class RGBPipeline(
         )
 
         self.rgb_path: Optional[Path] = None
+        self._webodm_projects_created_this_process: set[int] = set()
+        self._resume_had_webodm_history = False
 
     # Helpers
     def _set_survey_artifact_context(self, survey_id: str, rgb_path: Path) -> None:
@@ -958,12 +964,28 @@ class RGBPipeline(
     def _save_webodm_checkpoint(self, data: dict) -> None:
         import json
         path = self._webodm_checkpoint_path()
+        temp_path = path.with_name(
+            f'.{path.name}.{uuid.uuid4().hex}.tmp'
+        )
+        payload = dict(data)
+        payload.setdefault('task4', None)
+        payload.setdefault('downloads', {})
+        payload['downloads'].setdefault('task4', {})
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        except Exception as e:
-            self.loggers["webodm"].warning(
-                f"Could not save webodm checkpoint: {e}")
+            temp_path.write_text(
+                json.dumps(payload, indent=2),
+                encoding='utf-8',
+            )
+            os.replace(temp_path, path)
+        except Exception as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            self.loggers['webodm'].warning(
+                f'Could not atomically save webodm checkpoint: {exc}'
+            )
 
     def _load_webodm_checkpoint(self) -> dict:
         import json
@@ -978,12 +1000,212 @@ class RGBPipeline(
             return {}
 
     def _clear_webodm_checkpoint(self) -> None:
-        path = self._webodm_checkpoint_path()
+        self.loggers['webodm'].debug(
+            'Retaining WebODM checkpoint as a recovery mirror.'
+        )
+
+    def _persist_webodm_binding(
+        self,
+        *,
+        task_key: str,
+        project_id: int,
+        task_id: Optional[str] = None,
+        task_name: Optional[str] = None,
+        remote_status: Optional[str] = None,
+        raw_status: Optional[Any] = None,
+        local_status: str = 'bound',
+        success: Optional[bool] = None,
+        runtime_seconds: Optional[float] = None,
+        binding_source: str = 'pipeline',
+    ) -> dict:
+        operation_attempt = self.repo.get_latest_stage(
+            self.run_id,
+            f'webodm_{task_key}',
+        )
+        stage_attempt_id = (
+            int(operation_attempt['id'])
+            if operation_attempt
+            else None
+        )
         try:
-            if path.exists():
-                path.unlink()
-        except Exception:
-            pass
+            binding = self.repo.record_webodm_binding(
+                run_id=self.run_id,
+                operation_key=task_key,
+                project_id=int(project_id),
+                task_id=task_id,
+                task_name=task_name,
+                survey_id=self.survey_id,
+                remote_status=remote_status,
+                raw_status=raw_status,
+                local_status=local_status,
+                success=success,
+                runtime_seconds=runtime_seconds,
+                binding_source=binding_source,
+                stage_attempt_id=stage_attempt_id,
+            )
+        except WebODMBindingConflictError as exc:
+            raise StageRequiresRecovery(
+                str(exc),
+                output={
+                    'operation_key': task_key,
+                    'status': 'requires_recovery',
+                    'project_id': project_id,
+                    'task_id': task_id,
+                },
+            ) from exc
+
+        web = self.state.setdefault('webodm', {})
+        existing_project = web.get('project_id')
+        if existing_project and int(existing_project) != int(project_id):
+            raise StageRequiresRecovery(
+                f'Conflicting WebODM project identities for run {self.run_id}: '
+                f'state={existing_project}, binding={project_id}',
+                output={
+                    'operation_key': task_key,
+                    'status': 'requires_recovery',
+                    'project_id': project_id,
+                    'task_id': task_id,
+                },
+            )
+        web['project_id'] = int(project_id)
+        if task_name and not web.get('project_name'):
+            web['project_name'] = self.survey_id
+        if task_id:
+            task_state = web.get(task_key)
+            if not isinstance(task_state, dict):
+                task_state = {}
+                web[task_key] = task_state
+            task_state['id'] = str(task_id)
+            if task_name:
+                task_state['name'] = task_name
+            if success is not None:
+                task_state['success'] = bool(success)
+            if runtime_seconds is not None:
+                task_state['runtime_seconds'] = float(runtime_seconds)
+            if remote_status:
+                task_state['remote_status'] = remote_status
+            if raw_status is not None:
+                task_state['raw_status'] = raw_status
+        web.setdefault('downloads', {}).setdefault(task_key, {})
+        self._save_webodm_checkpoint(web)
+        return binding
+
+    def _restore_webodm_identity(self) -> None:
+        legacy_web = self.state.get('webodm')
+        if not isinstance(legacy_web, Mapping) or not legacy_web:
+            completed = self.repo.get_latest_stage_output(self.run_id, 'webodm')
+            if isinstance(completed, Mapping):
+                legacy_web = dict(completed)
+                self.state['webodm'] = legacy_web
+            else:
+                checkpoint = self._load_webodm_checkpoint()
+                if checkpoint:
+                    legacy_web = checkpoint
+                    self.state['webodm'] = legacy_web
+
+        if not isinstance(legacy_web, Mapping):
+            legacy_web = {}
+
+        legacy_project = legacy_web.get('project_id')
+        resolved_project = None
+        for task_key in ('task1', 'task2', 'task4'):
+            binding = self.repo.get_webodm_binding(self.run_id, task_key)
+            legacy_task = legacy_web.get(task_key)
+            if not isinstance(legacy_task, Mapping):
+                legacy_task = {}
+
+            if binding is None and legacy_project:
+                binding = self._persist_webodm_binding(
+                    task_key=task_key,
+                    project_id=int(legacy_project),
+                    task_id=(
+                        str(legacy_task.get('id'))
+                        if legacy_task.get('id')
+                        else None
+                    ),
+                    task_name=legacy_task.get('name'),
+                    remote_status=legacy_task.get('remote_status'),
+                    raw_status=legacy_task.get('raw_status'),
+                    local_status='legacy_import',
+                    success=legacy_task.get('success'),
+                    runtime_seconds=legacy_task.get('runtime_seconds'),
+                    binding_source='legacy_state',
+                )
+
+            if binding is None:
+                continue
+
+            project_id = int(binding['project_id'])
+            if resolved_project is not None and resolved_project != project_id:
+                raise StageRequiresRecovery(
+                    f'Conflicting WebODM projects are bound to run {self.run_id}: '
+                    f'{resolved_project} and {project_id}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': project_id,
+                    },
+                )
+            resolved_project = project_id
+            if legacy_project and int(legacy_project) != project_id:
+                raise StageRequiresRecovery(
+                    f'Checkpoint/stage project {legacy_project} conflicts with '
+                    f'canonical WebODM project {project_id}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': project_id,
+                        'task_id': binding.get('task_id'),
+                    },
+                )
+            legacy_task_id = legacy_task.get('id')
+            bound_task_id = binding.get('task_id')
+            legacy_task_name = legacy_task.get('name')
+            bound_task_name = binding.get('task_name')
+            if (
+                bound_task_id
+                and legacy_task_id
+                and str(bound_task_id) != str(legacy_task_id)
+            ):
+                raise StageRequiresRecovery(
+                    f'Legacy {task_key} task {legacy_task_id} conflicts with '
+                    f'canonical task {bound_task_id}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': project_id,
+                        'task_id': bound_task_id,
+                    },
+                )
+            if (
+                bound_task_name
+                and legacy_task_name
+                and str(bound_task_name) != str(legacy_task_name)
+            ):
+                raise StageRequiresRecovery(
+                    f'Legacy {task_key} name {legacy_task_name!r} conflicts '
+                    f'with canonical name {bound_task_name!r}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': project_id,
+                        'task_id': bound_task_id,
+                    },
+                )
+
+            web = self.state.setdefault('webodm', {})
+            web['project_id'] = project_id
+            if binding.get('task_id'):
+                task_state = web.setdefault(task_key, {})
+                task_state['id'] = str(binding['task_id'])
+                if binding.get('task_name'):
+                    task_state['name'] = binding['task_name']
+                if binding.get('remote_status'):
+                    task_state['remote_status'] = binding['remote_status']
+            web.setdefault('downloads', {}).setdefault(task_key, {})
+
+        if self.state.get('webodm'):
+            self._save_webodm_checkpoint(self.state['webodm'])
 
     @staticmethod
     def _iter_jpeg_files(folder: Path) -> List[Path]:
@@ -1811,13 +2033,23 @@ class RGBPipeline(
         if not selected_operations:
             return self._stage_webodm_sequence()
 
+        forced_operation_keys = getattr(
+            self,
+            '_force_webodm_operations',
+            set(),
+        )
+        if forced_operation_keys:
+            selected_operations = [
+                key for key in selected_operations
+                if key in forced_operation_keys
+            ]
+
         aggregate: Dict[str, Any] = {}
         existing_web = self.state.get("webodm")
         if isinstance(existing_web, Mapping):
             self._merge_webodm_state(aggregate, existing_web)
 
         task4_completed = False
-        force_operations = bool(getattr(self, "_force_webodm_operations", False))
         for task_key in selected_operations:
             self.state["webodm"] = aggregate
             stage_name = f"webodm_{task_key}"
@@ -1827,7 +2059,7 @@ class RGBPipeline(
                     lambda task_key=task_key: self._run_webodm_operation(task_key),
                     output_key=stage_name,
                     state=self.state,
-                    force=force_operations,
+                    force=task_key in forced_operation_keys,
                     stale_running_policy="rerun",
                     retry_attempts=1,
                     retry_delay_seconds=0,
@@ -2028,10 +2260,21 @@ class RGBPipeline(
                 project_id = prev_project_id
                 logger.info(f"Resuming: reattaching to existing project (ID={project_id})")
             else:
+                if self._resume_had_webodm_history:
+                    raise StageRequiresRecovery(
+                        'A previous WebODM attempt exists but no durable project '
+                        'binding could be restored. Run the WebODM binding repair '
+                        'tool; refusing to create a duplicate project.',
+                        output={
+                            'status': 'requires_recovery',
+                            'operation_key': 'task4',
+                        },
+                    )
                 project_id = processor.create_project(
                     name=project_name,
                     description="RGB automated processing",
                 )
+                self._webodm_projects_created_this_process.add(int(project_id))
                 log_event(
                     logger,
                     "webodm_project_created",
@@ -2056,6 +2299,33 @@ class RGBPipeline(
                 "downloads": prev_web.get("downloads") or {"task1": {}, "task2": {}, "task4": {}},
             }
 
+            project_bindings = []
+            if not skip_task1:
+                project_bindings.append(('task1', task1_name))
+            if not skip_task2:
+                project_bindings.append(('task2', task2_name))
+            if not skip_task4:
+                task4_flag = self._webodm_task_flag(
+                    'task4',
+                    default_boundary_mode='b',
+                )
+                task4_name = self.task_name_overrides.get('task4')
+                if not task4_name:
+                    task4_name = self._webodm_task_name(
+                        survey_id=survey_id,
+                        flag=task4_flag,
+                        task_key='task4',
+                    )
+                project_bindings.append(('task4', task4_name))
+
+            for operation_key, operation_name in project_bindings:
+                self._persist_webodm_binding(
+                    task_key=operation_key,
+                    project_id=int(project_id),
+                    task_name=operation_name,
+                    local_status='project_bound',
+                )
+
             # ---------------- TASK 1 ----------------
             if skip_task1:
                 logger.info("Skipping WebODM Task 1 by request.")
@@ -2077,25 +2347,60 @@ class RGBPipeline(
                         f"(id={current_task1_id}) — skipping upload and processing"
                     )
                 else:
-                    existing_task1_id = None
-                    if prev_project_id:
-                        existing_task1_id = processor.find_task_by_name(project_id, task1_name)
-                        if existing_task1_id:
-                            logger.info(
-                                f"Resuming: found existing Task 1 in WebODM by name "
-                                f"'{task1_name}' (id={existing_task1_id}) — reattaching"
-                            )
-
+                    task1_binding = self.repo.get_webodm_binding(
+                        self.run_id,
+                        'task1',
+                    )
+                    existing_task1_id = (
+                        str(task1_binding['task_id'])
+                        if task1_binding and task1_binding.get('task_id')
+                        else (
+                            str(prev_task1['id'])
+                            if prev_task1.get('id')
+                            else None
+                        )
+                    )
                     if existing_task1_id:
-                        task1_status = processor.get_task_status(project_id, existing_task1_id)
+                        try:
+                            task1_info = processor.get_task(
+                                int(project_id),
+                                existing_task1_id,
+                            )
+                        except WebODMTaskNotFound as exc:
+                            raise StageRequiresRecovery(
+                                f'Canonical WebODM Task 1 is missing: '
+                                f'project_id={project_id} '
+                                f'task_id={existing_task1_id}',
+                                output={
+                                    'status': 'requires_recovery',
+                                    'operation_key': 'task1',
+                                    'project_id': project_id,
+                                    'task_id': existing_task1_id,
+                                },
+                            ) from exc
+                        task1_status, _terminal = (
+                            WebODMProcessor._normalize_status(
+                                task1_info.get('status')
+                            )
+                        )
                         logger.info(
                             f"Resuming: Task 1 current status in WebODM: {task1_status!r}"
+                        )
+                        self._persist_webodm_binding(
+                            task_key='task1',
+                            project_id=int(project_id),
+                            task_id=existing_task1_id,
+                            task_name=task1_name,
+                            remote_status=task1_status,
+                            raw_status=task1_info.get('status'),
+                            local_status='reattached',
                         )
 
                         if task1_status == "completed":
                             current_task1_id = existing_task1_id
                             t1_success = True
                             t1_runtime = 0.0
+                            _t1_info = task1_info
                             logger.info(
                                 f"Resuming: Task 1 already completed in WebODM "
                                 f"(id={current_task1_id}) — reusing"
@@ -2111,53 +2416,36 @@ class RGBPipeline(
                                 project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                             )
 
+                        elif task1_status == 'failed':
+                            raise RuntimeError(
+                                f'WEBODM_TASK_FAILED: task '
+                                f'{existing_task1_id} is failed; the pipeline '
+                                'will not create a replacement task.'
+                            )
+                        elif task1_status == 'canceled':
+                            raise RuntimeError('WEBODM_TASK_CANCELED')
                         else:
-                            logger.warning(
-                                f"Resuming: Task 1 is '{task1_status}' in WebODM "
-                                f"(id={existing_task1_id}) — deleting and re-uploading"
+                            raise WebODMTaskLookupError(
+                                f'Unsupported Task 1 status {task1_status!r} '
+                                f'for task {existing_task1_id}'
                             )
-                            try:
-                                processor.delete_task(project_id, existing_task1_id)
-                            except Exception as del_err:
-                                logger.warning(
-                                    f"Could not delete failed task "
-                                    f"{existing_task1_id}: {del_err} — continuing anyway"
-                                )
-
-                            task1_options = dict(webodm_cfg.get("task1_options", {}))
-
-                            if task1_bounded:
-                                if not boundary_available:
-                                    raise RuntimeError("Task 1 bounded was requested, but boundary is not available.")
-                                if not boundary_geojson_path or not Path(boundary_geojson_path).exists():
-                                    raise RuntimeError("Task 1 bounded was requested, but boundary GeoJSON is missing.")
-
-                                boundary_geojson = Path(boundary_geojson_path).read_text(encoding="utf-8")
-                                task1_options["boundary"] = boundary_geojson
-                                logger.info("Task 1 will run as bounded (boundary injected into Task 1 options).")
-
-                            current_task1_id = processor.create_task_with_images(
-                                project_id=project_id,
-                                name=task1_name,
-                                image_folder=str(upload_folder),
-                                options=task1_options,
-                                processing_node=webodm_cfg.get("node_id"),
-                            )
-                            t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                                project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                            )
-
-                    elif prev_task1.get("id") and prev_project_id:
-                        current_task1_id = str(prev_task1["id"])
-                        logger.info(
-                            f"Resuming: Task 1 exists but incomplete "
-                            f"(id={current_task1_id}) — checking WebODM status"
-                        )
-                        t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                            project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                        )
 
                     else:
+                        if (
+                            self._resume_had_webodm_history
+                            and int(project_id)
+                            not in self._webodm_projects_created_this_process
+                        ):
+                            raise StageRequiresRecovery(
+                                'Resumed Task 1 has no durable task UUID. '
+                                'Repair the binding before resuming; refusing '
+                                'to create a duplicate task.',
+                                output={
+                                    'status': 'requires_recovery',
+                                    'operation_key': 'task1',
+                                    'project_id': project_id,
+                                },
+                            )
                         task1_options = dict(webodm_cfg.get("task1_options", {}))
 
                         if task1_bounded:
@@ -2177,8 +2465,42 @@ class RGBPipeline(
                             options=task1_options,
                             processing_node=webodm_cfg.get("node_id"),
                         )
+                        self._persist_webodm_binding(
+                            task_key='task1',
+                            project_id=int(project_id),
+                            task_id=str(current_task1_id),
+                            task_name=task1_name,
+                            remote_status='queued',
+                            local_status='task_created',
+                        )
                         t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
                             project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                        )
+
+                    final_t1_raw_status = (_t1_info or {}).get('status')
+                    final_t1_status, _terminal = (
+                        WebODMProcessor._normalize_status(final_t1_raw_status)
+                    )
+                    self._persist_webodm_binding(
+                        task_key='task1',
+                        project_id=int(project_id),
+                        task_id=str(current_task1_id),
+                        task_name=task1_name,
+                        remote_status=final_t1_status,
+                        raw_status=final_t1_raw_status,
+                        local_status=(
+                            'processing_completed'
+                            if t1_success
+                            else 'remote_failed'
+                        ),
+                        success=bool(t1_success),
+                        runtime_seconds=float(t1_runtime),
+                    )
+                    if not t1_success:
+                        raise RuntimeError(
+                            f'WEBODM_TASK_FAILED: task {current_task1_id} '
+                            'did not complete; the pipeline will not create a '
+                            'replacement task.'
                         )
 
                     self._save_webodm_checkpoint({
@@ -2334,25 +2656,60 @@ class RGBPipeline(
                     )
     
                 else:
-                    existing_task2_id = None
-                    if prev_project_id:
-                        existing_task2_id = processor.find_task_by_name(project_id, task2_name)
-                        if existing_task2_id:
-                            logger.info(
-                                f"Resuming: found existing Task 2 in WebODM by name "
-                                f"'{task2_name}' (id={existing_task2_id}) — checking status"
-                            )
-    
+                    task2_binding = self.repo.get_webodm_binding(
+                        self.run_id,
+                        'task2',
+                    )
+                    existing_task2_id = (
+                        str(task2_binding['task_id'])
+                        if task2_binding and task2_binding.get('task_id')
+                        else (
+                            str(prev_task2['id'])
+                            if prev_task2.get('id')
+                            else None
+                        )
+                    )
                     if existing_task2_id:
-                        task2_status = processor.get_task_status(project_id, existing_task2_id)
+                        try:
+                            task2_info = processor.get_task(
+                                int(project_id),
+                                existing_task2_id,
+                            )
+                        except WebODMTaskNotFound as exc:
+                            raise StageRequiresRecovery(
+                                f'Canonical WebODM Task 2 is missing: '
+                                f'project_id={project_id} '
+                                f'task_id={existing_task2_id}',
+                                output={
+                                    'status': 'requires_recovery',
+                                    'operation_key': 'task2',
+                                    'project_id': project_id,
+                                    'task_id': existing_task2_id,
+                                },
+                            ) from exc
+                        task2_status, _terminal = (
+                            WebODMProcessor._normalize_status(
+                                task2_info.get('status')
+                            )
+                        )
                         logger.info(
                             f"Resuming: Task 2 current status in WebODM: {task2_status!r}"
+                        )
+                        self._persist_webodm_binding(
+                            task_key='task2',
+                            project_id=int(project_id),
+                            task_id=existing_task2_id,
+                            task_name=task2_name,
+                            remote_status=task2_status,
+                            raw_status=task2_info.get('status'),
+                            local_status='reattached',
                         )
     
                         if task2_status == "completed":
                             current_task2_id = existing_task2_id
                             t2_success = True
                             t2_runtime = 0.0
+                            _t2_info = task2_info
                             logger.info(
                                 f"Resuming: Task 2 already completed in WebODM "
                                 f"(id={current_task2_id}) — reusing"
@@ -2368,47 +2725,53 @@ class RGBPipeline(
                                 project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
                             )
     
+                        elif task2_status == 'failed':
+                            current_task2_id = existing_task2_id
+                            t2_success = False
+                            t2_runtime = 0.0
+                            _t2_info = task2_info
+                            logger.error(
+                                f'Bound Task 2 {current_task2_id} is failed; '
+                                'refusing to create a replacement task.'
+                            )
+                        elif task2_status == 'canceled':
+                            raise RuntimeError('WEBODM_TASK_CANCELED')
                         else:
-                            logger.warning(
-                                f"Resuming: Task 2 is '{task2_status}' in WebODM "
-                                f"(id={existing_task2_id}) — deleting and re-uploading"
+                            raise WebODMTaskLookupError(
+                                f'Unsupported Task 2 status {task2_status!r} '
+                                f'for task {existing_task2_id}'
                             )
-                            try:
-                                processor.delete_task(project_id, existing_task2_id)
-                            except Exception as del_err:
-                                logger.warning(
-                                    f"Could not delete failed Task 2 "
-                                    f"{existing_task2_id}: {del_err} — continuing anyway"
-                                )
-    
-                            current_task2_id = processor.create_task_with_images(
-                                project_id=project_id,
-                                name=task2_name,
-                                image_folder=str(upload_folder),
-                                options=task2_options,
-                                processing_node=webodm_cfg.get("node_id"),
-                            )
-                            t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                                project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                            )
-    
-                    elif prev_task2.get("id") and prev_project_id:
-                        current_task2_id = str(prev_task2["id"])
-                        logger.info(
-                            f"Resuming: Task 2 exists in checkpoint but incomplete "
-                            f"(id={current_task2_id}) — checking WebODM status"
-                        )
-                        t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                            project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
-                        )
     
                     else:
+                        if (
+                            self._resume_had_webodm_history
+                            and int(project_id)
+                            not in self._webodm_projects_created_this_process
+                        ):
+                            raise StageRequiresRecovery(
+                                'Resumed Task 2 has no durable task UUID. '
+                                'Repair the binding before resuming; refusing '
+                                'to create a duplicate task.',
+                                output={
+                                    'status': 'requires_recovery',
+                                    'operation_key': 'task2',
+                                    'project_id': project_id,
+                                },
+                            )
                         current_task2_id = processor.create_task_with_images(
                             project_id=project_id,
                             name=task2_name,
                             image_folder=str(upload_folder),
                             options=task2_options,
                             processing_node=webodm_cfg.get("node_id"),
+                        )
+                        self._persist_webodm_binding(
+                            task_key='task2',
+                            project_id=int(project_id),
+                            task_id=str(current_task2_id),
+                            task_name=task2_name,
+                            remote_status='queued',
+                            local_status='task_created',
                         )
                         log_event(
                             logger,
@@ -2431,6 +2794,25 @@ class RGBPipeline(
                             success=t2_success,
                             elapsed_seconds=f"{t2_runtime:.2f}",
                         )
+                    final_t2_raw_status = (_t2_info or {}).get('status')
+                    final_t2_status, _terminal = (
+                        WebODMProcessor._normalize_status(final_t2_raw_status)
+                    )
+                    self._persist_webodm_binding(
+                        task_key='task2',
+                        project_id=int(project_id),
+                        task_id=str(current_task2_id),
+                        task_name=task2_name,
+                        remote_status=final_t2_status,
+                        raw_status=final_t2_raw_status,
+                        local_status=(
+                            'processing_completed'
+                            if t2_success
+                            else 'remote_failed'
+                        ),
+                        success=bool(t2_success),
+                        runtime_seconds=float(t2_runtime),
+                    )
                 result["task2"] = {
                     "id": current_task2_id,
                     "name": task2_name,
@@ -2449,6 +2831,9 @@ class RGBPipeline(
                 # Update state with Task 2 results
                 self.state["webodm"]["task2"] = result["task2"]
                 self.state["webodm"]["downloads"] = result["downloads"]
+
+                if not t2_success:
+                    return result
     
                 # ---------------- Task 2 bounded orthomosaic ----------------
                 if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
@@ -3258,12 +3643,91 @@ class RGBPipeline(
 
         processor = self._create_webodm_processor(logger)
 
-        existing_task_id = processor.find_task_by_name(int(project_id), task_name)
+        binding = self.repo.get_webodm_binding(self.run_id, task_key)
+        existing_task_id = None
+        if binding:
+            bound_project_id = binding.get('project_id')
+            bound_task_name = binding.get('task_name')
+            if int(binding['project_id']) != int(project_id):
+                raise StageRequiresRecovery(
+                    f'Canonical {task_key} project {bound_project_id} '
+                    f'conflicts with state project {project_id}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': binding['project_id'],
+                        'task_id': binding.get('task_id'),
+                    },
+                )
+            if binding.get('task_name') and binding['task_name'] != task_name:
+                raise StageRequiresRecovery(
+                    f'Canonical {task_key} name {bound_task_name!r} '
+                    f'does not match expected name {task_name!r}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': project_id,
+                        'task_id': binding.get('task_id'),
+                    },
+                )
+            if binding.get('task_id'):
+                existing_task_id = str(binding['task_id'])
+
+        if (
+            not existing_task_id
+            and self._resume_had_webodm_history
+            and int(project_id) not in self._webodm_projects_created_this_process
+        ):
+            raise StageRequiresRecovery(
+                f'Resumed {task_key} has project {project_id} but no durable '
+                'task UUID. Repair the binding before resuming; refusing to '
+                'create a duplicate task.',
+                output={
+                    'status': 'requires_recovery',
+                    'operation_key': task_key,
+                    'project_id': project_id,
+                },
+            )
 
         if existing_task_id:
             logger.info(f"Found existing {task_key}: {existing_task_id}")
             current_task_id = str(existing_task_id)
-            status = processor.get_task_status(int(project_id), current_task_id)
+            try:
+                task_info = processor.get_task(
+                    int(project_id),
+                    current_task_id,
+                )
+            except WebODMTaskNotFound as exc:
+                raise StageRequiresRecovery(
+                    f'Canonical WebODM task is missing: project_id={project_id} '
+                    f'task_id={current_task_id}',
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': project_id,
+                        'task_id': current_task_id,
+                    },
+                ) from exc
+            status, _terminal = WebODMProcessor._normalize_status(
+                task_info.get('status')
+            )
+            self._persist_webodm_binding(
+                task_key=task_key,
+                project_id=int(project_id),
+                task_id=current_task_id,
+                task_name=task_name,
+                remote_status=status,
+                raw_status=task_info.get('status'),
+                local_status='reattached',
+            )
+
+            if status == 'failed':
+                raise RuntimeError(
+                    f'WEBODM_TASK_FAILED: task {current_task_id} is failed; '
+                    'the pipeline will not create a replacement task.'
+                )
+            if status == 'canceled':
+                raise RuntimeError('WEBODM_TASK_CANCELED')
 
             if status != "completed":
                 success, runtime, _info = processor.wait_for_completion(
@@ -3275,6 +3739,7 @@ class RGBPipeline(
             else:
                 success = True
                 runtime = 0.0
+                _info = task_info
 
         else:
             upload_image_folder = self._get_reusable_webodm_upload_folder(
@@ -3325,6 +3790,15 @@ class RGBPipeline(
                 processing_node=webodm_cfg.get("node_id"),
             )
 
+            self._persist_webodm_binding(
+                task_key=task_key,
+                project_id=int(project_id),
+                task_id=str(current_task_id),
+                task_name=task_name,
+                remote_status='queued',
+                local_status='task_created',
+            )
+
             success, runtime, _info = processor.wait_for_completion(
                 int(project_id),
                 current_task_id,
@@ -3332,6 +3806,21 @@ class RGBPipeline(
                 control_check=lambda: self._check_control_or_raise("webodm"),
             )
 
+        final_raw_status = (_info or {}).get('status')
+        final_remote_status, _terminal = WebODMProcessor._normalize_status(
+            final_raw_status
+        )
+        self._persist_webodm_binding(
+            task_key=task_key,
+            project_id=int(project_id),
+            task_id=str(current_task_id),
+            task_name=task_name,
+            remote_status=final_remote_status,
+            raw_status=final_raw_status,
+            local_status='processing_completed' if success else 'remote_failed',
+            success=bool(success),
+            runtime_seconds=float(runtime),
+        )
         task_state = {
             "id": str(current_task_id),
             "name": task_name,
@@ -3348,6 +3837,17 @@ class RGBPipeline(
 
         selected = None
 
+        if not success:
+            self.state['webodm'] = web
+            return {
+                task_key: task_state,
+                'downloads': task_downloads,
+                'project_id': project_id,
+                'project_name': project_name,
+                'selected_webodm_task': None,
+                'selected_orthomosaic': None,
+            }
+
         if exports_cfg.get("enabled", False) and exports_cfg.get("ortho", {}).get("enabled", False):
             ortho_cfg = exports_cfg["ortho"]
             epsg = int(ortho_cfg.get("reproject_epsg", 4326))
@@ -3358,17 +3858,62 @@ class RGBPipeline(
                 flag=task_flag,
             )
 
-            workspace_path, published_path = self._export_orthomosaic_to_workspace(
-                processor=processor,
-                project_id=int(project_id),
-                task_id=str(current_task_id),
-                task_key=task_key,
-                published_dir=task_ortho_dir,
-                filename=filename,
-                epsg=epsg,
-                candidates=candidates,
-                gdalwarp_path=(qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"),
+            try:
+                workspace_path, published_path = self._export_orthomosaic_to_workspace(
+                    processor=processor,
+                    project_id=int(project_id),
+                    task_id=str(current_task_id),
+                    task_key=task_key,
+                    published_dir=task_ortho_dir,
+                    filename=filename,
+                    epsg=epsg,
+                    candidates=candidates,
+                    gdalwarp_path=(
+                        qgis_tools_cfg.get("gdalwarp_path") or "gdalwarp"
+                    ),
+                )
+            except Exception:
+                self._persist_webodm_binding(
+                    task_key=task_key,
+                    project_id=int(project_id),
+                    task_id=str(current_task_id),
+                    task_name=task_name,
+                    remote_status=final_remote_status,
+                    raw_status=final_raw_status,
+                    local_status='artifact_failed',
+                    success=False,
+                    runtime_seconds=float(runtime),
+                )
+                raise
+
+            artifact_paths = [
+                Path(value)
+                for value in (workspace_path, published_path)
+                if value is not None
+            ]
+            artifact_valid = (
+                len(artifact_paths) == 2
+                and all(
+                    path.is_file() and path.stat().st_size > 0
+                    for path in artifact_paths
+                )
             )
+            if not artifact_valid:
+                self._persist_webodm_binding(
+                    task_key=task_key,
+                    project_id=int(project_id),
+                    task_id=str(current_task_id),
+                    task_name=task_name,
+                    remote_status=final_remote_status,
+                    raw_status=final_raw_status,
+                    local_status='artifact_failed',
+                    success=False,
+                    runtime_seconds=float(runtime),
+                )
+                raise RuntimeError(
+                    f'ORTHOMOSAIC_EXPORT_FAILED: {task_key} completed remotely '
+                    'but no non-empty orthomosaic was delivered.'
+                )
 
             if published_path:
                 task_downloads["orthomosaic"] = str(published_path)
@@ -3389,6 +3934,17 @@ class RGBPipeline(
 
                 web["selected_webodm_task"] = task_key
                 web["selected_orthomosaic"] = selected
+                self._persist_webodm_binding(
+                    task_key=task_key,
+                    project_id=int(project_id),
+                    task_id=str(current_task_id),
+                    task_name=task_name,
+                    remote_status=final_remote_status,
+                    raw_status=final_raw_status,
+                    local_status='artifact_ready',
+                    success=True,
+                    runtime_seconds=float(runtime),
+                )
             else:
                 logger.warning(f"Could not download {task_key} orthomosaic.")
 
@@ -3577,6 +4133,30 @@ class RGBPipeline(
                     logger.warning(f"Could not select orthomosaic after quality pass: {e}")
                     selected = None
 
+                selected_path = (
+                    Path(selected['source_path'])
+                    if isinstance(selected, Mapping)
+                    and selected.get('source_path')
+                    else None
+                )
+                if (
+                    selected_path is None
+                    or not selected_path.is_file()
+                    or selected_path.stat().st_size <= 0
+                ):
+                    logger.error(
+                        'Quality gate cannot pass: no non-empty selected '
+                        'orthomosaic is available.'
+                    )
+                    return {
+                        'passed': False,
+                        'restarts': restarts,
+                        'project_id': project_id,
+                        'reason': 'missing_selected_orthomosaic',
+                        'selected_webodm_task': None,
+                        'selected_orthomosaic': None,
+                    }
+
                 self._cleanup_webodm_upload_cache_from_state(self.loggers["webodm"])
 
                 return {
@@ -3710,6 +4290,9 @@ class RGBPipeline(
 
         total_start = time.perf_counter()
         force_stages = force_stages or set()
+        self._resume_had_webodm_history = bool(
+            resume and self.repo.get_latest_stage(self.run_id, 'webodm')
+        )
         stage_steps = [
             {
                 "name": "data_segregation",
@@ -3767,6 +4350,15 @@ class RGBPipeline(
             )
 
         default_stage_names = {step["name"] for step in stage_steps}
+        supported_force_stages = default_stage_names | {'webodm_task4'}
+        unknown_force_stages = set(force_stages).difference(
+            supported_force_stages
+        )
+        if unknown_force_stages:
+            raise ValueError(
+                'force_stages contains unknown stages: '
+                + ', '.join(sorted(unknown_force_stages))
+            )
         if selected_stages is None:
             stages_to_run = default_stage_names
         else:
@@ -3778,8 +4370,15 @@ class RGBPipeline(
                     + ", ".join(sorted(unknown_stages))
                 )
 
+        if 'webodm_task4' in force_stages:
+            stages_to_run.add('webodm')
+
         def _force(name: str) -> bool:
-            return (name in force_stages) or (not resume)
+            return (
+                name in force_stages
+                or (name == 'webodm' and 'webodm_task4' in force_stages)
+                or not resume
+            )
 
         try:
             for step in stage_steps:
@@ -3788,6 +4387,9 @@ class RGBPipeline(
                     continue
 
                 self._check_control_or_raise(stage_name)
+
+                if stage_name == 'webodm':
+                    self._restore_webodm_identity()
 
                 if self._stage_will_run(stage_name, force=_force(stage_name)):
                     self._preflight_stage(stage_name)
@@ -3814,7 +4416,22 @@ class RGBPipeline(
                     )
 
                 if stage_name == "webodm":
-                    self._force_webodm_operations = _force(stage_name)
+                    if (
+                        'webodm_task4' in force_stages
+                        and 'webodm' not in force_stages
+                    ):
+                        self._force_webodm_operations = {'task4'}
+                    elif _force(stage_name):
+                        self._force_webodm_operations = {
+                            key
+                            for key, skipped in (
+                                ('task4', self.skip_task4_webodm),
+                                ('task2', self.skip_task2_webodm),
+                            )
+                            if not skipped
+                        }
+                    else:
+                        self._force_webodm_operations = set()
                 try:
                     self.runner.run(stage_name, step["fn"], **runner_kwargs)
                 finally:

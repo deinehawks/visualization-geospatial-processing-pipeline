@@ -1208,3 +1208,25 @@ Validation for this slice:
 Added on 2026-08-19, test imports and resolver expectations were aligned with the tracked module layout and current public helper signature. `tests/test_logging_context_ownership.py` imports parser helpers from `tools.query_survey_stats`; `tests/test_main_resume_source.py` passes the survey argument directly and no longer supplies removed `field_data_root` arguments.
 
 Validation collected 229 tests without exclusions and passed the full default suite 229/229. Focused coverage passed 11/11, compilation passed, and scoped `git diff --check` passed. No external service, subprocess, production path, production database, or real pipeline was used.
+
+## Deterministic WebODM Task 4 resume coverage
+
+Added on 2026-08-28, `tests/test_webodm_resume_recovery.py` and the WebODM resume cases in `tests/test_rgb_pipeline_single_stage_execution.py` use temporary SQLite databases, temporary checkpoints/workspaces, and fake WebODM clients.
+
+Coverage proves:
+
+- WebODM raw status codes normalize to queued, running, failed, completed, and canceled correctly;
+- project/task identity is durable before polling and survives a local pause;
+- Task 1 and Task 2 also persist immediately and reuse their exact UUIDs without name lookup, implicit deletion, or duplicate upload;
+- a fresh-process resume reattaches the exact UUID and a remotely completed task proceeds directly to export without another upload;
+- failed, canceled, confirmed-missing, conflicting-name/project/task, and missing historical bindings fail closed without remote replacement;
+- artifact export failure preserves the binding and leaves Task 4 retryable locally;
+- the newest stage attempt controls resume and local pause finalizes active attempts as `paused`;
+- checkpoints are atomic compatibility mirrors and the additive migration upgrades a legacy table repeatably;
+- the repair workflow is read-only in dry-run, audited on apply, append-preserving, and idempotent for the same validated identity;
+- `webodm_task4` is a valid force alias and unknown force targets are rejected before stage execution; and
+- combined-mode ordering and existing successful Task 4 output compatibility remain covered.
+
+Validation compiled every changed Python file, passed 100/100 relevant WebODM/orchestration/database tests, collected 260 tests, and passed the full safe default suite 260/260.
+
+The default suite did not contact WebODM, run the real pipeline, upload or download imagery, execute QGIS/GDAL, open production SQLite, access production survey/network roots, register hotkeys, or perform destructive cleanup. Manual compatibility checks against a disposable non-production WebODM instance remain intentionally unexecuted and require explicit environment authorization.

@@ -115,7 +115,9 @@ Status: **Proposed and awaiting approval** unless noted.
   "project_id": 100,
   "task_id": "task-0001",
   "task_name": "orthomosaic--site-T4",
-  "status": "completed",
+  "remote_status": "completed",
+  "raw_remote_status": "40",
+  "local_status": "artifact_ready",
   "success": true,
   "options_snapshot": {},
   "runtime_seconds": 3600.0,
@@ -222,6 +224,9 @@ Status: **Partially implemented; read-only API projection remains deferred**.
 - The quality gate runs once after all selected WebODM tasks complete.
 - Each selected operation now has a separate stage record with task identity, status, runtime-bearing task data, workspace/output mappings, and failure evidence. Dedicated operation IDs, complete option snapshots/metrics, and API projection remain future work.
 - A successful operation must remain visible and untouched by default when retrying a failed operation.
+- Task 1, Task 2, and Task 4 persistence now use canonical run/operation/project/task bindings. Task 4 operator repair is append-preserving. A read projection should expose canonical binding identity separately from historical rows.
+- Task 4 pause is local detach: remote status and local attempt/artifact status are independent fields. A remotely running or completed task can coexist with a locally paused attempt.
+- Normal WebODM resume reuses each exact canonical task UUID; `--force-stage webodm_task4` specifically reconciles Task 4. Missing/conflicting bindings project as recovery-required evidence; they must not be represented as permission to create a replacement.
 ## Publication Activation API Contract
 
 Status: **Partially implemented with deferred operational endpoints**.

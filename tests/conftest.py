@@ -18,6 +18,10 @@ from dotenv import main as dotenv_main
 
 from shared.db.connection import connect
 from shared.db.migrations.m001_add_run_pause_columns import MIGRATION_ID, apply
+from shared.db.migrations.m002_webodm_task_bindings import (
+    MIGRATION_ID as WEBODM_BINDING_MIGRATION_ID,
+    apply as apply_webodm_binding_migration,
+)
 from shared.db.repo import utc_now_iso
 from shared.db.schema import SCHEMA_SQL
 
@@ -48,9 +52,14 @@ def initialize_temporary_pipeline_database(database_path: Path) -> Path:
     try:
         connection.executescript(SCHEMA_SQL)
         apply(connection)
+        apply_webodm_binding_migration(connection)
         connection.execute(
             "INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)",
             (MIGRATION_ID, utc_now_iso()),
+        )
+        connection.execute(
+            'INSERT OR IGNORE INTO schema_migrations (id, applied_at) VALUES (?, ?)',
+            (WEBODM_BINDING_MIGRATION_ID, utc_now_iso()),
         )
         connection.commit()
     finally:

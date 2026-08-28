@@ -213,6 +213,22 @@ class StageRunner:
                     isinstance(exc, RuntimeError)
                     and message in _PIPELINE_CONTROL_SIGNALS
                 ):
+                    if message == '__PIPELINE_PAUSED__':
+                        runtime = time.perf_counter() - wall_start
+                        paused_output = None
+                        if state is not None and output_key:
+                            candidate = state.get(output_key)
+                            if isinstance(candidate, dict):
+                                paused_output = candidate
+                        self.repo.finish_stage_with_status(
+                            stage_id=stage_id,
+                            status='paused',
+                            runtime_seconds=runtime,
+                            output=paused_output,
+                            error_message='Paused by pipeline control',
+                        )
+                        for _lg in self.extra_loggers:
+                            set_stage_context(_lg, '')
                     raise
 
                 if isinstance(exc, (StageRequiresRecovery, StageFailedWithOutput)):

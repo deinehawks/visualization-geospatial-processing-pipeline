@@ -36,7 +36,10 @@ class PipelineControl:
             f"pause requested for run {self.run_id} at {datetime.datetime.now().isoformat()}",
             encoding="utf-8",
         )
-        logger.warning(f"Pause requested for run {self.run_id}. Pipeline will pause safely.")
+        logger.warning(
+            f'Pause requested for run {self.run_id}. Local orchestration will '
+            'detach safely; any active WebODM task will continue remotely.'
+        )
 
     def request_abort(self, logger) -> None:
         self.data_dir.mkdir(parents=True, exist_ok=True)

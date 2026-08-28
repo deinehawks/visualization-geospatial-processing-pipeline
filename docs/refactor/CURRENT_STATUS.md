@@ -2208,6 +2208,25 @@ This slice does not add UI/API mutation endpoints, does not recover stale locks,
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
 
+## Deterministic WebODM Task 4 pause/resume and repair
+
+Date: 2026-08-28.
+
+Task 1, Task 2, and Task 4 now record canonical run/operation/project/task bindings in the additive `webodm_tasks` persistence model immediately after remote creation and before polling. Normal resume reconciles each exact project ID and task UUID. `--force-stage webodm_task4` performs Task 4 reconciliation/export specifically. Bindings survive pause/failure/success, and reconciliation fails closed on identity conflicts, confirmed missing tasks, lookup failures, failed/canceled tasks, or historical attempts with no durable identity. The compatibility JSON checkpoint is atomic and retained.
+
+Pipeline pause now finalizes active inner and outer attempts as `paused` while explicitly leaving WebODM running remotely. The newest stage attempt controls resume, so an older completion cannot mask a newer forced/paused/failed attempt. WebODM numeric status normalization now matches the API codes used by Task 4 reconciliation. Artifact success requires non-empty workspace and compatibility-mirror orthomosaics; quality gate refuses a missing selected file.
+
+The CLI validates force targets and supports `webodm_task4` as a first-class reconciliation/export alias. `tools/repair_webodm_binding.py` performs exact-task validation in dry-run mode by default; explicit `--apply` appends audit-preserving repair evidence and atomically updates the compatibility checkpoint without changing WebODM.
+
+### Validation
+
+- Python compilation of every changed Python implementation and test file passed.
+- Complete WebODM persistence/recovery, StageRunner, RGBPipeline, fake WebODM, and temporary-database files: 100 passed.
+- `python -m pytest --collect-only -q`: 260 tests collected.
+- `python -m pytest -q`: 260 passed.
+
+All automated cases used pytest-owned temporary SQLite/filesystem paths and fake WebODM clients. No real pipeline, WebODM request, upload/download, project/task mutation, QGIS/GDAL command, production database, survey root, network share, or destructive cleanup operation was used.
+
 ## Phase 3 completed-run workspace cleanup
 
 Date: 2026-08-19.

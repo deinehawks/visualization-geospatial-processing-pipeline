@@ -20,7 +20,7 @@ Current SQLite tables from [shared/db/schema.py](../../shared/db/schema.py):
 | `runs` | Parent run record keyed by `run_id`; stores optional `survey_id`, status, timestamps, runtime, pause metadata, source, surveys root, and year | Implemented and verified | Existing rows must remain readable |
 | `stages` | Append-only stage records keyed by autoincrement `id`; stores `run_id`, `stage_name`, status, timestamps, runtime, error message, and output JSON | Implemented and verified | Existing resume/reporting behavior must remain compatible |
 | `surveys` | Survey-level status and total runtime | Implemented and verified | Survey analytics may keep using it |
-| `webodm_tasks` | WebODM task metadata table | Implemented, limited use verified indirectly | Do not treat as the complete external-operation model |
+| `webodm_tasks` | Durable WebODM project/task binding history keyed by run and operation | Implemented and verified for Task 1, Task 2, and Task 4 reconciliation | Existing rows remain readable; the newest binding is canonical and repair rebindings append history |
 | `schema_migrations` | Applied migration IDs | Implemented and verified | Migrations must remain repeatable |
 
 Current timestamps are generated with timezone-aware UTC ISO strings through `utc_now_iso()`. Current duration values are seconds as floating point numbers.
@@ -32,7 +32,7 @@ Status: **Implemented and verified** for the listed values.
 | Entity | Current status values | Notes |
 |---|---|---|
 | `runs.status` | `running`, `paused`, `completed`, `failed`, `partially_completed` | WebODM UI cancellation currently marks the run paused with reason `webodm_ui_cancel`; `partially_completed` is used for the approved combined-mode Task 4 success / Task 2 failure case |
-| `stages.status` | `running`, `completed`, `failed`, `partially_completed`, `requires_recovery` | `webodm_task4` and `webodm_task2` record operation outcomes separately; the compatibility `webodm` coordinator uses `partially_completed` so resume re-enters it after Task 4 success / Task 2 failure |
+| `stages.status` | `running`, `paused`, `completed`, `failed`, `partially_completed`, `requires_recovery` | Active inner and outer attempts are finalized as `paused` when local orchestration pauses; WebODM operation rows remain separate |
 | `surveys.status` | `running`, `completed`, `failed`, `partially_completed` | Survey status is updated after run success/failure when `survey_id` is known |
 | Publication manifest status | `staged`, `published` | Helper-level and explicit activation path only |
 | Activation journals | helper-specific statuses such as `prepared`, `activated`, `committed`, `rolled_back`, `failed` | Partially implemented in artifact helpers |
@@ -75,10 +75,10 @@ Status: **Partially implemented** because control-state semantics still rely on 
 | Stage starts | `StageRunner.start_stage()` inserts a new `running` row | UI should display attempts as rows, not one mutable stage |
 | Stage completes | `finish_stage(success=True)` sets `completed`, runtime, and optional output JSON | API can expose completed output as a stage attempt result |
 | Stage fails | `finish_stage(success=False)` sets `failed` and `error_message` | Error type is not persisted in SQLite today |
-| Resume skip | `get_latest_stage()` prefers the latest completed row over newer failed/running rows | Unresolved for authoritative attempt semantics |
-| Pause flag seen | Pipeline records a `run_paused` event and marks run paused in selected paths | Pause is current CLI/control-file behavior, not an API control contract |
+| Resume skip | `get_latest_stage()` returns the newest attempt; only a newest `completed` attempt is skipped | A newer forced, paused, failed, or running attempt cannot be masked by older completion |
+| Pause flag seen | Pipeline records a `run_paused` event, marks active attempts `paused`, and detaches local orchestration | An active WebODM task continues remotely; resume reconciles its exact stored project/task identity |
 | Abort flag seen | Pipeline marks run failed and emits `run_aborted` | Abort remote side effects are unresolved |
-| WebODM UI cancel | Stage records failed; run is marked paused with reason `webodm_ui_cancel` | UI must not equate this with a fully approved cancellation model |
+| WebODM UI cancel | Raw status `50` normalizes to `canceled`; the binding is retained and no replacement task is created | Operator may restart the same WebODM UUID and resume again |
 
 ## Target Entity Mapping
 
@@ -89,7 +89,7 @@ Status: **Approved target behavior** as a contract model; **not implemented as t
 | `pipeline_runs` | `runs` | Partially represented | API read projection can map current rows |
 | `stage_attempts` | `stages` rows | Partially represented | Needs attempt numbering/authoritative-attempt decision |
 | `pipeline_events` | Text logs with `event=<name>` | Partially represented | Durable event table is a future state phase |
-| `external_operations` | `webodm_tasks`, log events, stage output JSON | Partially represented | Needs operation identity/idempotency model |
+| `external_operations` | `webodm_tasks`, log events, stage output JSON | Current WebODM task identity/idempotency implemented; broader projection partial | API read projection |
 | `dataset_metrics` | Stage output JSON, logs, ad hoc calculations | Proposed and awaiting approval | Metrics collection design |
 | `artifacts` | Publication manifest records and stage output JSON | Partially represented | Artifact model and publication integration |
 | `quality_gate_decisions` | Interactive prompt return in stage output | Proposed and awaiting approval | Non-interactive gate decision |
@@ -124,18 +124,30 @@ Status: **Partially implemented**.
 | `--task4 --task2` | Not accepted by CLI because flags are mutually exclusive | May be accepted as equivalent to `--both-tasks` after deliberate CLI change | Preserve existing `--task4` and `--task2` meanings | UI should prefer `Orthomosaic + 3D`, not raw flag wording | CLI parser change |
 | Combined order | Implemented as Task 4 followed by Task 2 | Fixed Task 4 followed by Task 2 | Preserve existing single-task behavior | UI can show deterministic operation order once projection is available | Per-operation projection hardening |
 | Shared preprocessing | Some preprocessing is common before the `webodm` stage | Common preprocessing should run once when technically valid | Preserve stage outputs and resume behavior | UI may show one pipeline run with multiple operations | Operation split model |
-| Per-task records | `webodm_task4` and `webodm_task2` stage rows are implemented; the aggregate `webodm` row remains for compatibility and `webodm_tasks` remains limited | Task 4 and Task 2 use separate stage records plus a future dedicated operation projection | Do not collapse successful operation evidence when another fails | UI needs operation-level rows | API read projection and complete external operation model |
+| Per-task records | `webodm_task4` and `webodm_task2` stage rows are implemented; Task 1, Task 2, and Task 4 have canonical `webodm_tasks` bindings; the aggregate `webodm` row remains for compatibility | Extend the same exact-ID binding contract to any future remote operation path | Do not collapse successful operation evidence when another fails | UI needs operation-level rows | API read projection |
 | Task 4 failure in combined mode | Implemented in current combined flow | Stop combined WebODM immediately; do not run Task 2 | Preserve existing failure recording | UI shows Task 2 as not started due to Task 4 failure | Per-operation projection hardening |
 | Task 2 failure after Task 4 success | Runtime status persistence implemented as `partially_completed` | Run status becomes `partially_completed`; Task 4 output remains eligible for publication | Preserve Task 4 evidence and outputs | UI shows partial completion and publishable Task 4 artifacts | API/UI projection hardening |
 | QGIS behavior | Operation-aware QGIS stage runs once per successful WebODM operation in combined mode | Run QGIS once per successful WebODM operation in combined mode | Do not rerun successful operation outputs by default | UI shows QGIS outputs per operation | API/UI projection hardening |
 | Quality gate | Current full run has one `quality_gate` stage after `webodm`; internal current combined path has an intermediate gate before Task 4 | One quality gate after all selected WebODM tasks complete | Do not expose premature live controls | UI shows one review point for selected operations | Quality gate contract update |
 
+## WebODM Task Resume Contract
+
+Status: **Implemented and verified** with fake WebODM and temporary SQLite/filesystem tests.
+
+- `webodm_tasks` is authoritative for each current operation's run, project ID, task UUID, expected name, remote status, and local lifecycle.
+- The compatibility checkpoint is written atomically and is retained after success or failure; it is not authoritative over a conflicting database binding.
+- Normal Task 1, Task 2, and Task 4 resume fetches the exact task by project ID and task UUID. It does not search by name or create a replacement when an earlier WebODM attempt exists.
+- Confirmed missing tasks and conflicting identities require explicit repair. Lookup/network/authentication errors propagate against the same binding and are not treated as absence.
+- `--force-stage webodm_task4` re-enters Task 4 reconciliation and artifact delivery while reusing the canonical remote task. It does not authorize a new task.
+- A remotely completed task resumes at orthomosaic export. Task 4 and the outer WebODM stage complete only after non-empty workspace and compatibility-mirror orthomosaics exist.
+- `tools/repair_webodm_binding.py` is dry-run by default. `--apply` records a validated replacement binding and audit history; it never mutates WebODM.
+
 ## Unresolved State Decisions
 
-- Attempt authority after forced rerun remains unresolved in ADR-006.
-- Database versus logs/checkpoints/filesystem/WebODM source-of-truth remains unresolved in ADR-007.
-- Retry idempotency remains unresolved in ADR-008.
-- Pause/abort semantics remain unresolved in ADR-009.
+- Attempt authority is resolved for stage resume selection: the newest attempt controls. Broader API attempt projection remains unresolved.
+- Database versus checkpoint source-of-truth is resolved for current WebODM task identity; broader artifact/external-operation authority remains unresolved.
+- Retry idempotency is resolved for current WebODM task creation/reconciliation; other non-idempotent boundaries remain unresolved.
+- Pause semantics are resolved for active local stage attempts and Task 4 remote detach/reattach; abort semantics and broader external side effects remain unresolved.
 - Broader resource locking remains unresolved in ADR-004.
 - Quality gate API/UI approval semantics remain unresolved in ADR-012.
 - Exact database migration and backward-compatible persistence shape for `partially_completed` remains unresolved until the implementation slice.

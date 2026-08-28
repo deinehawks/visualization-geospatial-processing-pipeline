@@ -60,7 +60,26 @@ def main() -> None:
         action="store_true",
         help="Disable the cross-run filter stage and copy raw images directly into path output.",
     )
-    parser.add_argument("--force-stage", action="append", default=[], help="Force a completed stage to rerun during resume. Can be used multiple times.",)
+    parser.add_argument(
+        "--force-stage",
+        action="append",
+        default=[],
+        choices=[
+            "data_segregation",
+            "cross_run_filter",
+            "kml_boundary",
+            "webodm",
+            "webodm_task4",
+            "quality_gate",
+            "qgis",
+            "activate_publication",
+        ],
+        help=(
+            "Force a completed stage to rerun during resume. "
+            "webodm_task4 reconciles/downloads the existing Task 4. "
+            "Can be used multiple times."
+        ),
+    )
     parser.add_argument(
         "--activate-publication",
         action="store_true",

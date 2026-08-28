@@ -72,12 +72,20 @@ CREATE TABLE IF NOT EXISTS webodm_tasks (
     run_id TEXT NOT NULL,
     survey_id TEXT,                 -- optional but handy
     project_id INTEGER,
-    task_id INTEGER,
+    task_id TEXT,
     task_name TEXT,
     success INTEGER,
     runtime_seconds REAL,
     created_at TEXT,
     options_json TEXT,
+    operation_key TEXT,
+    remote_status TEXT,
+    raw_status TEXT,
+    local_status TEXT,
+    updated_at TEXT,
+    binding_source TEXT,
+    stage_attempt_id INTEGER,
+    audit_json TEXT,
 
     FOREIGN KEY (run_id) REFERENCES runs(run_id)
 );
@@ -89,4 +97,5 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 
 CREATE INDEX IF NOT EXISTS idx_webodm_tasks_run
 ON webodm_tasks(run_id);
+
 """

@@ -24,3 +24,7 @@ if action == "abort":
     control.request_abort(logger)
 else:
     control.request_pause(logger)
+    print(
+        'Pipeline pause is local-only. Any active WebODM task continues '
+        'processing and will be reattached on resume.'
+    )
