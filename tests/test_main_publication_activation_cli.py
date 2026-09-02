@@ -157,6 +157,63 @@ def test_cli_passes_explicit_qgis_staging_root_to_preflight(monkeypatch, tmp_pat
     assert captured["qgis_staging_root"] == tmp_path / "qgis-staging"
 
 
+def test_resume_preflight_rebinds_workspace_and_skips_completed_webodm_cache(
+    monkeypatch, tmp_path
+):
+    run_id = "legacy-run"
+    captured = {}
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            "AH_026_source",
+            "--resume",
+            "--run-id",
+            run_id,
+            "--rebind-workspace-to-configured-root",
+            "--workspace-rebind-confirmation",
+            f"REBIND WORKSPACE {run_id}",
+            "--storage-preflight-only",
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda _database, _run_id: {
+            "run_id": run_id,
+            "source_dir": str(tmp_path / "source"),
+            "workspace_root": None,
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda _database, _run_id: {
+            "data_segregation": "completed",
+            "cross_run_filter": "completed",
+            "kml_boundary": "completed",
+            "webodm": "completed",
+            "quality_gate": "completed",
+            "qgis": "failed",
+        },
+    )
+
+    def capture_preflight(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "volumes": []}
+
+    monkeypatch.setattr(rgb_main, "build_storage_preflight", capture_preflight)
+
+    rgb_main.main()
+
+    assert captured["workspace_root"] == tmp_path / "workspaces"
+    assert captured["include_upload_cache"] is False
+    assert captured["include_qgis_staging"] is True
+    assert captured["include_workspace"] is True
+    assert FakeRGBPipeline.instances == []
+
+
 def test_failed_storage_preflight_exits_before_pipeline_construction(
     monkeypatch, tmp_path
 ):
@@ -215,6 +272,37 @@ def test_cli_passes_publication_confirmation_when_activation_is_explicit(
     ],
 )
 def test_cli_rejects_half_enabled_publication_activation(
+    monkeypatch, tmp_path, capsys, argv, expected_message
+):
+    _prepare_cli(monkeypatch, tmp_path, argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert expected_message in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
+
+
+@pytest.mark.parametrize(
+    "argv, expected_message",
+    [
+        (
+            ["--survey", "AH_026_source", "--rebind-workspace-to-configured-root"],
+            "--rebind-workspace-to-configured-root requires --resume",
+        ),
+        (
+            [
+                "--survey",
+                "AH_026_source",
+                "--workspace-rebind-confirmation",
+                "REBIND WORKSPACE legacy-run",
+            ],
+            "--workspace-rebind-confirmation requires",
+        ),
+    ],
+)
+def test_cli_rejects_half_enabled_workspace_rebind(
     monkeypatch, tmp_path, capsys, argv, expected_message
 ):
     _prepare_cli(monkeypatch, tmp_path, argv)

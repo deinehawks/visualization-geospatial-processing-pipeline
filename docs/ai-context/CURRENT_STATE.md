@@ -30,7 +30,7 @@
 - Workspace cleanup records relative inventory, bytes, stage summaries, verified output mappings, and available cross-run image classification reasons without deleting legacy survey outputs.
 - Publication artifact allowlist is documented and implemented for current dry-run/staging bridge behavior.
 - Shared contracts now describe run state, API, metrics, events, artifacts, compatibility policy, and UI requirements.
-- Storage preflight and durable workspace routing are implemented and validated for the operational branch: cache, QGIS staging, and fresh workspaces can use D:, resume stays pinned to its persisted/legacy root, and capacity failures block unsafe fallbacks.
+- Storage preflight and durable workspace routing are implemented for the operational branch. An isolated follow-up adds stage-aware resume estimates and an exact-confirmation legacy workspace rebind to D: while retaining old recovery evidence; integration is pending.
 - Missing local WebODM UUID repair now appends audit/history and preserves existing repair evidence.
 
 ## Known Gaps
@@ -40,8 +40,8 @@
 - `partially_completed` is mapped for the run, survey, and compatibility WebODM coordinator when Task 4 succeeds and Task 2 fails; dedicated API/UI operation projection remains deferred.
 - WebODM/QGIS stages still mirror outputs into legacy paths during stage execution; pipeline is not workspace-only-until-publish.
 - Older workspaces without `.run-workspace.json` ownership evidence remain resumable but are retained rather than automatically deleted.
-- Default collection and the full hermetic suite are healthy: the latest full run collected and passed 278 tests without exclusions.
-- Storage code rollout is complete; operator `.env` configuration and an explicitly authorized report-only dataset check remain pending.
+- Default collection and the full hermetic suite are healthy: the isolated resume-aware feature collected and passed 291 tests without exclusions.
+- Base storage rollout is complete. Resume-aware integration, at least 10 GiB free on the E: state volume, a report-only check for the audited legacy run, controlled resume, and success verification remain pending. Its old 59.88 GiB workspace must remain until success is proven.
 - Full production-scale SMB/open-handle/disconnect validation remains incomplete.
 
 ## Working Tree Notes

@@ -2208,6 +2208,39 @@ This slice does not add UI/API mutation endpoints, does not recover stale locks,
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
 
+## Resume-aware storage preflight and explicit legacy workspace rebind
+
+Date: 2026-09-02.
+
+Resume preflight now reads the newest stage attempts through SQLite read-only
+mode and estimates only the remaining bulk work. Completed WebODM and quality
+gate omit upload-cache writes; an incomplete/forced quality gate remains
+conservative because it can request a WebODM fallback. QGIS staging remains two
+times source JPEG bytes when QGIS will run. Volumes with zero estimated writes
+use the configured absolute reserve rather than an unrelated percentage of a
+large state, output, or temporary volume.
+
+Legacy null-root runs remain pinned by default. An explicit CLI rebind requires
+`--rebind-workspace-to-configured-root` plus exact `REBIND WORKSPACE <run-id>`
+confirmation, refuses conflicting persisted roots and unowned target
+directories, and leaves the old workspace unchanged. Python 3.10 SQLite-full
+detection now uses the stable result code fallback when the named constant is
+not exposed.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused storage, resume, and CLI tests: 35 passed.
+- `python -m pytest --collect-only -q`: 291 tests collected.
+- `python -m pytest -q`: 291 passed.
+- `git diff --check`: passed with line-ending conversion warnings only.
+
+All tests used fake disk usage, fake pipeline construction, and pytest-owned
+temporary files/databases. No real pipeline, WebODM, QGIS/GDAL, production
+database, survey/network share, operator `.env`, legacy workspace mutation, or
+destructive cleanup was used. Operational integration, report-only preflight,
+actual resume, success verification, and any deletion remain pending.
+
 ## Storage preflight and durable workspace routing
 
 Date: 2026-09-02.

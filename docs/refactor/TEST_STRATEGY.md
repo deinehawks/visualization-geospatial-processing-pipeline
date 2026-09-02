@@ -1245,3 +1245,20 @@ are repeatable, legacy resume remains read-only, and existing RGB stage behavior
 remains compatible. QGIS staging has an explicit CLI root, reserves twice source
 bytes at startup, and typed capacity failure cannot fall back to direct tiling.
 The complete safe suite collects and passes 278/278.
+
+## Resume-aware storage and legacy rebind coverage
+
+Added on 2026-09-02, focused tests prove newest-attempt stage status is read
+through SQLite read-only mode, a QGIS-only resume omits completed WebODM cache
+writes, incomplete quality-gate work retains fallback upload capacity, and
+state-only volumes use the absolute reserve. Rebind tests require the exact run
+confirmation, preserve the old workspace, refuse conflicting persisted roots,
+and refuse existing unowned targets. CLI coverage proves report-only rebind
+passes the configured workspace and stage-aware flags without constructing the
+pipeline. SQLite-full recognition is compatible with Python 3.10.
+
+Changed Python compilation passed, focused storage/resume/CLI coverage passed
+35/35, collection found 291 tests, and the full safe suite passed 291/291.
+`git diff --check` passed with line-ending warnings only. No real pipeline,
+external service, QGIS/GDAL process, production database, network share,
+operator `.env`, legacy workspace mutation, or deletion was used.

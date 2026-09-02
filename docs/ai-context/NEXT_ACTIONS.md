@@ -2,21 +2,30 @@
 
 ## Highest Priority
 
-1. Apply the approved storage settings and run an authorized report-only preflight.
+1. Integrate the validated resume-aware storage feature, then run report-only
+   preflight for the audited legacy QGIS resume after E: meets the 10 GiB state reserve.
 
-Why this is first: implementation and the 278-test safe suite are complete, and
-the D: runtime directories are prepared. The protected operator `.env` remains
-user-managed. A real report needs an explicitly authorized source dataset.
+Why this is first: the isolated implementation and 291-test safe suite are
+complete, D: is prepared, and the audited run no longer needs WebODM upload
+capacity. E: still has only about 5.54 GiB free and must meet the absolute 10
+GiB state reserve. The old workspace remains rollback evidence until the resume
+finishes successfully.
 
 ## Recommended Pipeline Sequence
 
-1. Add the five approved storage/QGIS settings to the operator `.env`.
+1. Integrate the isolated resume-aware feature without disturbing unrelated E: changes.
 
-2. Identify one authorized dataset and run `--storage-preflight-only` without constructing the pipeline.
+2. Free at least enough unrelated E: storage to exceed the 10 GiB state reserve;
+   do not delete the audited legacy workspace yet.
 
-3. Confirm state-volume, D:, output-volume, and temp-volume reporting before a controlled run.
+3. Run the audited command with explicit workspace rebind and
+   `--storage-preflight-only`; confirm E: state, D: QGIS/workspace, output, and temp reporting.
 
-4. Resume WebODM operation observability and read projection after rollout evidence is accepted.
+4. After a separate external-operation review, run the real resume and verify
+   terminal success plus required outputs. Only then review deletion of the exact
+   retained 59.88 GiB E: workspace.
+
+5. Resume WebODM operation observability and read projection after rollout evidence is accepted.
 
 ## Recommended Web/API/UI Sequence
 

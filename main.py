@@ -53,6 +53,71 @@ def read_run_state_read_only(database: Path, run_id: str) -> dict | None:
         connection.close()
 
 
+def read_latest_stage_statuses_read_only(
+    database: Path,
+    run_id: str,
+) -> dict[str, str]:
+    resolved = Path(database).resolve(strict=True)
+    connection = sqlite3.connect(
+        f'{resolved.as_uri()}?mode=ro',
+        uri=True,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        rows = connection.execute(
+            'SELECT id, stage_name, status FROM stages '
+            'WHERE run_id=? ORDER BY id',
+            (run_id,),
+        ).fetchall()
+        return {str(row['stage_name']): str(row['status']) for row in rows}
+    finally:
+        connection.close()
+
+
+def resolve_storage_stage_needs(
+    *,
+    resume: bool,
+    latest_stage_statuses: dict[str, str],
+    force_stages: set[str],
+    qgis_enabled: bool,
+) -> dict[str, bool]:
+    if not resume:
+        return {
+            'include_upload_cache': True,
+            'include_qgis_staging': qgis_enabled,
+            'include_workspace': True,
+        }
+
+    def will_run(stage_name: str, *aliases: str) -> bool:
+        forced = any(
+            candidate in force_stages
+            for candidate in (stage_name, *aliases)
+        )
+        return forced or latest_stage_statuses.get(stage_name) != 'completed'
+
+    webodm_needed = will_run('webodm', 'webodm_task4')
+    quality_gate_needed = will_run('quality_gate')
+    qgis_needed = qgis_enabled and will_run('qgis')
+    earlier_workspace_stage_needed = any(
+        will_run(stage_name)
+        for stage_name in (
+            'data_segregation',
+            'cross_run_filter',
+            'kml_boundary',
+        )
+    )
+    return {
+        'include_upload_cache': webodm_needed or quality_gate_needed,
+        'include_qgis_staging': qgis_needed,
+        'include_workspace': (
+            earlier_workspace_stage_needed
+            or webodm_needed
+            or quality_gate_needed
+            or qgis_needed
+        ),
+    }
+
+
 def resolve_cli_workspace_root(
     *,
     base_dir: Path,
@@ -60,6 +125,8 @@ def resolve_cli_workspace_root(
     resume: bool,
     run_id: str,
     run_record: dict | None,
+    rebind_to_configured: bool = False,
+    rebind_confirmation: str | None = None,
 ) -> Path:
     legacy_root = Path(base_dir) / 'data' / 'workspaces'
     configured = (config.get('paths') or {}).get('workspace_root')
@@ -68,6 +135,38 @@ def resolve_cli_workspace_root(
         return configured_root
 
     persisted = (run_record or {}).get('workspace_root')
+    if rebind_to_configured:
+        expected = f'REBIND WORKSPACE {run_id}'
+        if rebind_confirmation != expected:
+            raise ValueError(
+                'Workspace rebind requires exact confirmation: '
+                f'{expected!r}'
+            )
+        if configured_root == legacy_root:
+            raise ValueError(
+                'Workspace rebind requires WORKSPACE_ROOT outside the legacy root'
+            )
+        if persisted and Path(str(persisted)) != configured_root:
+            raise ValueError(
+                'Refusing to replace an existing persisted workspace root: '
+                f'{persisted}'
+            )
+        target_workspace = configured_root / run_id
+        target_ownership = target_workspace / RUN_WORKSPACE_OWNERSHIP_NAME
+        if target_workspace.exists():
+            if not target_ownership.is_file():
+                raise ValueError(
+                    'Configured run workspace already exists without ownership: '
+                    f'{target_workspace}'
+                )
+            ownership = json.loads(target_ownership.read_text(encoding='utf-8'))
+            if ownership.get('run_id') != run_id:
+                raise ValueError(
+                    'Configured workspace ownership does not match resumed run: '
+                    f'{target_ownership}'
+                )
+        return configured_root
+
     if persisted:
         return Path(str(persisted))
 
@@ -184,6 +283,19 @@ def main() -> None:
         action="store_true",
         help="Report storage readiness without constructing or running the pipeline.",
     )
+    parser.add_argument(
+        "--rebind-workspace-to-configured-root",
+        action="store_true",
+        help=(
+            "For a legacy resume, use WORKSPACE_ROOT for the new attempt while "
+            "retaining the old workspace unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--workspace-rebind-confirmation",
+        default=None,
+        help='Exact phrase required for rebind: "REBIND WORKSPACE <run-id>".',
+    )
 
     # WebODM task mode: mutually exclusive flags
     task_group = parser.add_mutually_exclusive_group()
@@ -211,6 +323,13 @@ def main() -> None:
         parser.error("--publication-confirmation is required when using --activate-publication")
     if args.publication_confirmation and not args.activate_publication:
         parser.error("--publication-confirmation requires --activate-publication")
+    if args.rebind_workspace_to_configured_root and not args.resume:
+        parser.error("--rebind-workspace-to-configured-root requires --resume")
+    if args.workspace_rebind_confirmation and not args.rebind_workspace_to_configured_root:
+        parser.error(
+            "--workspace-rebind-confirmation requires "
+            "--rebind-workspace-to-configured-root"
+        )
 
     config: dict[str, Any] = load_pipeline_config()
     base_dir = Path(".")
@@ -218,6 +337,7 @@ def main() -> None:
     selected_run_id = args.run_id or str(uuid.uuid4())
 
     run_record = None
+    latest_stage_statuses: dict[str, str] = {}
     if args.resume:
         try:
             run_record = read_run_state_read_only(database_path, selected_run_id)
@@ -229,6 +349,10 @@ def main() -> None:
             parser.error(
                 f"Cannot resume run {selected_run_id!r}: no run record was found."
             )
+        latest_stage_statuses = read_latest_stage_statuses_read_only(
+            database_path,
+            selected_run_id,
+        )
 
     if args.node_id is not None:
         config["webodm"]["node_id"] = args.node_id
@@ -267,6 +391,8 @@ def main() -> None:
         resume=args.resume,
         run_id=selected_run_id,
         run_record=run_record,
+        rebind_to_configured=args.rebind_workspace_to_configured_root,
+        rebind_confirmation=args.workspace_rebind_confirmation,
     )
     configured_cache_root = (config.get("paths") or {}).get("upload_cache_root")
     upload_cache_root = (
@@ -282,6 +408,12 @@ def main() -> None:
         else upload_cache_root / "qgis-staging"
     )
     storage_config = config.get("storage") or {}
+    storage_stage_needs = resolve_storage_stage_needs(
+        resume=args.resume,
+        latest_stage_statuses=latest_stage_statuses,
+        force_stages=set(args.force_stage or []),
+        qgis_enabled=bool((config.get("qgis") or {}).get("enabled", True)),
+    )
     storage_report = build_storage_preflight(
         source_dir=source_dir,
         database_path=database_path,
@@ -293,6 +425,7 @@ def main() -> None:
         surveys_root=surveys_root,
         temp_root=Path(tempfile.gettempdir()),
         webodm_mode=webodm_mode,
+        **storage_stage_needs,
         min_free_gb=int(storage_config.get("min_free_gb", 10)),
         min_free_percent=int(storage_config.get("min_free_percent", 10)),
     )
@@ -311,6 +444,12 @@ def main() -> None:
     print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
     print(f"WebODM mode  : {mode_display}")
     print(f"Cross-run    : {'disabled' if args.disable_cross_run else 'enabled'}")
+    print(f"Workspace    : {workspace_root}")
+    if args.rebind_workspace_to_configured_root:
+        print(
+            "Legacy workspace retained: "
+            f"{base_dir / 'data' / 'workspaces' / selected_run_id}"
+        )
     print("===================================\n")
 
     from pipelines.rgb_pipeline import RGBPipeline
