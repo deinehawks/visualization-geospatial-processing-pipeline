@@ -21,7 +21,8 @@ CREATE TABLE IF NOT EXISTS runs (
 
     source_dir TEXT,
     surveys_root TEXT,
-    year INTEGER
+    year INTEGER,
+    workspace_root TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_runs_status

@@ -59,13 +59,17 @@ class PipelineRepo:
         source_dir: Optional[str] = None,
         surveys_root: Optional[str] = None,
         year: Optional[int] = None,
+        workspace_root: Optional[str] = None,
     ) -> None:
         now = utc_now_iso()
         with connect(self.db_file) as conn:
             conn.execute(
                 """
-                INSERT INTO runs (run_id, status, started_at, source_dir, surveys_root, year)
-                VALUES (?, 'running', ?, ?, ?, ?)
+                INSERT INTO runs (
+                    run_id, status, started_at, source_dir, surveys_root, year,
+                    workspace_root
+                )
+                VALUES (?, 'running', ?, ?, ?, ?, ?)
                 ON CONFLICT(run_id) DO UPDATE SET
                     status=CASE
                         WHEN runs.status='paused' THEN 'paused'
@@ -74,9 +78,20 @@ class PipelineRepo:
                     started_at=COALESCE(runs.started_at, excluded.started_at),
                     source_dir=COALESCE(excluded.source_dir, runs.source_dir),
                     surveys_root=COALESCE(excluded.surveys_root, runs.surveys_root),
-                    year=COALESCE(excluded.year, runs.year)
+                    year=COALESCE(excluded.year, runs.year),
+                    workspace_root=COALESCE(
+                        runs.workspace_root,
+                        excluded.workspace_root
+                    )
                 """,
-                (run_id, now, source_dir, surveys_root, year),
+                (
+                    run_id,
+                    now,
+                    source_dir,
+                    surveys_root,
+                    year,
+                    workspace_root,
+                ),
             )
             conn.commit()
 
@@ -118,7 +133,7 @@ class PipelineRepo:
             row = conn.execute(
                 """
                 SELECT run_id, survey_id, status, started_at, finished_at, total_runtime_seconds,
-                       source_dir, surveys_root, year
+                       source_dir, surveys_root, year, workspace_root
                 FROM runs
                 WHERE run_id=?
                 """,
@@ -223,10 +238,15 @@ class PipelineRepo:
             MIGRATION_ID as M002_ID,
             apply as apply_m002,
         )
+        from .migrations.m003_run_workspace_root import (
+            MIGRATION_ID as M003_ID,
+            apply as apply_m003,
+        )
 
         migrations = [
             (M001_ID, apply_m001),
             (M002_ID, apply_m002),
+            (M003_ID, apply_m003),
         ]
 
         for mid, fn in migrations:
@@ -439,6 +459,20 @@ class PipelineRepo:
                     and task_name
                     and current_name != str(task_name)
                 )
+                repair_identity_change = bool(
+                    allow_rebind
+                    and (
+                        project_conflict
+                        or (
+                            normalized_task_id is not None
+                            and current_task != normalized_task_id
+                        )
+                        or (
+                            task_name is not None
+                            and current_name != str(task_name)
+                        )
+                    )
+                )
                 if (
                     project_conflict
                     or task_conflict
@@ -452,7 +486,21 @@ class PipelineRepo:
                         f'{task_name!r}'
                     )
 
-                if not project_conflict and not task_conflict and not name_conflict:
+                if (
+                    not project_conflict
+                    and not task_conflict
+                    and not name_conflict
+                    and not repair_identity_change
+                ):
+                    audit_json = (
+                        current.get('audit_json')
+                        if allow_rebind and current.get('audit_json')
+                        else (
+                            json.dumps(audit)
+                            if audit is not None
+                            else None
+                        )
+                    )
                     conn.execute(
                         '''
                         UPDATE webodm_tasks
@@ -482,7 +530,7 @@ class PipelineRepo:
                             now,
                             binding_source,
                             stage_attempt_id,
-                            json.dumps(audit) if audit is not None else None,
+                            audit_json,
                             int(current['id']),
                         ),
                     )

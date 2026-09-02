@@ -1230,3 +1230,18 @@ Coverage proves:
 Validation compiled every changed Python file, passed 100/100 relevant WebODM/orchestration/database tests, collected 260 tests, and passed the full safe default suite 260/260.
 
 The default suite did not contact WebODM, run the real pipeline, upload or download imagery, execute QGIS/GDAL, open production SQLite, access production survey/network roots, register hotkeys, or perform destructive cleanup. Manual compatibility checks against a disposable non-production WebODM instance remain intentionally unexecuted and require explicit environment authorization.
+
+## Storage preflight coverage
+
+Added on 2026-09-02, storage tests use fake disk-usage values, pytest-owned JPEG
+placeholders, temporary SQLite databases, fake pipeline construction, and
+explicit zero reserves in stage tests that exercise copy behavior.
+
+Coverage proves same-volume requirements are aggregated, reserves use the larger
+absolute/percentage threshold, JPEG estimates are exact, capacity failure is
+typed, SQLite-full recognition is specific, report-only/failing CLI paths never
+construct the pipeline, workspace roots persist without rebind, legacy migrations
+are repeatable, legacy resume remains read-only, and existing RGB stage behavior
+remains compatible. QGIS staging has an explicit CLI root, reserves twice source
+bytes at startup, and typed capacity failure cannot fall back to direct tiling.
+The complete safe suite collects and passes 278/278.

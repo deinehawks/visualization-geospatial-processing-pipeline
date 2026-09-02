@@ -58,7 +58,13 @@ def load_pipeline_config() -> dict:
 
         raise ValueError(f"Invalid boolean value for {name}: {raw!r}")
 
-    def read_int_env(name: str, default: int, *, minimum: int | None = None) -> int:
+    def read_int_env(
+        name: str,
+        default: int,
+        *,
+        minimum: int | None = None,
+        maximum: int | None = None,
+    ) -> int:
         raw = os.getenv(name)
         if raw is None or raw.strip() == "":
             value = default
@@ -70,6 +76,8 @@ def load_pipeline_config() -> dict:
 
         if minimum is not None and value < minimum:
             raise ValueError(f"{name} must be >= {minimum}, got {value}")
+        if maximum is not None and value > maximum:
+            raise ValueError(f"{name} must be <= {maximum}, got {value}")
 
         return value
 
@@ -118,6 +126,20 @@ def load_pipeline_config() -> dict:
             "surveys_root": read_path_env("SURVEYS_ROOT", required=True),
             "field_data_roots": read_csv_paths_env("FIELD_DATA_ROOT", required=True),
             "upload_cache_root": read_path_env("UPLOAD_CACHE_ROOT"),
+            "workspace_root": read_path_env("WORKSPACE_ROOT"),
+        },
+        "storage": {
+            "min_free_gb": read_int_env(
+                "STORAGE_MIN_FREE_GB",
+                10,
+                minimum=0,
+            ),
+            "min_free_percent": read_int_env(
+                "STORAGE_MIN_FREE_PERCENT",
+                10,
+                minimum=0,
+                maximum=100,
+            ),
         },
         "cross_run_filter": {
             "max_gap": read_int_env("CROSSRUN_MAX_GAP", 10, minimum=0),

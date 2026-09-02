@@ -532,3 +532,32 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   - Successful Task 4 work is not rerun by default when Task 2 is retried.
   - Dedicated external-operation IDs, full option snapshots/metrics, and API/UI read projection remain follow-up work.
 - **Related files or issues:** `pipelines/rgb_pipeline.py`; `shared/stage_runner.py`; `docs/architecture/decisions.md`; `docs/architecture/run-state-model.md`; CW-ADR-005.
+
+### ADR-027 - Separate bulky run storage and fail closed on capacity
+
+- **Decision ID:** ADR-027
+- **Date:** 2026-09-02
+- **Status:** Accepted and implemented; operator rollout pending.
+- **Approval context:** After a live `database or disk is full` failure, the user
+  approved keeping state storage separate, routing cache/QGIS staging/workspaces to D:, and
+  adding configurable absolute and percentage reserves.
+- **Decision:**
+  - Keep SQLite, logs, and checkpoints on the state volume.
+  - Configure bulky cache, QGIS staging, and fresh workspaces independently with
+    `UPLOAD_CACHE_ROOT`, `QGIS_LOCAL_STAGING_DIR`, and `WORKSPACE_ROOT`.
+  - Reserve twice the exact source-image bytes for QGIS staging at startup and
+    retain the actual just-in-time raster capacity check.
+  - Persist each fresh run's workspace root; resume never silently rebinds it.
+  - Aggregate estimated writes per physical volume and require the larger of the
+    absolute or percentage reserve before pipeline construction.
+  - Recheck capacity at major local copy boundaries and never interpret a
+    capacity failure as permission to fall back to direct network/source I/O.
+  - Preserve legacy null workspace records at the repository-local root.
+- **Consequences:** A run may be blocked even when its bulky D: volume has space
+  if the separate state, output, or temporary volume is below reserve. Estimates
+  reduce predictable failures but cannot guarantee WebODM/GDAL output sizes.
+  Active runs are unaffected until the isolated branch and operator configuration
+  are deliberately rolled out.
+- **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
+  `shared/db/migrations/m003_run_workspace_root.py`;
+  `docs/refactor/STORAGE_PREFLIGHT_PLAN.md`; ADR-025.

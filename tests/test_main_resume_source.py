@@ -1,5 +1,6 @@
 import logging
 from pathlib import Path
+import sqlite3
 
 import pytest
 
@@ -78,3 +79,84 @@ def test_resume_source_dir_requires_existing_run_record(tmp_path):
             logger=logging.getLogger("tests.main.missing"),
             repository=repository,
         )
+
+
+def test_fresh_run_uses_configured_workspace_root(tmp_path):
+    configured = tmp_path / "configured-workspaces"
+
+    result = rgb_main.resolve_cli_workspace_root(
+        base_dir=tmp_path,
+        config={"paths": {"workspace_root": configured}},
+        resume=False,
+        run_id="fresh-run",
+        run_record=None,
+    )
+
+    assert result == configured
+
+
+def test_resume_uses_persisted_workspace_root_even_if_config_changed(tmp_path):
+    persisted = tmp_path / "original-workspaces"
+
+    result = rgb_main.resolve_cli_workspace_root(
+        base_dir=tmp_path,
+        config={"paths": {"workspace_root": tmp_path / "new-workspaces"}},
+        resume=True,
+        run_id="existing-run",
+        run_record={"workspace_root": str(persisted)},
+    )
+
+    assert result == persisted
+
+
+def test_legacy_resume_without_persisted_root_stays_on_legacy_path(tmp_path):
+    result = rgb_main.resolve_cli_workspace_root(
+        base_dir=tmp_path,
+        config={"paths": {"workspace_root": tmp_path / "new-workspaces"}},
+        resume=True,
+        run_id="legacy-run",
+        run_record={"workspace_root": None},
+    )
+
+    assert result == tmp_path / "data" / "workspaces"
+
+
+def test_resume_state_reader_supports_legacy_schema_without_migrating(tmp_path):
+    database = tmp_path / "legacy.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE runs (
+                run_id TEXT PRIMARY KEY,
+                survey_id TEXT,
+                status TEXT,
+                source_dir TEXT,
+                surveys_root TEXT,
+                year INTEGER
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO runs (
+                run_id, survey_id, status, source_dir, surveys_root, year
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-run",
+                "AH-026001",
+                "paused",
+                str(tmp_path / "source"),
+                str(tmp_path / "surveys"),
+                2026,
+            ),
+        )
+
+    record = rgb_main.read_run_state_read_only(database, "legacy-run")
+
+    assert record["workspace_root"] is None
+    with sqlite3.connect(database) as connection:
+        columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(runs)")
+        }
+    assert "workspace_root" not in columns
