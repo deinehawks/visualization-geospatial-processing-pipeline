@@ -591,3 +591,31 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   is proven.
 - **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
   `docs/refactor/STORAGE_PREFLIGHT_PLAN.md`; ADR-025; ADR-027.
+
+### ADR-029 - Use a split reserve policy for exact published mirrors
+
+- **Decision ID:** ADR-029
+- **Date:** 2026-09-02
+- **Status:** Accepted and implemented in an isolated feature worktree; operational integration pending.
+- **Approval context:** A QGIS resume completed and verified its local clip but
+  the runtime mirror check applied 10% of a large legacy publication volume.
+  Startup had inspected a different configured UNC alias and therefore passed.
+- **Decision:**
+  - Default general bulk-storage reserve to 10 GiB and 5% of volume.
+  - Configure published file/directory mirrors independently at 10 GiB and 0%
+    because their exact pending bytes (including copy overhead) are checked
+    immediately before mutation.
+  - Use a resumed run's persisted surveys root for startup preflight and pipeline
+    routing, and reserve one source-image set for pending published output.
+  - Keep stricter general policy when published and non-published writes share a
+    physical volume.
+  - Treat `StorageCapacityError` as non-retryable while still recording the
+    stage failure and preserving the original exception.
+- **Consequences:** Large publication volumes no longer require an arbitrary
+  percentage reserve for a bounded exact mirror, while every copy must still
+  leave at least 10 GiB free. Startup reports the legacy destination rather than
+  a configured alias. Storage cannot be reclaimed by immediate retries, so a
+  capacity block now fails once.
+- **Related files or issues:** `main.py`; `shared/config.py`;
+  `shared/storage_preflight.py`; `shared/stage_runner.py`;
+  `pipelines/rgb_pipeline.py`; ADR-027; ADR-028.

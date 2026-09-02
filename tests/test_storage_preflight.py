@@ -54,6 +54,50 @@ def test_state_only_volume_uses_absolute_reserve_not_percentage(tmp_path: Path):
     assert volume["reserve_bytes"] == 10 * GIB
 
 
+def test_published_write_can_use_absolute_only_reserve(tmp_path: Path):
+    report = inspect_storage_requirements(
+        [
+            StorageRequirement(
+                "published_file_mirror",
+                tmp_path / "published",
+                int(5.55 * GIB),
+                min_free_gb=10,
+                min_free_percent=0,
+            )
+        ],
+        min_free_gb=10,
+        min_free_percent=5,
+        disk_usage=lambda _path: _usage(total_gib=1726, free_gib=55),
+    )
+
+    assert report["ok"] is True
+    [volume] = report["volumes"]
+    assert volume["reserve_bytes"] == 10 * GIB
+
+
+def test_same_volume_keeps_stricter_non_published_write_policy(tmp_path: Path):
+    report = inspect_storage_requirements(
+        [
+            StorageRequirement("workspace", tmp_path / "workspace", 2 * GIB),
+            StorageRequirement(
+                "published_file_mirror",
+                tmp_path / "published",
+                1 * GIB,
+                min_free_gb=10,
+                min_free_percent=0,
+            ),
+        ],
+        min_free_gb=10,
+        min_free_percent=5,
+        disk_usage=lambda _path: _usage(total_gib=1000, free_gib=60),
+    )
+
+    assert report["ok"] is True
+    [volume] = report["volumes"]
+    assert volume["required_bytes"] == 3 * GIB
+    assert volume["reserve_bytes"] == 50 * GIB
+
+
 def test_preflight_uses_exact_jpeg_bytes_and_mode_estimate(tmp_path: Path):
     source = tmp_path / "source"
     source.mkdir()
@@ -74,6 +118,8 @@ def test_preflight_uses_exact_jpeg_bytes_and_mode_estimate(tmp_path: Path):
         webodm_mode="both",
         min_free_gb=0,
         min_free_percent=0,
+        published_min_free_gb=0,
+        published_min_free_percent=0,
         disk_usage=lambda _path: _usage(total_gib=100, free_gib=100),
     )
 
@@ -83,9 +129,10 @@ def test_preflight_uses_exact_jpeg_bytes_and_mode_estimate(tmp_path: Path):
     assert report["estimated_cache_bytes"] == 480
     assert report["estimated_qgis_staging_bytes"] == 800
     assert report["estimated_workspace_bytes"] == 20 * GIB
+    assert report["estimated_published_output_bytes"] == 400
     [volume] = report["volumes"]
     assert "qgis_local_staging" in volume["roles"]
-    assert volume["required_bytes"] == (20 * GIB) + 480 + 800
+    assert volume["required_bytes"] == (20 * GIB) + 480 + 800 + 400
 
 
 def test_qgis_only_resume_omits_completed_webodm_cache_estimate(tmp_path: Path):
@@ -109,15 +156,19 @@ def test_qgis_only_resume_omits_completed_webodm_cache_estimate(tmp_path: Path):
         include_workspace=True,
         min_free_gb=0,
         min_free_percent=0,
+        published_min_free_gb=0,
+        published_min_free_percent=0,
         disk_usage=lambda _path: _usage(total_gib=100, free_gib=100),
     )
 
     assert report["estimated_cache_bytes"] == 0
     assert report["estimated_qgis_staging_bytes"] == 800
     assert report["estimated_workspace_bytes"] == 20 * GIB
+    assert report["estimated_published_output_bytes"] == 400
     assert report["include_upload_cache"] is False
     assert report["include_qgis_staging"] is True
     assert report["include_workspace"] is True
+    assert report["include_published_outputs"] is True
 
 
 def test_capacity_failure_is_typed(tmp_path: Path):

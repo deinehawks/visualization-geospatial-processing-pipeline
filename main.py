@@ -86,6 +86,7 @@ def resolve_storage_stage_needs(
             'include_upload_cache': True,
             'include_qgis_staging': qgis_enabled,
             'include_workspace': True,
+            'include_published_outputs': True,
         }
 
     def will_run(stage_name: str, *aliases: str) -> bool:
@@ -115,7 +116,26 @@ def resolve_storage_stage_needs(
             or quality_gate_needed
             or qgis_needed
         ),
+        'include_published_outputs': (
+            earlier_workspace_stage_needed
+            or webodm_needed
+            or quality_gate_needed
+            or qgis_needed
+        ),
     }
+
+
+def resolve_cli_surveys_root(
+    *,
+    config: dict[str, Any],
+    resume: bool,
+    run_record: dict | None,
+) -> Path:
+    configured_root = Path(config['paths']['surveys_root'])
+    persisted_root = (run_record or {}).get('surveys_root')
+    if resume and persisted_root:
+        return Path(str(persisted_root))
+    return configured_root
 
 
 def resolve_cli_workspace_root(
@@ -357,7 +377,11 @@ def main() -> None:
     if args.node_id is not None:
         config["webodm"]["node_id"] = args.node_id
 
-    surveys_root = Path(config["paths"]["surveys_root"])
+    surveys_root = resolve_cli_surveys_root(
+        config=config,
+        resume=args.resume,
+        run_record=run_record,
+    )
 
     resolver_logger = logging.getLogger("rgb.source_resolver")
 
@@ -427,7 +451,13 @@ def main() -> None:
         webodm_mode=webodm_mode,
         **storage_stage_needs,
         min_free_gb=int(storage_config.get("min_free_gb", 10)),
-        min_free_percent=int(storage_config.get("min_free_percent", 10)),
+        min_free_percent=int(storage_config.get("min_free_percent", 5)),
+        published_min_free_gb=int(
+            storage_config.get("published_min_free_gb", 10)
+        ),
+        published_min_free_percent=int(
+            storage_config.get("published_min_free_percent", 0)
+        ),
     )
     print(format_storage_report(storage_report))
     try:

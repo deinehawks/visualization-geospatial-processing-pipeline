@@ -136,7 +136,18 @@ def load_pipeline_config() -> dict:
             ),
             "min_free_percent": read_int_env(
                 "STORAGE_MIN_FREE_PERCENT",
+                5,
+                minimum=0,
+                maximum=100,
+            ),
+            "published_min_free_gb": read_int_env(
+                "STORAGE_PUBLISHED_MIN_FREE_GB",
                 10,
+                minimum=0,
+            ),
+            "published_min_free_percent": read_int_env(
+                "STORAGE_PUBLISHED_MIN_FREE_PERCENT",
+                0,
                 minimum=0,
                 maximum=100,
             ),

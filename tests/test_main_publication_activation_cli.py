@@ -41,7 +41,12 @@ def _prepare_cli(monkeypatch, tmp_path, argv):
                 "upload_cache_root": str(tmp_path / "cache"),
                 "workspace_root": str(tmp_path / "workspaces"),
             },
-            "storage": {"min_free_gb": 10, "min_free_percent": 10},
+            "storage": {
+                "min_free_gb": 10,
+                "min_free_percent": 5,
+                "published_min_free_gb": 10,
+                "published_min_free_percent": 0,
+            },
             "qgis": {
                 "local_staging": {
                     "enabled": True,
@@ -211,6 +216,9 @@ def test_resume_preflight_rebinds_workspace_and_skips_completed_webodm_cache(
     assert captured["include_upload_cache"] is False
     assert captured["include_qgis_staging"] is True
     assert captured["include_workspace"] is True
+    assert captured["include_published_outputs"] is True
+    assert captured["published_min_free_gb"] == 10
+    assert captured["published_min_free_percent"] == 0
     assert FakeRGBPipeline.instances == []
 
 

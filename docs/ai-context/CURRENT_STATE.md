@@ -40,7 +40,8 @@
 - `partially_completed` is mapped for the run, survey, and compatibility WebODM coordinator when Task 4 succeeds and Task 2 fails; dedicated API/UI operation projection remains deferred.
 - WebODM/QGIS stages still mirror outputs into legacy paths during stage execution; pipeline is not workspace-only-until-publish.
 - Older workspaces without `.run-workspace.json` ownership evidence remain resumable but are retained rather than automatically deleted.
-- Default collection and the full hermetic suite are healthy: the isolated resume-aware feature collected and passed 291 tests without exclusions.
+- Default collection and the full hermetic suite are healthy: the isolated split-reserve feature collected and passed 297 tests without exclusions.
+- A validated isolated follow-up uses 10 GiB/5% for general bulk storage, 10 GiB/0% for exact published mirrors, persisted surveys-root routing for resume preflight, and non-retryable capacity failures; integration is pending.
 - Base storage rollout is complete. Resume-aware integration, at least 10 GiB free on the E: state volume, a report-only check for the audited legacy run, controlled resume, and success verification remain pending. Its old 59.88 GiB workspace must remain until success is proven.
 - Full production-scale SMB/open-handle/disconnect validation remains incomplete.
 

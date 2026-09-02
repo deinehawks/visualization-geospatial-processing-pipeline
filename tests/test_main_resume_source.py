@@ -143,6 +143,18 @@ def test_legacy_resume_can_explicitly_rebind_to_configured_root(tmp_path):
     assert not (configured / "legacy-run").exists()
 
 
+def test_resume_uses_persisted_surveys_root_for_preflight_and_pipeline(tmp_path):
+    persisted = tmp_path / "legacy-surveys"
+
+    result = rgb_main.resolve_cli_surveys_root(
+        config={"paths": {"surveys_root": tmp_path / "configured-surveys"}},
+        resume=True,
+        run_record={"surveys_root": str(persisted)},
+    )
+
+    assert result == persisted
+
+
 def test_workspace_rebind_requires_exact_confirmation(tmp_path):
     with pytest.raises(ValueError, match="exact confirmation"):
         rgb_main.resolve_cli_workspace_root(
@@ -204,6 +216,7 @@ def test_qgis_only_resume_storage_needs_skip_upload_cache():
         "include_upload_cache": False,
         "include_qgis_staging": True,
         "include_workspace": True,
+        "include_published_outputs": True,
     }
 
 

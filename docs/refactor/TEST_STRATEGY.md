@@ -1262,3 +1262,19 @@ Changed Python compilation passed, focused storage/resume/CLI coverage passed
 `git diff --check` passed with line-ending warnings only. No real pipeline,
 external service, QGIS/GDAL process, production database, network share,
 operator `.env`, legacy workspace mutation, or deletion was used.
+
+## Split published-storage policy coverage
+
+Added on 2026-09-02, configuration tests cover the 10 GiB/5% general defaults
+and 10 GiB/0% published defaults. Storage tests prove an exact 5.55 GiB mirror
+passes with 55 GiB free on a large volume, and that same-volume general writes
+retain the stricter 5% reserve. Resume tests prove persisted surveys-root
+routing; CLI tests prove published thresholds and pending-output estimates reach
+startup preflight. RGBPipeline tests prove file/directory mirrors use the split
+policy. StageRunner coverage proves a typed capacity failure executes once,
+records failure, and preserves the exception.
+
+Changed Python compilation and 117 focused tests passed. Collection found 297
+tests and the full safe suite passed 297/297. No external service, subprocess,
+production path/database, operator `.env`, network share, or destructive action
+was used.

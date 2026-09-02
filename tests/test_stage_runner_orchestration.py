@@ -7,6 +7,7 @@ import pytest
 from shared.db.repo import PipelineRepo
 from shared.logging import get_logger
 from shared.stage_runner import StageFailedWithOutput, StageRequiresRecovery, StageRunner
+from shared.storage_preflight import StorageCapacityError
 from tests.fakes import FakeWebODM, PermanentWebODMError
 
 
@@ -298,6 +299,34 @@ def test_stage_runner_records_generic_non_cancellation_runtime_failure(
     stage = read_stage(temporary_path_layout.database_path)
     assert stage["status"] == "failed"
     assert stage["error_message"] == "ordinary runtime failure"
+
+
+def test_stage_runner_does_not_retry_storage_capacity_failure(
+    temporary_path_layout,
+):
+    _repo, runner = build_runner(temporary_path_layout.database_path)
+    calls = 0
+
+    def fail_capacity():
+        nonlocal calls
+        calls += 1
+        raise StorageCapacityError(
+            "published storage capacity blocked",
+            report={"ok": False, "volumes": []},
+        )
+
+    with pytest.raises(StorageCapacityError, match="capacity blocked"):
+        runner.run(
+            STAGE_NAME,
+            fail_capacity,
+            retry_attempts=3,
+            retry_delay_seconds=0,
+        )
+
+    assert calls == 1
+    stage = read_stage(temporary_path_layout.database_path)
+    assert stage["status"] == "failed"
+    assert stage["error_message"] == "published storage capacity blocked"
 
 
 @pytest.mark.parametrize(

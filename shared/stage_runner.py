@@ -6,6 +6,7 @@ import time
 from typing import Any, Callable, Dict, Optional, List
 
 from shared.db.repo import PipelineRepo
+from shared.storage_preflight import StorageCapacityError
 from shared.logging import (
     log_output_loaded,
     log_stage_canceled,
@@ -241,6 +242,21 @@ class StageRunner:
                         status=exc.status,
                         runtime_seconds=runtime,
                         output=failure_output,
+                        error_message=str(exc),
+                    )
+                    log_stage_fail(self.logger, stage_name, runtime)
+                    for _lg in self.extra_loggers:
+                        set_stage_context(_lg, "")
+                    self.logger.exception(exc)
+                    raise
+
+                if isinstance(exc, StorageCapacityError):
+                    runtime = time.perf_counter() - wall_start
+                    self.repo.finish_stage(
+                        stage_id=stage_id,
+                        success=False,
+                        runtime_seconds=runtime,
+                        output=None,
                         error_message=str(exc),
                     )
                     log_stage_fail(self.logger, stage_name, runtime)

@@ -33,6 +33,8 @@ class StorageRequirement:
     role: str
     path: Path
     required_bytes: int = 0
+    min_free_gb: int | None = None
+    min_free_percent: int | None = None
 
 
 def _nearest_existing_path(path: Path) -> Path:
@@ -95,6 +97,8 @@ def inspect_storage_requirements(
                 'roles': [],
                 'paths': [],
                 'required_bytes': 0,
+                'min_free_gb': 0,
+                'write_min_free_percent': 0,
             },
         )
         group['roles'].append(str(requirement.role))
@@ -103,6 +107,25 @@ def inspect_storage_requirements(
             0,
             int(requirement.required_bytes),
         )
+        effective_min_gb = (
+            int(min_free_gb)
+            if requirement.min_free_gb is None
+            else int(requirement.min_free_gb)
+        )
+        effective_min_percent = (
+            int(min_free_percent)
+            if requirement.min_free_percent is None
+            else int(requirement.min_free_percent)
+        )
+        group['min_free_gb'] = max(
+            int(group['min_free_gb']),
+            effective_min_gb,
+        )
+        if int(requirement.required_bytes) > 0:
+            group['write_min_free_percent'] = max(
+                int(group['write_min_free_percent']),
+                effective_min_percent,
+            )
 
     volumes: list[dict[str, object]] = []
     for key in sorted(grouped):
@@ -112,12 +135,10 @@ def inspect_storage_requirements(
         used = int(getattr(usage, 'used'))
         free = int(getattr(usage, 'free'))
         required = int(group['required_bytes'])
-        percentage_reserve = (
-            int(total * (int(min_free_percent) / 100.0))
-            if required > 0
-            else 0
+        percentage_reserve = int(
+            total * (int(group['write_min_free_percent']) / 100.0)
         )
-        reserve = max(int(min_free_gb) * GIB, percentage_reserve)
+        reserve = max(int(group['min_free_gb']) * GIB, percentage_reserve)
         volumes.append(
             {
                 **group,
@@ -152,8 +173,11 @@ def build_storage_preflight(
     include_upload_cache: bool = True,
     include_qgis_staging: bool = True,
     include_workspace: bool = True,
+    include_published_outputs: bool = True,
     min_free_gb: int = 10,
-    min_free_percent: int = 10,
+    min_free_percent: int = 5,
+    published_min_free_gb: int = 10,
+    published_min_free_percent: int = 0,
     disk_usage: Callable[[str], object] = shutil.disk_usage,
 ) -> dict:
     mode = str(webodm_mode).strip().lower()
@@ -171,6 +195,7 @@ def build_storage_preflight(
         if include_workspace
         else 0
     )
+    published_bytes = source_bytes if include_published_outputs else 0
     report = inspect_storage_requirements(
         [
             StorageRequirement('pipeline_database', Path(database_path)),
@@ -183,7 +208,13 @@ def build_storage_preflight(
                 qgis_staging_bytes,
             ),
             StorageRequirement('run_workspace', Path(workspace_root), workspace_bytes),
-            StorageRequirement('published_outputs', Path(surveys_root)),
+            StorageRequirement(
+                'published_outputs',
+                Path(surveys_root),
+                published_bytes,
+                min_free_gb=published_min_free_gb,
+                min_free_percent=published_min_free_percent,
+            ),
             StorageRequirement('system_temp', Path(temp_root)),
         ],
         min_free_gb=min_free_gb,
@@ -198,12 +229,16 @@ def build_storage_preflight(
             'estimated_cache_bytes': cache_bytes,
             'estimated_qgis_staging_bytes': qgis_staging_bytes,
             'estimated_workspace_bytes': workspace_bytes,
+            'estimated_published_output_bytes': published_bytes,
             'webodm_mode': mode,
             'include_upload_cache': bool(include_upload_cache),
             'include_qgis_staging': bool(include_qgis_staging),
             'include_workspace': bool(include_workspace),
+            'include_published_outputs': bool(include_published_outputs),
             'min_free_gb': int(min_free_gb),
             'min_free_percent': int(min_free_percent),
+            'published_min_free_gb': int(published_min_free_gb),
+            'published_min_free_percent': int(published_min_free_percent),
         }
     )
     return report
