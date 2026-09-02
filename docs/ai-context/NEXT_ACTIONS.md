@@ -2,19 +2,21 @@
 
 ## Highest Priority
 
-1. Complete WebODM operation observability and read projection.
+1. Apply the approved storage settings and run an authorized report-only preflight.
 
-Why this is first: completed-run cleanup and separate Task 4/Task 2 stage persistence are implemented. The remaining operation-model gap is complete metrics/events and a read-only API projection; mutation controls remain deferred.
+Why this is first: implementation and the 278-test safe suite are complete, and
+the D: runtime directories are prepared. The protected operator `.env` remains
+user-managed. A real report needs an explicitly authorized source dataset.
 
 ## Recommended Pipeline Sequence
 
-1. Add complete Task 4 and Task 2 boundary events and bounded operation metrics.
+1. Add the five approved storage/QGIS settings to the operator `.env`.
 
-2. Define stable read-only operation IDs and project existing stage evidence through the documented API schema.
+2. Identify one authorized dataset and run `--storage-preflight-only` without constructing the pipeline.
 
-3. Verify `partially_completed` and per-operation evidence in read-only UI/API consumers.
+3. Confirm state-volume, D:, output-volume, and temp-volume reporting before a controlled run.
 
-4. Keep operational UI controls disabled until mutation semantics are approved and implemented.
+4. Resume WebODM operation observability and read projection after rollout evidence is accepted.
 
 ## Recommended Web/API/UI Sequence
 

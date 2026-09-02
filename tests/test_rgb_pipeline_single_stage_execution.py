@@ -33,6 +33,7 @@ from shared.artifacts import (
     publication_activation_path,
 )
 from shared.publication_lock import acquire_publication_lock, PublicationLockedError
+from shared.storage_preflight import StorageCapacityError
 from tests.fakes import FakeWebODM
 
 
@@ -324,6 +325,7 @@ def explicit_config(temporary_path_layout):
             "username": "test-user",
             "password": "test-password",
         },
+        "storage": {"min_free_gb": 0, "min_free_percent": 0},
         "experiment": {"use_year_subdir": True},
     }
 
@@ -2196,6 +2198,53 @@ def test_qgis_clip_failure_leaves_legacy_outputs_untouched(
     assert legacy_tile.read_text(encoding="utf-8") == "old tile"
     assert pipeline.state["selected_orthomosaic"]["source_path"] == str(source_ortho)
     assert "clipped_path" not in pipeline.state["selected_orthomosaic"]
+
+
+def test_qgis_capacity_failure_does_not_fall_back_to_direct_tiling(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    prepare_qgis_context(pipeline, temporary_path_layout)
+    configure_qgis_for_fake_tools(pipeline)
+    pipeline.config["qgis"]["local_staging"] = {
+        "enabled": True,
+        "dir": str(temporary_path_layout.upload_cache_dir / "qgis-staging"),
+    }
+    real_check = pipeline._check_write_capacity
+
+    def fail_qgis_staging(*, role, path, required_bytes):
+        if role == "qgis_local_staging":
+            raise StorageCapacityError(
+                "controlled qgis capacity failure",
+                report={"ok": False, "volumes": []},
+            )
+        return real_check(
+            role=role,
+            path=path,
+            required_bytes=required_bytes,
+        )
+
+    pipeline._check_write_capacity = fail_qgis_staging
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = False
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    with pytest.raises(StorageCapacityError, match="controlled qgis capacity"):
+        pipeline.stage_qgis()
+
+    fake_tools = FakeQGISTools.instances[-1]
+    methods = [call["method"] for call in fake_tools.calls]
+    assert "stage_local_copy" not in methods
+    assert "generate_tiles" not in methods
 
 def test_rgb_pipeline_webodm_stage_emits_parseable_boundary_events(
     temporary_path_layout,

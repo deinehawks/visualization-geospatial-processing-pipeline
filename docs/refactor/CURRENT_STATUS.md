@@ -2208,6 +2208,36 @@ This slice does not add UI/API mutation endpoints, does not recover stale locks,
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
 
+## Storage preflight and durable workspace routing
+
+Date: 2026-09-02.
+
+Fresh CLI runs now allocate their run ID before construction, route workspaces
+through `WORKSPACE_ROOT`, and persist that root in additive migration
+`003_run_workspace_root`. Resume reads state in SQLite read-only mode before the
+capacity gate, restores the persisted root, and keeps legacy null records on the
+original repository-local workspace path.
+
+Startup groups all write roles by physical volume, sums estimated writes, and
+requires the larger of `STORAGE_MIN_FREE_GB` or
+`STORAGE_MIN_FREE_PERCENT`. `--storage-preflight-only` reports readiness without
+constructing the pipeline. Typed capacity failures block direct-I/O fallbacks,
+with runtime rechecks at upload caching, QGIS staging/copy-back, and artifact
+mirrors. Startup also reserves twice the exact source-image bytes for the
+explicit QGIS staging root. The approved D: cache/QGIS/workspace settings are documented in
+`.env.template` and `STORAGE_PREFLIGHT_PLAN.md` but no production `.env` changed.
+
+### Validation
+
+- Compilation of all changed Python implementation and test files passed.
+- Focused storage, CLI, migration, resume, construction, and RGB stage tests passed.
+- `python -m pytest --collect-only -q`: 278 collected.
+- `python -m pytest -q`: 278 passed.
+- `git diff --check`: passed; line-ending conversion warnings only.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, network share,
+production data, or operator `.env` was accessed or modified.
+
 ## Deterministic WebODM Task 4 pause/resume and repair
 
 Date: 2026-08-28.

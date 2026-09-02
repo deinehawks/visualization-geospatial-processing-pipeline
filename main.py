@@ -1,14 +1,86 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 from pathlib import Path
+import sqlite3
+import tempfile
 from typing import Any
+import uuid
 
 from shared.config import load_pipeline_config
 from shared.db.repo import PipelineRepo
 from shared.paths import db_path
+from shared.artifacts import RUN_WORKSPACE_OWNERSHIP_NAME
+from shared.storage_preflight import (
+    StorageCapacityError,
+    build_storage_preflight,
+    format_storage_report,
+    is_sqlite_full_error,
+    require_storage_capacity,
+)
 from modules.data_segregation.data_segregation import resolve_source_dataset_dir
+
+
+def read_run_state_read_only(database: Path, run_id: str) -> dict | None:
+    resolved = Path(database).resolve(strict=True)
+    connection = sqlite3.connect(
+        f'{resolved.as_uri()}?mode=ro',
+        uri=True,
+    )
+    connection.row_factory = sqlite3.Row
+    try:
+        columns = {
+            row['name']
+            for row in connection.execute('PRAGMA table_info(runs)').fetchall()
+        }
+        workspace_expression = (
+            'workspace_root'
+            if 'workspace_root' in columns
+            else 'NULL AS workspace_root'
+        )
+        row = connection.execute(
+            (
+                'SELECT run_id, survey_id, status, source_dir, surveys_root, '
+                f'year, {workspace_expression} FROM runs WHERE run_id=?'
+            ),
+            (run_id,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        connection.close()
+
+
+def resolve_cli_workspace_root(
+    *,
+    base_dir: Path,
+    config: dict[str, Any],
+    resume: bool,
+    run_id: str,
+    run_record: dict | None,
+) -> Path:
+    legacy_root = Path(base_dir) / 'data' / 'workspaces'
+    configured = (config.get('paths') or {}).get('workspace_root')
+    configured_root = Path(configured) if configured else legacy_root
+    if not resume:
+        return configured_root
+
+    persisted = (run_record or {}).get('workspace_root')
+    if persisted:
+        return Path(str(persisted))
+
+    legacy_workspace = legacy_root / run_id
+    ownership_path = legacy_workspace / RUN_WORKSPACE_OWNERSHIP_NAME
+    if ownership_path.is_file():
+        ownership = json.loads(ownership_path.read_text(encoding='utf-8'))
+        if ownership.get('run_id') != run_id:
+            raise ValueError(
+                'Legacy workspace ownership does not match resumed run: '
+                f'{ownership_path}'
+            )
+    return legacy_root
 
 
 def resolve_cli_source_dir(
@@ -19,12 +91,15 @@ def resolve_cli_source_dir(
     logger: logging.Logger,
     date_hint: str | None = None,
     repository: PipelineRepo | None = None,
+    run_record: dict | None = None,
 ) -> Path:
     if resume:
         if not run_id:
             raise ValueError("run_id is required when resume=True")
-        repo = repository or PipelineRepo(db_path(Path(".")))
-        run = repo.get_run(run_id)
+        run = run_record
+        if run is None:
+            repo = repository or PipelineRepo(db_path(Path(".")))
+            run = repo.get_run(run_id)
         if not run:
             raise ValueError(
                 f"Cannot resume run {run_id!r}: no run record was found."
@@ -104,6 +179,11 @@ def main() -> None:
             "(e.g. 20260414). Skips the interactive prompt."
         ),
     )
+    parser.add_argument(
+        "--storage-preflight-only",
+        action="store_true",
+        help="Report storage readiness without constructing or running the pipeline.",
+    )
 
     # WebODM task mode: mutually exclusive flags
     task_group = parser.add_mutually_exclusive_group()
@@ -133,6 +213,22 @@ def main() -> None:
         parser.error("--publication-confirmation requires --activate-publication")
 
     config: dict[str, Any] = load_pipeline_config()
+    base_dir = Path(".")
+    database_path = db_path(base_dir)
+    selected_run_id = args.run_id or str(uuid.uuid4())
+
+    run_record = None
+    if args.resume:
+        try:
+            run_record = read_run_state_read_only(database_path, selected_run_id)
+        except FileNotFoundError:
+            parser.error(
+                f"Cannot resume run {selected_run_id!r}: state database not found."
+            )
+        if run_record is None:
+            parser.error(
+                f"Cannot resume run {selected_run_id!r}: no run record was found."
+            )
 
     if args.node_id is not None:
         config["webodm"]["node_id"] = args.node_id
@@ -144,9 +240,10 @@ def main() -> None:
     source_dir = resolve_cli_source_dir(
         survey=args.survey,
         resume=args.resume,
-        run_id=args.run_id,
+        run_id=selected_run_id,
         logger=resolver_logger,
         date_hint=args.date,
+        run_record=run_record,
     )
 
     # Determine webodm_mode from CLI flags
@@ -164,6 +261,49 @@ def main() -> None:
         webodm_mode = "task4"
         mode_display = "Task 4 only (bounded orthomosaic, default)"
 
+    workspace_root = resolve_cli_workspace_root(
+        base_dir=base_dir,
+        config=config,
+        resume=args.resume,
+        run_id=selected_run_id,
+        run_record=run_record,
+    )
+    configured_cache_root = (config.get("paths") or {}).get("upload_cache_root")
+    upload_cache_root = (
+        Path(configured_cache_root)
+        if configured_cache_root
+        else Path(os.getenv("TEMP") or tempfile.gettempdir())
+    )
+    qgis_local_staging = (config.get("qgis") or {}).get("local_staging") or {}
+    configured_qgis_staging = str(qgis_local_staging.get("dir") or "").strip()
+    qgis_staging_root = (
+        Path(configured_qgis_staging)
+        if configured_qgis_staging
+        else upload_cache_root / "qgis-staging"
+    )
+    storage_config = config.get("storage") or {}
+    storage_report = build_storage_preflight(
+        source_dir=source_dir,
+        database_path=database_path,
+        logs_dir=base_dir / "data" / "logs",
+        checkpoint_dir=base_dir / "data" / "logs",
+        upload_cache_root=upload_cache_root,
+        qgis_staging_root=qgis_staging_root,
+        workspace_root=workspace_root,
+        surveys_root=surveys_root,
+        temp_root=Path(tempfile.gettempdir()),
+        webodm_mode=webodm_mode,
+        min_free_gb=int(storage_config.get("min_free_gb", 10)),
+        min_free_percent=int(storage_config.get("min_free_percent", 10)),
+    )
+    print(format_storage_report(storage_report))
+    try:
+        require_storage_capacity(storage_report)
+    except StorageCapacityError:
+        raise SystemExit(3)
+    if args.storage_preflight_only:
+        return
+
     print("\n===== PRODUCTION RGB PIPELINE =====")
     print(f"Source dir   : {source_dir}")
     print(f"Surveys root : {surveys_root}")
@@ -175,35 +315,45 @@ def main() -> None:
 
     from pipelines.rgb_pipeline import RGBPipeline
 
-    pipeline = RGBPipeline(
-        base_dir=Path("."),
-        config=config,
-        source_dir=source_dir,
-        surveys_root=surveys_root,
-        year=args.year,
-        run_id=args.run_id,
-        survey_id_override=args.survey_id,
+    try:
+        pipeline = RGBPipeline(
+            base_dir=base_dir,
+            config=config,
+            source_dir=source_dir,
+            surveys_root=surveys_root,
+            year=args.year,
+            run_id=selected_run_id,
+            workspace_root=workspace_root,
+            survey_id_override=args.survey_id,
 
-        # production mode
-        use_year_subdir_override=True,
-        export_name_overrides=None, # using naming templates
-        crossrun_enabled_override=False if args.disable_cross_run else None,
+            # production mode
+            use_year_subdir_override=True,
+            export_name_overrides=None, # using naming templates
+            crossrun_enabled_override=False if args.disable_cross_run else None,
 
-        # WebODM task mode
-        skip_task1_webodm=True,
-        webodm_mode=webodm_mode,
-        task1_bounded=False,
-        force_segregation=False,
-    )
+            # WebODM task mode
+            skip_task1_webodm=True,
+            webodm_mode=webodm_mode,
+            task1_bounded=False,
+            force_segregation=False,
+        )
 
-    result = pipeline.run(
-        resume=args.resume,
-        force_stages=set(args.force_stage or []),
-        publication_confirmation=(
-            args.publication_confirmation if args.activate_publication else None
-        ),
-        keep_workspace=args.keep_workspace,
-    )
+        result = pipeline.run(
+            resume=args.resume,
+            force_stages=set(args.force_stage or []),
+            publication_confirmation=(
+                args.publication_confirmation if args.activate_publication else None
+            ),
+            keep_workspace=args.keep_workspace,
+        )
+    except sqlite3.Error as exc:
+        if not is_sqlite_full_error(exc):
+            raise
+        print(
+            "Pipeline state write failed because SQLite reported a full disk. "
+            f"Database: {database_path}"
+        )
+        raise SystemExit(4) from exc
 
     print("\n===== PIPELINE RESULT =====")
     print(f"Success : {result.get('success')}")

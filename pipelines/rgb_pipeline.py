@@ -10,6 +10,7 @@ from shared.stage_runner import StageFailedWithOutput, StageRequiresRecovery, St
 from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
+from shared.storage_preflight import StorageCapacityError, check_path_capacity
 from shared.artifacts import (
     PublicationArtifact,
     PublishedSurveyLayout,
@@ -219,6 +220,7 @@ class RGBPipeline(
             source_dir=str(self.source_dir),
             surveys_root=str(self.surveys_root),
             year=self.year,
+            workspace_root=str(self.workspace_root),
         )
 
         self.runner = StageRunner(
@@ -1245,6 +1247,37 @@ class RGBPipeline(
             return int(float(value))
         return default
 
+    def _storage_thresholds(self) -> tuple[int, int]:
+        storage = self.config.get("storage") or {}
+        return (
+            int(storage.get("min_free_gb", 10)),
+            int(storage.get("min_free_percent", 10)),
+        )
+
+    def _check_write_capacity(
+        self,
+        *,
+        role: str,
+        path: Path,
+        required_bytes: int,
+    ) -> dict:
+        min_free_gb, min_free_percent = self._storage_thresholds()
+        return check_path_capacity(
+            role=role,
+            path=path,
+            required_bytes=required_bytes,
+            min_free_gb=min_free_gb,
+            min_free_percent=min_free_percent,
+        )
+
+    @staticmethod
+    def _directory_size(path: Path) -> int:
+        return sum(
+            item.stat().st_size
+            for item in Path(path).rglob("*")
+            if item.is_file()
+        )
+
     def _stage_upload_cache(
         self,
         *,
@@ -1272,24 +1305,19 @@ class RGBPipeline(
             total_bytes += p.stat().st_size
 
         cache_dir = Path(cache_root)
-        cache_dir.mkdir(parents=True, exist_ok=True)
-
-        usage = shutil.disk_usage(str(cache_dir))
-        free_bytes = usage.free
         needed = int(total_bytes * require_free_multiplier)
+        capacity = self._check_write_capacity(
+            role="upload_cache",
+            path=cache_dir,
+            required_bytes=needed,
+        )
+        free_bytes = int(capacity["volumes"][0]["free_bytes"])
+        cache_dir.mkdir(parents=True, exist_ok=True)
 
         logger.info(
             f"Upload cache: preparing {len(images)} images "
             f"({self._fmt_bytes(total_bytes)}) -> {cache_dir} | free={self._fmt_bytes(free_bytes)}"
         )
-
-        if free_bytes < needed:
-            raise RuntimeError(
-                f"Not enough free space for upload cache.\n"
-                f"- Needed (with x{require_free_multiplier} buffer): {self._fmt_bytes(needed)}\n"
-                f"- Free: {self._fmt_bytes(free_bytes)}\n"
-                f"Cache root: {cache_dir}"
-            )
 
         copied = 0
         t0 = time.perf_counter()
@@ -1349,6 +1377,11 @@ class RGBPipeline(
 
         target = Path(target_dir)
         target_parent = target.parent
+        self._check_write_capacity(
+            role="published_directory_mirror",
+            path=target_parent,
+            required_bytes=int(self._directory_size(source) * 1.1),
+        )
         target_parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and not target.is_dir():
             raise NotADirectoryError(f"Legacy mirror target is not a directory: {target}")
@@ -1411,6 +1444,11 @@ class RGBPipeline(
 
         target = Path(target_file)
         target_parent = target.parent
+        self._check_write_capacity(
+            role="published_file_mirror",
+            path=target_parent,
+            required_bytes=int(source.stat().st_size * 1.1),
+        )
         target_parent.mkdir(parents=True, exist_ok=True)
         if target.exists() and not target.is_file():
             raise IsADirectoryError(f"Legacy mirror target is not a file: {target}")
@@ -2230,6 +2268,8 @@ class RGBPipeline(
                     fallback_direct=False,
                 )
 
+            except StorageCapacityError:
+                raise
             except Exception as e:
                 logger.warning(
                     f"Upload cache unavailable, uploading directly from source. reason={e}"
@@ -3389,8 +3429,14 @@ class RGBPipeline(
                     _staging_root = local_staging_root / task_key
                     try:
                         _local_ortho_staging = _staging_root / "ortho"
+                        staging_source = workspace_clipped_path or clipped_path
+                        self._check_write_capacity(
+                            role="qgis_local_staging",
+                            path=_staging_root,
+                            required_bytes=int(staging_source.stat().st_size * 2.0),
+                        )
                         tiling_input_path = tools.stage_local_copy(
-                            workspace_clipped_path or clipped_path,
+                            staging_source,
                             _local_ortho_staging,
                         )
                         tiling_output_dir = _staging_root / "tiles" / tile_mode
@@ -3400,6 +3446,8 @@ class RGBPipeline(
                             f"local disk ({tiling_output_dir}) and copy results "
                             f"to {workspace_tiles_dir} afterward."
                         )
+                    except StorageCapacityError:
+                        raise
                     except Exception as e:
                         logger.warning(
                             f"Local staging setup failed ({e}); falling back to "
@@ -3431,6 +3479,13 @@ class RGBPipeline(
                         f"{tiling_output_dir} -> {workspace_tiles_dir}"
                     )
                     t0 = time.perf_counter()
+                    self._check_write_capacity(
+                        role="qgis_tile_copy_back",
+                        path=workspace_tiles_dir,
+                        required_bytes=int(
+                            self._directory_size(tiling_output_dir) * 1.1
+                        ),
+                    )
                     if tile_resume:
                         workspace_tiles_dir.mkdir(parents=True, exist_ok=True)
                     else:
@@ -3775,6 +3830,8 @@ class RGBPipeline(
                         fallback_direct=False,
                     )
                     logger.info(f"Staged {task_key} upload to local disk: {upload_image_folder}")
+                except StorageCapacityError:
+                    raise
                 except Exception as e:
                     logger.warning(
                         f"Local staging failed for {task_key} upload, falling back to "

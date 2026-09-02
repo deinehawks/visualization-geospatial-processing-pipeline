@@ -38,6 +38,15 @@ def _prepare_cli(monkeypatch, tmp_path, argv):
             "paths": {
                 "field_data_root": str(tmp_path / "field-data"),
                 "surveys_root": str(tmp_path / "surveys"),
+                "upload_cache_root": str(tmp_path / "cache"),
+                "workspace_root": str(tmp_path / "workspaces"),
+            },
+            "storage": {"min_free_gb": 10, "min_free_percent": 10},
+            "qgis": {
+                "local_staging": {
+                    "enabled": True,
+                    "dir": str(tmp_path / "qgis-staging"),
+                }
             },
             "webodm": {},
         },
@@ -48,6 +57,16 @@ def _prepare_cli(monkeypatch, tmp_path, argv):
         lambda source_input, logger, date_hint=None: tmp_path / "resolved-source",
     )
     _install_fake_pipeline(monkeypatch)
+    monkeypatch.setattr(
+        rgb_main,
+        "build_storage_preflight",
+        lambda **kwargs: {"ok": True, "volumes": [], **kwargs},
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "format_storage_report",
+        lambda _report: "STORAGE PREFLIGHT PASS",
+    )
     monkeypatch.setattr(sys, "argv", ["main.py", *argv])
 
 
@@ -99,6 +118,60 @@ def test_cli_selects_both_tasks_mode_when_flag_is_present(monkeypatch, tmp_path)
 
     [pipeline] = FakeRGBPipeline.instances
     assert pipeline.init_kwargs["webodm_mode"] == "both"
+
+
+def test_cli_uses_configured_workspace_and_allocates_run_id(monkeypatch, tmp_path):
+    _prepare_cli(monkeypatch, tmp_path, ["--survey", "AH_026_source"])
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.init_kwargs["workspace_root"] == tmp_path / "workspaces"
+    assert pipeline.init_kwargs["run_id"]
+
+
+def test_storage_preflight_only_does_not_construct_pipeline(monkeypatch, tmp_path):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", "--storage-preflight-only"],
+    )
+
+    rgb_main.main()
+
+    assert FakeRGBPipeline.instances == []
+
+
+def test_cli_passes_explicit_qgis_staging_root_to_preflight(monkeypatch, tmp_path):
+    captured = {}
+    _prepare_cli(monkeypatch, tmp_path, ["--survey", "AH_026_source"])
+
+    def capture_preflight(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "volumes": []}
+
+    monkeypatch.setattr(rgb_main, "build_storage_preflight", capture_preflight)
+
+    rgb_main.main()
+
+    assert captured["qgis_staging_root"] == tmp_path / "qgis-staging"
+
+
+def test_failed_storage_preflight_exits_before_pipeline_construction(
+    monkeypatch, tmp_path
+):
+    _prepare_cli(monkeypatch, tmp_path, ["--survey", "AH_026_source"])
+    monkeypatch.setattr(
+        rgb_main,
+        "build_storage_preflight",
+        lambda **_kwargs: {"ok": False, "volumes": []},
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 3
+    assert FakeRGBPipeline.instances == []
 
 
 def test_cli_passes_publication_confirmation_when_activation_is_explicit(
