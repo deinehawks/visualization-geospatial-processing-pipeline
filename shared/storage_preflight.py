@@ -21,7 +21,8 @@ class StorageCapacityError(RuntimeError):
 
 def is_sqlite_full_error(exc: BaseException) -> bool:
     error_code = getattr(exc, "sqlite_errorcode", None)
-    return error_code == sqlite3.SQLITE_FULL or (
+    sqlite_full_code = getattr(sqlite3, "SQLITE_FULL", 13)
+    return error_code == sqlite_full_code or (
         isinstance(exc, sqlite3.Error)
         and "database or disk is full" in str(exc).casefold()
     )
@@ -110,11 +111,13 @@ def inspect_storage_requirements(
         total = int(getattr(usage, 'total'))
         used = int(getattr(usage, 'used'))
         free = int(getattr(usage, 'free'))
-        reserve = max(
-            int(min_free_gb) * GIB,
-            int(total * (int(min_free_percent) / 100.0)),
-        )
         required = int(group['required_bytes'])
+        percentage_reserve = (
+            int(total * (int(min_free_percent) / 100.0))
+            if required > 0
+            else 0
+        )
+        reserve = max(int(min_free_gb) * GIB, percentage_reserve)
         volumes.append(
             {
                 **group,
@@ -146,6 +149,9 @@ def build_storage_preflight(
     surveys_root: Path,
     temp_root: Path,
     webodm_mode: str,
+    include_upload_cache: bool = True,
+    include_qgis_staging: bool = True,
+    include_workspace: bool = True,
     min_free_gb: int = 10,
     min_free_percent: int = 10,
     disk_usage: Callable[[str], object] = shutil.disk_usage,
@@ -155,11 +161,15 @@ def build_storage_preflight(
         raise ValueError(f'Unsupported WebODM mode for storage planning: {mode}')
 
     source_bytes, image_count = estimate_jpeg_bytes(source_dir)
-    cache_bytes = int(source_bytes * 1.2)
-    qgis_staging_bytes = int(source_bytes * 2.0)
-    workspace_bytes = max(
-        20 * GIB,
-        int(source_bytes * WORKSPACE_MULTIPLIERS[mode]),
+    cache_bytes = int(source_bytes * 1.2) if include_upload_cache else 0
+    qgis_staging_bytes = int(source_bytes * 2.0) if include_qgis_staging else 0
+    workspace_bytes = (
+        max(
+            20 * GIB,
+            int(source_bytes * WORKSPACE_MULTIPLIERS[mode]),
+        )
+        if include_workspace
+        else 0
     )
     report = inspect_storage_requirements(
         [
@@ -189,6 +199,9 @@ def build_storage_preflight(
             'estimated_qgis_staging_bytes': qgis_staging_bytes,
             'estimated_workspace_bytes': workspace_bytes,
             'webodm_mode': mode,
+            'include_upload_cache': bool(include_upload_cache),
+            'include_qgis_staging': bool(include_qgis_staging),
+            'include_workspace': bool(include_workspace),
             'min_free_gb': int(min_free_gb),
             'min_free_percent': int(min_free_percent),
         }

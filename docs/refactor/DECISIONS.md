@@ -561,3 +561,33 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
 - **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
   `shared/db/migrations/m003_run_workspace_root.py`;
   `docs/refactor/STORAGE_PREFLIGHT_PLAN.md`; ADR-025.
+
+### ADR-028 - Make resume capacity stage-aware and legacy rebind explicit
+
+- **Decision ID:** ADR-028
+- **Date:** 2026-09-02
+- **Status:** Accepted and implemented in an isolated feature worktree; operational integration pending.
+- **Approval context:** A legacy run had completed WebODM and quality-gate stages
+  but failed QGIS after the E: volume filled. The user approved moving its next
+  workspace attempt to D: while retaining the old workspace until success.
+- **Decision:**
+  - Read latest stage attempts through SQLite read-only mode before resume
+    preflight and estimate bulk writes only for stages that will run.
+  - Keep upload-cache capacity for incomplete or forced WebODM and quality-gate
+    work; omit it when both are completed. Keep QGIS staging capacity only when
+    QGIS will run.
+  - Apply percentage reserve only to volumes with estimated bulk writes;
+    state-only volumes still require the configured absolute reserve.
+  - Preserve legacy workspace pinning by default. Permit rebind only with
+    `--rebind-workspace-to-configured-root` and exact `REBIND WORKSPACE <run-id>`
+    confirmation, a non-legacy configured root, no conflicting persisted root,
+    and no unowned target workspace.
+  - Leave the old workspace unchanged. Delete it only after a separately
+    validated successful resume and an exact destructive-operation review.
+- **Consequences:** The audited QGIS-only resume no longer reserves space for a
+  completed WebODM upload, while D: still reserves QGIS staging plus workspace
+  writes. E: must still meet the absolute state reserve. Rebinding does not copy
+  or reclaim legacy data, so recovery evidence remains available until success
+  is proven.
+- **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
+  `docs/refactor/STORAGE_PREFLIGHT_PLAN.md`; ADR-025; ADR-027.

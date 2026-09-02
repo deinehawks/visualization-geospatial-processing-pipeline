@@ -18,28 +18,44 @@ STORAGE_MIN_FREE_GB=10
 STORAGE_MIN_FREE_PERCENT=10
 ```
 
-The required reserve for each involved volume is the larger of 10 GiB or 10% of
-that volume. Requirements that share a volume are summed before the reserve is
-applied. These values are configurable; the defaults remain 10 and 10.
+For a volume with estimated writes, the required reserve is the larger of 10
+GiB or 10% of that volume. A state-only volume with zero estimated bulk writes
+uses the absolute 10 GiB reserve, avoiding an unrelated percentage requirement
+on a large system or network volume. Requirements that share a volume are
+summed before the reserve is applied. These values are configurable; the
+defaults remain 10 and 10.
 
 ## Startup behavior
 
 1. Resolve a fresh run ID, or read an existing resume record through SQLite
    read-only mode.
 2. Restore a resumed run's persisted workspace root. Legacy runs with no stored
-   value remain pinned to `<base>/data/workspaces` for compatibility.
+   value remain pinned to `<base>/data/workspaces` unless the operator supplies
+   the explicit rebind flag and exact `REBIND WORKSPACE <run-id>` confirmation.
+   Rebind selects the configured root for the new attempt, refuses an unrelated
+   existing target or a conflicting persisted root, and leaves the legacy
+   workspace unchanged.
 3. Count source JPG/JPEG files and sum their exact byte sizes.
-4. Estimate upload cache writes at 1.2 times source bytes.
-5. Estimate QGIS local staging writes at 2 times source bytes.
-6. Estimate workspace writes at the larger of 20 GiB or the mode multiplier:
+4. For resume, read the latest stage attempts through SQLite read-only mode and
+   estimate only stages that will run. Completed WebODM omits upload-cache
+   writes; incomplete/forced WebODM or quality gate retains them because the
+   quality gate can request a fallback task.
+5. Estimate required upload cache writes at 1.2 times source bytes.
+6. Estimate required QGIS local staging writes at 2 times source bytes.
+7. Estimate required workspace writes at the larger of 20 GiB or the mode multiplier:
    Task 4 = 2x, Task 2 = 3x, both = 4x.
-7. Group database, logs, checkpoints, upload cache, QGIS staging, workspace, survey outputs,
+8. Group database, logs, checkpoints, upload cache, QGIS staging, workspace, survey outputs,
    and system temporary storage by physical volume.
-8. Print one per-volume PASS/FAIL report and exit with code 3 before pipeline
+9. Print one per-volume PASS/FAIL report and exit with code 3 before pipeline
    construction if any volume fails.
 
 `--storage-preflight-only` prints the same report and exits without constructing
 or running `RGBPipeline`.
+
+For a deliberately reviewed legacy run, use
+`--rebind-workspace-to-configured-root --workspace-rebind-confirmation
+"REBIND WORKSPACE <run-id>"`. Run report-only first. The old workspace is not
+moved, copied, or deleted by preflight or rebind.
 
 ## Runtime rechecks
 
