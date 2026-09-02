@@ -316,6 +316,102 @@ def test_repair_tool_dry_run_reads_without_migrating_and_apply_is_audited(
     )
     assert repeated['applied_binding_id'] == applied['applied_binding_id']
     assert len(repo.list_webodm_bindings('repair-tool-run')) == 2
+    repeated_binding = repo.get_webodm_binding('repair-tool-run', 'task4')
+    repeated_audit = json.loads(repeated_binding['audit_json'])
+    assert repeated_audit['previous_binding']['project_id'] == 418
+    assert repeated_audit['previous_binding']['task_id'] == 'duplicate-task'
+
+
+def test_repair_plan_reports_and_preserves_history_for_missing_task_uuid(
+    temporary_sqlite_db_path,
+    temporary_checkpoint_dir,
+):
+    task_id = '99263264-70e8-40c0-99bc-cd45abf6267d'
+    task_name = 'AH-026042-RGB--xcb-t4'
+    repo = PipelineRepo(temporary_sqlite_db_path)
+    repo.create_run('missing-uuid-run')
+    repo.attach_survey_id('missing-uuid-run', 'AH-026042')
+    incomplete = repo.record_webodm_binding(
+        run_id='missing-uuid-run',
+        operation_key='task4',
+        project_id=394,
+        task_name=task_name,
+    )
+    context = read_repair_context(
+        temporary_sqlite_db_path,
+        'missing-uuid-run',
+        'task4',
+    )
+    remote_task = {
+        'id': task_id,
+        'name': task_name,
+        'status': 20,
+    }
+
+    missing_uuid_plan = build_repair_plan(
+        run_id='missing-uuid-run',
+        operation='task4',
+        project_id=394,
+        task_id=task_id,
+        context=context,
+        checkpoint={},
+        remote_task=remote_task,
+        normalize_status=WebODMProcessor._normalize_status,
+    )
+    assert missing_uuid_plan['conflicts'] == []
+    assert missing_uuid_plan['changes_required'] is True
+
+    checkpoint_path = (
+        temporary_checkpoint_dir
+        / 'webodm_checkpoint_missing-uuid-run.json'
+    )
+    applied = apply_repair_plan(
+        database=temporary_sqlite_db_path,
+        checkpoint_path=checkpoint_path,
+        plan=missing_uuid_plan,
+    )
+
+    history = repo.list_webodm_bindings('missing-uuid-run')
+    assert len(history) == 2
+    assert history[0]['id'] == incomplete['id']
+    assert history[0]['task_id'] is None
+    assert history[1]['id'] == applied['applied_binding_id']
+    assert history[1]['task_id'] == task_id
+    assert json.loads(history[1]['audit_json'])['previous_binding']['id'] == (
+        incomplete['id']
+    )
+    checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
+    assert checkpoint['project_id'] == 394
+    assert checkpoint['task4']['id'] == task_id
+
+    exact_context = read_repair_context(
+        temporary_sqlite_db_path,
+        'missing-uuid-run',
+        'task4',
+    )
+    exact_binding_plan = build_repair_plan(
+        run_id='missing-uuid-run',
+        operation='task4',
+        project_id=394,
+        task_id=task_id,
+        context=exact_context,
+        checkpoint=checkpoint,
+        remote_task=remote_task,
+        normalize_status=WebODMProcessor._normalize_status,
+    )
+    assert exact_binding_plan['changes_required'] is False
+
+    repeated = apply_repair_plan(
+        database=temporary_sqlite_db_path,
+        checkpoint_path=checkpoint_path,
+        plan=exact_binding_plan,
+    )
+    assert repeated['applied_binding_id'] == applied['applied_binding_id']
+    repeated_history = repo.list_webodm_bindings('missing-uuid-run')
+    assert len(repeated_history) == 2
+    assert json.loads(repeated_history[1]['audit_json'])[
+        'previous_binding'
+    ]['id'] == incomplete['id']
 
 
 def test_binding_migration_upgrades_legacy_table_repeatably(tmp_path):

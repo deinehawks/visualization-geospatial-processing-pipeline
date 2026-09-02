@@ -197,6 +197,7 @@ def build_repair_plan(
         'changes_required': bool(
             current is None
             or conflicts
+            or str(current.get('task_id') or '') != str(task_id)
             or current.get('task_name') != remote_name
         ),
     }

@@ -439,6 +439,20 @@ class PipelineRepo:
                     and task_name
                     and current_name != str(task_name)
                 )
+                repair_identity_change = bool(
+                    allow_rebind
+                    and (
+                        project_conflict
+                        or (
+                            normalized_task_id is not None
+                            and current_task != normalized_task_id
+                        )
+                        or (
+                            task_name is not None
+                            and current_name != str(task_name)
+                        )
+                    )
+                )
                 if (
                     project_conflict
                     or task_conflict
@@ -452,7 +466,21 @@ class PipelineRepo:
                         f'{task_name!r}'
                     )
 
-                if not project_conflict and not task_conflict and not name_conflict:
+                if (
+                    not project_conflict
+                    and not task_conflict
+                    and not name_conflict
+                    and not repair_identity_change
+                ):
+                    audit_json = (
+                        current.get('audit_json')
+                        if allow_rebind and current.get('audit_json')
+                        else (
+                            json.dumps(audit)
+                            if audit is not None
+                            else None
+                        )
+                    )
                     conn.execute(
                         '''
                         UPDATE webodm_tasks
@@ -482,7 +510,7 @@ class PipelineRepo:
                             now,
                             binding_source,
                             stage_attempt_id,
-                            json.dumps(audit) if audit is not None else None,
+                            audit_json,
                             int(current['id']),
                         ),
                     )
