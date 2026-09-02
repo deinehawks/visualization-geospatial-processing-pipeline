@@ -2,21 +2,23 @@
 
 ## Highest Priority
 
-1. Integrate the validated resume-aware storage feature, then run report-only
-   preflight for the audited legacy QGIS resume after E: meets the 10 GiB state reserve.
+1. Integrate the validated split-reserve storage follow-up, update the
+   user-managed percentage setting to 5, then rerun report-only preflight for
+   the audited legacy QGIS resume.
 
-Why this is first: the isolated implementation and 291-test safe suite are
-complete, D: is prepared, and the audited run no longer needs WebODM upload
-capacity. E: still has only about 5.54 GiB free and must meet the absolute 10
-GiB state reserve. The old workspace remains rollback evidence until the resume
-finishes successfully.
+Why this is first: the prior resume reached QGIS successfully and retained a
+verified D: clip, then exposed a configured-versus-persisted publication-root
+mismatch and an unsuitable percentage reserve for exact network mirrors. The
+isolated correction passes 297 safe tests. The old workspace remains rollback
+evidence until the resume finishes successfully.
 
 ## Recommended Pipeline Sequence
 
 1. Integrate the isolated resume-aware feature without disturbing unrelated E: changes.
 
-2. Free at least enough unrelated E: storage to exceed the 10 GiB state reserve;
-   do not delete the audited legacy workspace yet.
+2. Set `STORAGE_MIN_FREE_PERCENT=5`; the new published reserve variables default
+   safely but may also be written explicitly as 10 GiB/0%. Do not delete the
+   audited legacy workspace yet.
 
 3. Run the audited command with explicit workspace rebind and
    `--storage-preflight-only`; confirm E: state, D: QGIS/workspace, output, and temp reporting.

@@ -24,20 +24,34 @@ def test_storage_settings_and_workspace_root_are_loaded(monkeypatch, tmp_path):
     workspace = tmp_path / "workspaces"
     monkeypatch.setenv("WORKSPACE_ROOT", str(workspace))
     monkeypatch.setenv("STORAGE_MIN_FREE_GB", "10")
-    monkeypatch.setenv("STORAGE_MIN_FREE_PERCENT", "10")
+    monkeypatch.setenv("STORAGE_MIN_FREE_PERCENT", "5")
+    monkeypatch.setenv("STORAGE_PUBLISHED_MIN_FREE_GB", "10")
+    monkeypatch.setenv("STORAGE_PUBLISHED_MIN_FREE_PERCENT", "0")
 
     config = config_module.load_pipeline_config()
 
     assert config["paths"]["workspace_root"] == workspace
     assert config["storage"] == {
         "min_free_gb": 10,
-        "min_free_percent": 10,
+        "min_free_percent": 5,
+        "published_min_free_gb": 10,
+        "published_min_free_percent": 0,
     }
 
 
 def test_storage_percentage_rejects_values_over_100(monkeypatch, tmp_path):
     _set_required_config(monkeypatch, tmp_path)
     monkeypatch.setenv("STORAGE_MIN_FREE_PERCENT", "101")
+
+    with pytest.raises(ValueError, match="must be <= 100"):
+        config_module.load_pipeline_config()
+
+
+def test_published_storage_percentage_rejects_values_over_100(
+    monkeypatch, tmp_path
+):
+    _set_required_config(monkeypatch, tmp_path)
+    monkeypatch.setenv("STORAGE_PUBLISHED_MIN_FREE_PERCENT", "101")
 
     with pytest.raises(ValueError, match="must be <= 100"):
         config_module.load_pipeline_config()

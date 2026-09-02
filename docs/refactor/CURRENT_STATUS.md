@@ -2241,6 +2241,33 @@ database, survey/network share, operator `.env`, legacy workspace mutation, or
 destructive cleanup was used. Operational integration, report-only preflight,
 actual resume, success verification, and any deletion remain pending.
 
+## Split published-mirror storage reserve
+
+Date: 2026-09-02.
+
+General cache, QGIS staging, and workspace writes now default to a 10 GiB/5%
+reserve. Published file and directory mirrors have independent 10 GiB/0%
+thresholds because their exact pending bytes plus copy overhead are rechecked
+immediately before mutation. If published and general writes share a volume,
+the stricter applicable policy remains effective.
+
+Resume startup now uses the run's persisted surveys root rather than a current
+configuration alias and reserves one source-image set for pending published
+output. Typed storage-capacity failures are recorded as failed once and bypass
+StageRunner retries.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused configuration, storage, resume/CLI, StageRunner, and RGBPipeline tests: 117 passed.
+- `python -m pytest --collect-only -q`: 297 tests collected.
+- `python -m pytest -q`: 297 passed.
+
+Tests used fake disk usage and pytest-owned files/databases. No production
+`.env`, database, network share, survey data, QGIS/GDAL, pipeline run, or
+workspace deletion was used. Integration and an operator-run report-only check
+remain pending.
+
 ## Storage preflight and durable workspace routing
 
 Date: 2026-09-02.

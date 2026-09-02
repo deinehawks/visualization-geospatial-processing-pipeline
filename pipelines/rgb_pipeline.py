@@ -1247,11 +1247,16 @@ class RGBPipeline(
             return int(float(value))
         return default
 
-    def _storage_thresholds(self) -> tuple[int, int]:
+    def _storage_thresholds(self, *, role: str) -> tuple[int, int]:
         storage = self.config.get("storage") or {}
+        if role in {"published_file_mirror", "published_directory_mirror"}:
+            return (
+                int(storage.get("published_min_free_gb", 10)),
+                int(storage.get("published_min_free_percent", 0)),
+            )
         return (
             int(storage.get("min_free_gb", 10)),
-            int(storage.get("min_free_percent", 10)),
+            int(storage.get("min_free_percent", 5)),
         )
 
     def _check_write_capacity(
@@ -1261,7 +1266,7 @@ class RGBPipeline(
         path: Path,
         required_bytes: int,
     ) -> dict:
-        min_free_gb, min_free_percent = self._storage_thresholds()
+        min_free_gb, min_free_percent = self._storage_thresholds(role=role)
         return check_path_capacity(
             role=role,
             path=path,

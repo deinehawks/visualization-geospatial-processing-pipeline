@@ -45,6 +45,24 @@ LOGGER_KEYS = (
     "webodm",
     "qgis",
 )
+
+
+def test_storage_thresholds_use_split_published_mirror_policy():
+    pipeline = object.__new__(RGBPipeline)
+    pipeline.config = {
+        "storage": {
+            "min_free_gb": 10,
+            "min_free_percent": 5,
+            "published_min_free_gb": 10,
+            "published_min_free_percent": 0,
+        }
+    }
+
+    assert pipeline._storage_thresholds(role="qgis_local_staging") == (10, 5)
+    assert pipeline._storage_thresholds(role="published_file_mirror") == (10, 0)
+    assert pipeline._storage_thresholds(role="published_directory_mirror") == (10, 0)
+
+
 RUN_ID = "single-stage-rgb-run"
 SELECTED_STAGE = "data_segregation"
 LATER_STAGES = (
