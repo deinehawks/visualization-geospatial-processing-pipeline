@@ -1,5 +1,17 @@
 # Architectural Decision Log
 
+## Google Sheets reporter V1 — accepted implementation scope (2026-09-07)
+
+The operator approved a manually launched, single-PC, read-only SQLite reporter
+for Pipeline Runs, Stage Execution Log, and Processing Time Statistics.
+`docs/operators/google-sheets-sync.md` defines the exact column ownership,
+timing semantics, lifecycle limitations, service-account setup, and rollback.
+Six operator metadata fields remain manual in Sheets. No pipeline metadata
+migration or manifest change is included. A Google-independent projection and
+separate local synchronization state keep the reporting integration replaceable
+by the future read-only API. This does not resolve pending pipeline concurrency,
+publication, retry, or durable-event architecture decisions.
+
 ## Usage
 
 This file records architectural decisions for the scalability and concurrency refactor. It does not itself authorize implementation.
