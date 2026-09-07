@@ -9,6 +9,7 @@ from shared.storage_preflight import (
     StorageCapacityError,
     StorageRequirement,
     build_storage_preflight,
+    format_storage_report,
     inspect_storage_requirements,
     is_sqlite_full_error,
 )
@@ -133,6 +134,75 @@ def test_preflight_uses_exact_jpeg_bytes_and_mode_estimate(tmp_path: Path):
     [volume] = report["volumes"]
     assert "qgis_local_staging" in volume["roles"]
     assert volume["required_bytes"] == (20 * GIB) + 480 + 800 + 400
+
+
+def test_task4_all_assets_zip_adds_workspace_and_published_estimates(
+    tmp_path: Path,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.jpg").write_bytes(b"a" * 400)
+
+    report = build_storage_preflight(
+        source_dir=source,
+        database_path=tmp_path / "data" / "pipeline.db",
+        logs_dir=tmp_path / "logs",
+        checkpoint_dir=tmp_path / "checkpoints",
+        upload_cache_root=tmp_path / "cache",
+        qgis_staging_root=tmp_path / "qgis-staging",
+        workspace_root=tmp_path / "workspaces",
+        surveys_root=tmp_path / "surveys",
+        temp_root=tmp_path / "temp",
+        webodm_mode="task4",
+        include_task4_all_assets_zip=True,
+        min_free_gb=0,
+        min_free_percent=0,
+        published_min_free_gb=0,
+        published_min_free_percent=0,
+        disk_usage=lambda _path: _usage(total_gib=100, free_gib=100),
+    )
+
+    assert report["include_task4_all_assets_zip"] is True
+    assert report["estimated_task4_all_assets_zip_bytes"] == 400
+    assert report["estimated_workspace_bytes"] == (20 * GIB) + 400
+    assert report["estimated_published_output_bytes"] == 800
+    [volume] = report["volumes"]
+    assert volume["required_bytes"] == (20 * GIB) + 2480
+    formatted = format_storage_report(report)
+    assert "Task 4 full ODM ZIP: enabled (estimated 0.00 GiB)" in formatted
+
+
+def test_rgb_preflight_counts_only_dji_d_jpg_images(tmp_path: Path):
+    source = tmp_path / "source"
+    (source / "1of15").mkdir(parents=True)
+    (source / "15of15").mkdir()
+    (source / "1of15" / "DJI_0001_D.JPG").write_bytes(b"a" * 100)
+    (source / "15of15" / "DJI_0002_d.jpg").write_bytes(b"b" * 300)
+    (source / "15of15" / "ordinary.jpg").write_bytes(b"c" * 500)
+    (source / "15of15" / "DJI_0002_MS_NIR.TIF").write_bytes(b"d" * 700)
+
+    report = build_storage_preflight(
+        source_dir=source,
+        database_path=tmp_path / "data" / "pipeline.db",
+        logs_dir=tmp_path / "logs",
+        checkpoint_dir=tmp_path / "checkpoints",
+        upload_cache_root=tmp_path / "cache",
+        qgis_staging_root=tmp_path / "qgis-staging",
+        workspace_root=tmp_path / "workspaces",
+        surveys_root=tmp_path / "surveys",
+        temp_root=tmp_path / "temp",
+        webodm_mode="task4",
+        rgb_only=True,
+        min_free_gb=0,
+        min_free_percent=0,
+        published_min_free_gb=0,
+        published_min_free_percent=0,
+        disk_usage=lambda _path: _usage(total_gib=100, free_gib=100),
+    )
+
+    assert report["source_image_count"] == 2
+    assert report["source_image_bytes"] == 400
+    assert report["image_selection_mode"] == "dji_rgb_d_jpg"
 
 
 def test_qgis_only_resume_omits_completed_webodm_cache_estimate(tmp_path: Path):

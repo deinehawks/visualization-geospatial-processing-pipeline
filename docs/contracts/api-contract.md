@@ -227,6 +227,13 @@ Status: **Partially implemented; read-only API projection remains deferred**.
 - Task 1, Task 2, and Task 4 persistence now use canonical run/operation/project/task bindings. Task 4 operator repair is append-preserving. A read projection should expose canonical binding identity separately from historical rows.
 - Task 4 pause is local detach: remote status and local attempt/artifact status are independent fields. A remotely running or completed task can coexist with a locally paused attempt.
 - Normal WebODM resume reuses each exact canonical task UUID; `--force-stage webodm_task4` specifically reconciles Task 4. Missing/conflicting bindings project as recovery-required evidence; they must not be represented as permission to create a replacement.
+- The CLI-only Task 4 empty-project recovery is implemented as an explicit
+  exception for a persisted project that WebODM verifies contains zero tasks.
+  It requires the exact run/project confirmation and emits durable
+  authorization evidence before normal task creation. It is not an API/UI
+  mutation contract; API/UI recovery controls remain deferred.
+- A nonempty or indeterminate project never authorizes creation. Existing tasks
+  continue through exact-UUID repair, not name-based adoption or replacement.
 ## Publication Activation API Contract
 
 Status: **Partially implemented with deferred operational endpoints**.

@@ -1278,3 +1278,59 @@ Changed Python compilation and 117 focused tests passed. Collection found 297
 tests and the full safe suite passed 297/297. No external service, subprocess,
 production path/database, operator `.env`, network share, or destructive action
 was used.
+
+## Explicit empty-WebODM-project recovery coverage
+
+Added on 2026-09-03, recovery tests use fake WebODM clients, mocked paginated
+HTTP responses, temporary SQLite databases, and pytest-owned image/workspace
+paths. Coverage proves exact CLI and programmatic confirmation, strict persisted
+project/operation identity, zero-task verification across pages, additive
+authorization history, immediate UUID persistence, and one normal Task 4
+creation. Nonempty projects, existing UUIDs, mismatched IDs, malformed
+responses, and authentication/network/lookup failures fail closed without
+upload. Normal missing-UUID resume does not list tasks or create replacements.
+
+Changed Python compilation passed, 25 focused recovery cases passed, the broader
+WebODM/CLI/RGB regression set passed 120/120, collection found 322 tests, and the
+full safe suite passed 322/322. No real pipeline, WebODM, QGIS/GDAL, production
+database, survey data, network share, operator `.env`, or destructive operation
+was accessed.
+
+## DJI M3M ingestion coverage
+
+Added on 2026-09-04, M3M tests use only pytest-owned field-data and survey
+directories. Coverage proves exact case-insensitive UAV ancestor filtering,
+future UAV folder names, date and prompt ordering, direct/resumed path
+validation, arbitrary nested capture splits through `15of15`, strict
+`*_D.JPG` selection, legacy JPEG compatibility, pre-copy collision refusal,
+manifest audit counts, and consistent stage/storage/segregation selection.
+
+Changed Python compilation passed, focused coverage passed 139/139, collection
+found 337 tests, and the complete safe suite passed 337/337. No real pipeline,
+field-data root, network share, production database, WebODM, QGIS/GDAL,
+operator `.env`, or destructive operation was accessed.
+
+## Task 4 all-assets ZIP coverage
+
+Added on 2026-09-04, Task 4 ZIP tests use fake WebODM clients, fake disk usage,
+pytest-owned workspaces, and pytest-owned published roots.
+
+Coverage proves:
+
+- enabled Task 4 downloads one all-assets ZIP to
+  `workspace/webodm/odm/task4` and mirrors it to legacy `rgb/odm`;
+- Task 4 download, workspace, and published metadata use additive stable keys;
+- a failed optional download does not replace an existing published ZIP;
+- publication planning accepts the exact Task 4 ZIP and continues rejecting
+  unrelated ODM sidecars;
+- startup preflight adds the ZIP estimate to workspace and published writes,
+  and CLI wiring enables that estimate for default Task 4 but not Task 2-only;
+- runtime performs the pre-download workspace capacity check and the existing
+  actual-size published mirror check; and
+- existing Task 2 and Task 4 orthomosaic behavior remains compatible.
+
+Changed Python compilation passed, the complete focused storage/CLI/RGBPipeline
+files passed 108/108, collection found 342 tests, and the full safe suite
+passed 342/342. No real pipeline, WebODM, QGIS/GDAL, production database,
+survey data, network share, operator `.env`, or destructive operation was
+used.

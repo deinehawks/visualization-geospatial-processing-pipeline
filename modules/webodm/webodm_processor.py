@@ -1132,6 +1132,47 @@ class WebODMProcessor:
                 f'Failed to query tasks for project {project_id}: {e}'
             ) from e
 
+    def list_project_tasks(self, project_id: int) -> list[dict[str, Any]]:
+        """Return every task in a project, failing closed on malformed pages."""
+        tasks: list[dict[str, Any]] = []
+        page = 1
+        try:
+            while True:
+                resp = self.session.get(
+                    f"{self.base_url}/api/projects/{int(project_id)}/tasks/",
+                    headers=self.headers,
+                    params={"page": page, "page_size": 100},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+
+                if isinstance(payload, list):
+                    page_tasks = payload
+                    has_more = False
+                elif isinstance(payload, dict):
+                    if "results" not in payload or not isinstance(
+                        payload["results"], list
+                    ):
+                        raise ValueError("task-list response has no results list")
+                    page_tasks = payload["results"]
+                    has_more = bool(payload.get("next"))
+                else:
+                    raise ValueError("task-list response is not a list or object")
+
+                if not all(isinstance(task, dict) for task in page_tasks):
+                    raise ValueError("task-list response contains a non-object task")
+                tasks.extend(dict(task) for task in page_tasks)
+                if not has_more:
+                    return tasks
+                page += 1
+        except WebODMTaskLookupError:
+            raise
+        except Exception as exc:
+            raise WebODMTaskLookupError(
+                f"Failed to list tasks for project {project_id}: {exc}"
+            ) from exc
+
     def get_task_status(self, project_id: int, task_id: str) -> Optional[str]:
         """
         Returns the current status string of a task, or None on failure.

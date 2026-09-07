@@ -619,3 +619,80 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
 - **Related files or issues:** `main.py`; `shared/config.py`;
   `shared/storage_preflight.py`; `shared/stage_runner.py`;
   `pipelines/rgb_pipeline.py`; ADR-027; ADR-028.
+
+### ADR-030 - Recover only a verified empty persisted WebODM project
+
+- **Decision ID:** ADR-030
+- **Date:** 2026-09-03
+- **Status:** Accepted and implemented.
+- **Approval context:** Run `a14e462b-74ba-4f80-9232-2183f3e903b6` persisted
+  WebODM project 429 but stopped before Task 4 creation, leaving no UUID that
+  the existing repair tool could validate.
+- **Decision:**
+  - Keep normal resume exact-UUID-only and fail closed by default.
+  - Add Task 4-only recovery requiring resume, `webodm_task4` force selection,
+    the persisted project ID, and an exact run/project confirmation.
+  - List every task immediately before upload and authorize normal creation only
+    when the complete project task list is exactly empty.
+  - Append authorization evidence to `webodm_tasks` history before upload; use
+    the normal creation path and immediately persist the returned UUID.
+  - Refuse nonempty, malformed, unavailable, newly created, or conflicting
+    projects without name-based adoption, replacement, or deletion.
+- **Consequences:** The project-created/task-not-created crash window is
+  recoverable without weakening duplicate prevention. If creation returns
+  ambiguously and a task appears, the next recovery refuses creation and the
+  exact UUID repair workflow applies. No schema migration is required.
+- **Related files or issues:** `main.py`; `pipelines/rgb_pipeline.py`;
+  `modules/webodm/webodm_processor.py`; ADR-026; CW-ADR-008; CW-ADR-009.
+
+### ADR-031 - Select M3M UAV folders separately from RGB imagery
+
+- **Decision ID:** ADR-031
+- **Date:** 2026-09-04
+- **Status:** Accepted and implemented.
+- **Decision:**
+  - Add exact, case-insensitive `--uav <folder>` candidate filtering without
+    hard-coding known M3M folder names.
+  - Keep `--rgb` independent and invocation-scoped; it selects only
+    case-insensitive `*_D.JPG` files.
+  - Recursively combine every nested capture split without parsing or limiting
+    `NofM` folder names.
+  - Preserve the flat raw-image contract but fail before copying when selected
+    source basenames collide case-insensitively.
+  - Use one image selector for stage preflight, storage estimates, and
+    segregation. Preserve legacy all-JPG/JPEG behavior by default.
+- **Consequences:** M3M RGB ingestion excludes multispectral TIF bands and
+  nonmatching JPEGs without coupling folder selection to a future `--ms`
+  mode. Existing run rows need no migration because resume already persists
+  the concrete source path.
+- **Related files or issues:** `main.py`;
+  `modules/data_segregation/data_segregation.py`;
+  `shared/source_images.py`; CW-ADR-010.
+
+### ADR-032 - Extend the existing all-assets ZIP export to Task 4
+
+- **Decision ID:** ADR-032
+- **Date:** 2026-09-04
+- **Status:** Accepted and implemented.
+- **Approval context:** The operator approved full ODM ZIP delivery for the
+  default Task 4 workflow without requiring Task 2.
+- **Decision:**
+  - Keep `EXPORTS_ENABLED` and `EXPORT_ALL_ASSETS_ZIP` as the shared Task 2
+    and Task 4 controls; do not add another CLI flag or database migration.
+  - Download a successful Task 4 `all.zip` to
+    `workspace/webodm/odm/task4` before mirroring it to legacy `rgb/odm`.
+  - Record additive Task 4 download, workspace, and published artifact paths,
+    and allow the Task 4 ZIP through publication planning.
+  - Reserve one source-image-size estimate on both workspace and published
+    destinations at startup, recheck workspace capacity immediately before
+    download, and check the completed ZIP size before published mirroring.
+  - Preserve Task 2's optional export semantics: a missing or failed ZIP logs
+    a warning and cannot replace an existing published ZIP.
+  - Keep completed operation attempts authoritative. Backfill requires an
+    explicit forced Task 4 reconciliation that reuses the exact durable UUID.
+- **Consequences:** Default Task 4 runs with the existing export flag enabled
+  perform an additional potentially large download and consume workspace plus
+  published storage. Orthomosaic success remains independent from optional ZIP
+  availability. Existing Task 2 behavior and database schemas are unchanged.
+- **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
+  `pipelines/rgb_pipeline.py`; ADR-023; ADR-027; CW-ADR-011.

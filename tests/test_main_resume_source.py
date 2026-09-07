@@ -38,12 +38,13 @@ def test_fresh_source_dir_still_uses_dataset_resolver(monkeypatch, tmp_path):
     calls = []
     resolved_source = tmp_path / "resolved" / "ABC_001_same_dataset"
 
-    def fake_resolver(source_input, logger, date_hint=None):
+    def fake_resolver(source_input, logger, date_hint=None, uav_folder=None):
         calls.append(
             {
                 "source_input": source_input,
                 "logger": logger,
                 "date_hint": date_hint,
+                "uav_folder": uav_folder,
             }
         )
         return resolved_source
@@ -56,6 +57,7 @@ def test_fresh_source_dir_still_uses_dataset_resolver(monkeypatch, tmp_path):
         run_id=None,
         logger=logging.getLogger("tests.main.fresh"),
         date_hint="20260730",
+        uav_folder="M3M_A",
     )
 
     assert resolved == resolved_source
@@ -64,8 +66,50 @@ def test_fresh_source_dir_still_uses_dataset_resolver(monkeypatch, tmp_path):
             "source_input": Path("ABC_001_same_dataset"),
             "logger": logging.getLogger("tests.main.fresh"),
             "date_hint": "20260730",
+            "uav_folder": "M3M_A",
         }
     ]
+
+
+def test_resume_validates_optional_uav_against_persisted_source(tmp_path):
+    stored_source = (
+        tmp_path
+        / "field-data"
+        / "20260826-BARBCO"
+        / "M3M_A"
+        / "BCO-121_11Ha_M3M_70m_85f75s_5mps"
+    )
+
+    resolved = rgb_main.resolve_cli_source_dir(
+        survey=stored_source.name,
+        resume=True,
+        run_id="run-resume",
+        logger=logging.getLogger("tests.main.resume-uav"),
+        uav_folder="m3m_a",
+        run_record={"source_dir": str(stored_source)},
+    )
+
+    assert resolved == stored_source
+
+
+def test_resume_rejects_uav_that_conflicts_with_persisted_source(tmp_path):
+    stored_source = (
+        tmp_path
+        / "field-data"
+        / "20260826-BARBCO"
+        / "M3M_A"
+        / "BCO-121_11Ha_M3M_70m_85f75s_5mps"
+    )
+
+    with pytest.raises(ValueError, match="not beneath UAV folder 'M3M_B'"):
+        rgb_main.resolve_cli_source_dir(
+            survey=stored_source.name,
+            resume=True,
+            run_id="run-resume",
+            logger=logging.getLogger("tests.main.resume-uav-mismatch"),
+            uav_folder="M3M_B",
+            run_record={"source_dir": str(stored_source)},
+        )
 
 
 def test_resume_source_dir_requires_existing_run_record(tmp_path):

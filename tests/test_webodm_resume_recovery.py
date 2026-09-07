@@ -42,14 +42,14 @@ def test_webodm_status_codes_match_api(raw_status, expected, terminal):
 class _LookupResponse:
     def __init__(self, status_code, payload=None):
         self.status_code = status_code
-        self._payload = payload or {}
+        self._payload = {} if payload is None else payload
 
     def raise_for_status(self):
         if self.status_code >= 400:
             raise requests.HTTPError(f'controlled status {self.status_code}')
 
     def json(self):
-        return dict(self._payload)
+        return self._payload
 
 
 class _LookupSession:
@@ -97,6 +97,64 @@ def test_exact_task_lookup_failures_are_not_reported_as_absence(response):
         processor.get_task(417, 'bound-task', retries=1, backoff=0)
 
 
+def test_project_task_listing_reads_every_page():
+    processor = _lookup_processor(
+        [
+            _LookupResponse(
+                200,
+                {
+                    'results': [{'id': 'task-one'}],
+                    'next': 'page-2',
+                },
+            ),
+            _LookupResponse(
+                200,
+                {
+                    'results': [{'id': 'task-two'}],
+                    'next': None,
+                },
+            ),
+        ]
+    )
+
+    assert processor.list_project_tasks(417) == [
+        {'id': 'task-one'},
+        {'id': 'task-two'},
+    ]
+    assert processor.session.calls == 2
+
+
+@pytest.mark.parametrize(
+    'payload',
+    [
+        {},
+        {'results': 'not-a-list'},
+        {'results': ['not-an-object']},
+        'not-an-object',
+    ],
+)
+def test_project_task_listing_fails_closed_on_malformed_response(payload):
+    processor = _lookup_processor([_LookupResponse(200, payload)])
+
+    with pytest.raises(WebODMTaskLookupError, match='Failed to list tasks'):
+        processor.list_project_tasks(417)
+
+
+@pytest.mark.parametrize(
+    'response',
+    [
+        _LookupResponse(500),
+        requests.ConnectionError('controlled connection failure'),
+        _LookupResponse(401),
+    ],
+)
+def test_project_task_listing_fails_closed_on_lookup_error(response):
+    processor = _lookup_processor([response])
+
+    with pytest.raises(WebODMTaskLookupError, match='Failed to list tasks'):
+        processor.list_project_tasks(417)
+
+
 def test_webodm_binding_is_updated_without_losing_uuid(
     temporary_sqlite_db_path,
 ):
@@ -126,6 +184,42 @@ def test_webodm_binding_is_updated_without_losing_uuid(
     assert repo.get_webodm_binding('binding-run', 'task4')['task_id'] == (
         '59aed1d2-19f1-499e-874d-bcdd40072d09'
     )
+
+
+def test_webodm_binding_can_append_authorization_history_before_uuid(
+    temporary_sqlite_db_path,
+):
+    repo = PipelineRepo(temporary_sqlite_db_path)
+    repo.create_run('authorization-run')
+    first = repo.record_webodm_binding(
+        run_id='authorization-run',
+        operation_key='task4',
+        project_id=429,
+        task_name='AH-026074-RGB--xcb-t4',
+        local_status='project_bound',
+    )
+    authorized = repo.record_webodm_binding(
+        run_id='authorization-run',
+        operation_key='task4',
+        project_id=429,
+        task_name='AH-026074-RGB--xcb-t4',
+        local_status='empty_project_recovery_authorized',
+        binding_source='operator_empty_project_recovery',
+        audit={'event': 'empty_webodm_project_recovery_authorized'},
+        append_history=True,
+    )
+
+    history = repo.list_webodm_bindings('authorization-run')
+    assert [row['id'] for row in history] == [first['id'], authorized['id']]
+    assert json.loads(authorized['audit_json']) == {
+        'event': 'empty_webodm_project_recovery_authorized',
+        'previous_binding': {
+            'id': first['id'],
+            'project_id': 429,
+            'task_id': None,
+            'task_name': 'AH-026074-RGB--xcb-t4',
+        },
+    }
 
 
 def test_webodm_binding_conflict_fails_closed_and_repair_preserves_history(

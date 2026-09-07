@@ -33,6 +33,7 @@ class FakeWebODM:
         self.transient_failures = dict(transient_failures or {})
         self.permanent_failures = set(permanent_failures or set())
         self.task_statuses: dict[str, str] = {}
+        self.project_tasks: dict[int, list[dict[str, Any]]] = {}
         self.authenticated = False
         self._next_project_id = 100
         self._next_task_number = 1
@@ -51,6 +52,13 @@ class FakeWebODM:
 
     def configure_task_status(self, task_id: str, status: str) -> None:
         self.task_statuses[str(task_id)] = status
+
+    def configure_project_tasks(
+        self,
+        project_id: int,
+        tasks: list[dict[str, Any]],
+    ) -> None:
+        self.project_tasks[int(project_id)] = [dict(task) for task in tasks]
 
     def authenticate(self) -> None:
         self._record("authenticate")
@@ -114,6 +122,10 @@ class FakeWebODM:
     def find_task_by_name(self, project_id: int, task_name: str) -> None:
         self._record("find_task_by_name", project_id, task_name)
         return None
+
+    def list_project_tasks(self, project_id: int) -> list[dict[str, Any]]:
+        self._record("list_project_tasks", int(project_id))
+        return [dict(task) for task in self.project_tasks.get(int(project_id), [])]
 
     def delete_task(self, project_id: int, task_id: str) -> None:
         task_id = str(task_id)

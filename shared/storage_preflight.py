@@ -7,9 +7,10 @@ import shutil
 import sqlite3
 from typing import Callable, Iterable, Mapping
 
+from shared.source_images import discover_source_images, image_selection_mode
+
 
 GIB = 1024 ** 3
-JPEG_SUFFIXES = {'.jpg', '.jpeg'}
 WORKSPACE_MULTIPLIERS = {'task4': 2.0, 'task2': 3.0, 'both': 4.0}
 
 
@@ -58,21 +59,17 @@ def _volume_key(path: Path) -> str:
     return f'device:{resolved.stat().st_dev}'
 
 
-def estimate_jpeg_bytes(source_dir: Path) -> tuple[int, int]:
+def estimate_jpeg_bytes(
+    source_dir: Path,
+    *,
+    rgb_only: bool = False,
+) -> tuple[int, int]:
     source = Path(source_dir)
-    if not source.is_dir():
-        raise FileNotFoundError(f'Source directory not found: {source}')
-    files = sorted(
-        (
-            path
-            for path in source.rglob('*')
-            if path.is_file() and path.suffix.lower() in JPEG_SUFFIXES
-        ),
-        key=lambda path: str(path).casefold(),
-    )
+    files = discover_source_images(source, rgb_only=rgb_only)
     if not files:
+        expected = 'images ending in _D.JPG' if rgb_only else 'JPG/JPEG images'
         raise FileNotFoundError(
-            f'No JPG/JPEG images found for storage planning: {source}'
+            f'No {expected} found for storage planning: {source}'
         )
     return sum(path.stat().st_size for path in files), len(files)
 
@@ -174,28 +171,43 @@ def build_storage_preflight(
     include_qgis_staging: bool = True,
     include_workspace: bool = True,
     include_published_outputs: bool = True,
+    include_task4_all_assets_zip: bool = False,
     min_free_gb: int = 10,
     min_free_percent: int = 5,
     published_min_free_gb: int = 10,
     published_min_free_percent: int = 0,
+    rgb_only: bool = False,
     disk_usage: Callable[[str], object] = shutil.disk_usage,
 ) -> dict:
     mode = str(webodm_mode).strip().lower()
     if mode not in WORKSPACE_MULTIPLIERS:
         raise ValueError(f'Unsupported WebODM mode for storage planning: {mode}')
 
-    source_bytes, image_count = estimate_jpeg_bytes(source_dir)
+    source_bytes, image_count = estimate_jpeg_bytes(
+        source_dir,
+        rgb_only=rgb_only,
+    )
     cache_bytes = int(source_bytes * 1.2) if include_upload_cache else 0
     qgis_staging_bytes = int(source_bytes * 2.0) if include_qgis_staging else 0
+    task4_all_assets_zip_bytes = (
+        source_bytes if include_task4_all_assets_zip else 0
+    )
     workspace_bytes = (
-        max(
-            20 * GIB,
-            int(source_bytes * WORKSPACE_MULTIPLIERS[mode]),
+        (
+            max(
+                20 * GIB,
+                int(source_bytes * WORKSPACE_MULTIPLIERS[mode]),
+            )
+            + task4_all_assets_zip_bytes
         )
         if include_workspace
         else 0
     )
-    published_bytes = source_bytes if include_published_outputs else 0
+    published_bytes = (
+        source_bytes + task4_all_assets_zip_bytes
+        if include_published_outputs
+        else 0
+    )
     report = inspect_storage_requirements(
         [
             StorageRequirement('pipeline_database', Path(database_path)),
@@ -226,8 +238,12 @@ def build_storage_preflight(
             'source_dir': str(Path(source_dir).resolve(strict=False)),
             'source_image_count': image_count,
             'source_image_bytes': source_bytes,
+            'image_selection_mode': image_selection_mode(rgb_only=rgb_only),
             'estimated_cache_bytes': cache_bytes,
             'estimated_qgis_staging_bytes': qgis_staging_bytes,
+            'estimated_task4_all_assets_zip_bytes': (
+                task4_all_assets_zip_bytes
+            ),
             'estimated_workspace_bytes': workspace_bytes,
             'estimated_published_output_bytes': published_bytes,
             'webodm_mode': mode,
@@ -235,6 +251,9 @@ def build_storage_preflight(
             'include_qgis_staging': bool(include_qgis_staging),
             'include_workspace': bool(include_workspace),
             'include_published_outputs': bool(include_published_outputs),
+            'include_task4_all_assets_zip': bool(
+                include_task4_all_assets_zip
+            ),
             'min_free_gb': int(min_free_gb),
             'min_free_percent': int(min_free_percent),
             'published_min_free_gb': int(published_min_free_gb),
@@ -249,11 +268,21 @@ def format_storage_report(report: Mapping[str, object]) -> str:
     image_count = report.get('source_image_count', 0)
     image_gib = int(report.get('source_image_bytes', 0)) / GIB
     mode = report.get('webodm_mode', 'unknown')
+    task4_zip_enabled = bool(report.get('include_task4_all_assets_zip'))
+    task4_zip_gib = int(
+        report.get('estimated_task4_all_assets_zip_bytes', 0)
+    ) / GIB
     lines = [
         '===== STORAGE PREFLIGHT =====',
         f'Result: {result}',
         f'Source images: {image_count} ({image_gib:.2f} GiB)',
         f'WebODM mode: {mode}',
+        (
+            'Task 4 full ODM ZIP: enabled '
+            f'(estimated {task4_zip_gib:.2f} GiB)'
+            if task4_zip_enabled
+            else 'Task 4 full ODM ZIP: disabled'
+        ),
     ]
     for value in report.get('volumes', []):
         volume = dict(value)

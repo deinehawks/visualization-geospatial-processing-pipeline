@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-- Snapshot date: 2026-09-02
+- Snapshot date: 2026-09-07
 - Repository state: pipeline refactor in progress; shared API/UI contracts have been added for coordinated pipeline and web-app workstreams.
 - Current pipeline phase: Phase 3, run-scoped workspace ownership and publication activation preparation.
 - Current implementation posture: guarded publication activation is wired through `RGBPipeline.run()` and an explicit CLI confirmation surface; default runs still do not activate publication.
@@ -30,8 +30,17 @@
 - Workspace cleanup records relative inventory, bytes, stage summaries, verified output mappings, and available cross-run image classification reasons without deleting legacy survey outputs.
 - Publication artifact allowlist is documented and implemented for current dry-run/staging bridge behavior.
 - Shared contracts now describe run state, API, metrics, events, artifacts, compatibility policy, and UI requirements.
-- Storage preflight and durable workspace routing are implemented for the operational branch. An isolated follow-up adds stage-aware resume estimates and an exact-confirmation legacy workspace rebind to D: while retaining old recovery evidence; integration is pending.
+- Storage preflight, stage-aware resume estimates, split publication reserves, durable D: workspace/cache/QGIS routing, and exact-confirmation legacy workspace rebind are integrated and operationally preflighted.
 - Missing local WebODM UUID repair now appends audit/history and preserves existing repair evidence.
+- The existing all-assets ZIP export now supports Task 4 workspace-first
+  download and legacy mirroring, with additive artifact metadata, publication
+  allowlisting, startup estimates, and just-in-time capacity checks.
+- Task 4 can explicitly recover a persisted project with no UUID only after exact
+  run/project confirmation and a complete WebODM task listing proves the
+  project contains zero tasks. Normal resume remains exact-UUID-only.
+- DJI M3M ingestion supports independent `--uav <folder>` candidate filtering
+  and strict `--rgb` `*_D.JPG` selection across arbitrary nested capture
+  splits, with one selector shared by preflight and segregation.
 
 ## Known Gaps
 
@@ -40,10 +49,20 @@
 - `partially_completed` is mapped for the run, survey, and compatibility WebODM coordinator when Task 4 succeeds and Task 2 fails; dedicated API/UI operation projection remains deferred.
 - WebODM/QGIS stages still mirror outputs into legacy paths during stage execution; pipeline is not workspace-only-until-publish.
 - Older workspaces without `.run-workspace.json` ownership evidence remain resumable but are retained rather than automatically deleted.
-- Default collection and the full hermetic suite are healthy: the isolated split-reserve feature collected and passed 297 tests without exclusions.
-- A validated isolated follow-up uses 10 GiB/5% for general bulk storage, 10 GiB/0% for exact published mirrors, persisted surveys-root routing for resume preflight, and non-retryable capacity failures; integration is pending.
-- Base storage rollout is complete. Resume-aware integration, at least 10 GiB free on the E: state volume, a report-only check for the audited legacy run, controlled resume, and success verification remain pending. Its old 59.88 GiB workspace must remain until success is proven.
+- Default collection and the full hermetic suite are healthy: 342 tests collect
+  and pass without exclusions.
+- Empty-project recovery was exercised once for the explicitly authorized
+  production run/project and returned a durable Task 4 UUID before normal
+  remote monitoring continued.
+- The retained legacy workspace and old upload cache remain recovery evidence
+  until their associated runs succeed and are separately approved for cleanup.
 - Full production-scale SMB/open-handle/disconnect validation remains incomplete.
+- Legacy run `1cd78d5e-331a-4ee5-b05d-047ca8f658e5` cannot currently reach
+  WebODM because both its published `images/raw` and `images/path` folders are
+  empty. The existing CLI force-stage wiring is not yet safe for this recovery:
+  forced data segregation does not restore the persisted survey ID or enable
+  the existing-folder override. Do not force that stage until a guarded repair
+  is implemented and validated.
 
 ## Working Tree Notes
 

@@ -2,32 +2,33 @@
 
 ## Highest Priority
 
-1. Integrate the validated split-reserve storage follow-up, update the
-   user-managed percentage setting to 5, then rerun report-only preflight for
-   the audited legacy QGIS resume.
+1. Design and implement a guarded missing-image-artifact recovery for legacy
+   resume run `1cd78d5e-331a-4ee5-b05d-047ca8f658e5` before forcing data
+   segregation or cross-run filtering.
 
-Why this is first: the prior resume reached QGIS successfully and retained a
-verified D: clip, then exposed a configured-versus-persisted publication-root
-mismatch and an unsuitable percentage reserve for exact network mirrors. The
-isolated correction passes 297 safe tests. The old workspace remains rollback
-evidence until the resume finishes successfully.
+Why this is first: both published `images/raw` and `images/path` are empty, but
+the database marks their producing stages complete. Current
+`--force-stage data_segregation` wiring does not safely restore the persisted
+survey ID or enable existing-folder recovery, so issuing the obvious force
+command could fail or target the wrong survey folder.
 
 ## Recommended Pipeline Sequence
 
-1. Integrate the isolated resume-aware feature without disturbing unrelated E: changes.
+1. Perform a separately authorized read-only audit of the affected run's
+   persisted survey ID, source path, stage outputs, and source-image count.
 
-2. Set `STORAGE_MIN_FREE_PERCENT=5`; the new published reserve variables default
-   safely but may also be written explicitly as 10 GiB/0%. Do not delete the
-   audited legacy workspace yet.
+2. Add a fail-closed recovery path that binds forced segregation to the
+   persisted run/survey identity, validates the original source, and refuses
+   ambiguous or nonempty destinations without explicit authorization.
 
-3. Run the audited command with explicit workspace rebind and
-   `--storage-preflight-only`; confirm E: state, D: QGIS/workspace, output, and temp reporting.
+3. Cover missing source, identity mismatch, existing outputs, partial copying,
+   and successful regeneration with temporary paths and databases.
 
-4. After a separate external-operation review, run the real resume and verify
-   terminal success plus required outputs. Only then review deletion of the exact
-   retained 59.88 GiB E: workspace.
+4. After review, execute a separately authorized production recovery and verify
+   regenerated raw/filtered counts before WebODM resumes.
 
-5. Resume WebODM operation observability and read projection after rollout evidence is accepted.
+5. Then perform the pending controlled M3M `--uav`/`--rgb` validation and keep
+   multispectral processing deferred.
 
 ## Recommended Web/API/UI Sequence
 

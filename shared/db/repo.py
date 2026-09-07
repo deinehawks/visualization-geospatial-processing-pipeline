@@ -418,6 +418,7 @@ class PipelineRepo:
         options: Optional[Dict[str, Any]] = None,
         audit: Optional[Dict[str, Any]] = None,
         allow_rebind: bool = False,
+        append_history: bool = False,
     ) -> dict:
         if not operation_key:
             raise ValueError('operation_key is required')
@@ -491,6 +492,7 @@ class PipelineRepo:
                     and not task_conflict
                     and not name_conflict
                     and not repair_identity_change
+                    and not append_history
                 ):
                     audit_json = (
                         current.get('audit_json')
@@ -542,7 +544,7 @@ class PipelineRepo:
                     return dict(row)
 
             audit_payload = dict(audit or {})
-            if current and allow_rebind:
+            if current and (allow_rebind or append_history):
                 audit_payload.setdefault(
                     'previous_binding',
                     {

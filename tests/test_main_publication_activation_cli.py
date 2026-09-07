@@ -53,13 +53,19 @@ def _prepare_cli(monkeypatch, tmp_path, argv):
                     "dir": str(tmp_path / "qgis-staging"),
                 }
             },
+            "exports": {
+                "enabled": True,
+                "all_assets_zip": {"enabled": True},
+            },
             "webodm": {},
         },
     )
     monkeypatch.setattr(
         rgb_main,
         "resolve_source_dataset_dir",
-        lambda source_input, logger, date_hint=None: tmp_path / "resolved-source",
+        lambda source_input, logger, date_hint=None, uav_folder=None: (
+            tmp_path / "resolved-source"
+        ),
     )
     _install_fake_pipeline(monkeypatch)
     monkeypatch.setattr(
@@ -112,6 +118,46 @@ def test_cli_disables_cross_run_when_flag_is_present(monkeypatch, tmp_path):
     assert pipeline.init_kwargs["crossrun_enabled_override"] is False
 
 
+def test_cli_passes_independent_uav_and_rgb_selection(monkeypatch, tmp_path):
+    resolver_calls = []
+    preflight_calls = []
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            "BCO-121_11Ha_M3M_70m_85f75s_5mps",
+            "--uav",
+            "M3M_A",
+            "--rgb",
+        ],
+    )
+
+    def resolve_source(source_input, logger, date_hint=None, uav_folder=None):
+        resolver_calls.append((source_input, date_hint, uav_folder))
+        return tmp_path / "resolved-source"
+
+    def build_preflight(**kwargs):
+        preflight_calls.append(kwargs)
+        return {"ok": True, "volumes": []}
+
+    monkeypatch.setattr(rgb_main, "resolve_source_dataset_dir", resolve_source)
+    monkeypatch.setattr(rgb_main, "build_storage_preflight", build_preflight)
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert resolver_calls == [
+        (
+            Path("BCO-121_11Ha_M3M_70m_85f75s_5mps"),
+            None,
+            "M3M_A",
+        )
+    ]
+    assert preflight_calls[0]["rgb_only"] is True
+    assert pipeline.init_kwargs["rgb_only"] is True
+
+
 def test_cli_selects_both_tasks_mode_when_flag_is_present(monkeypatch, tmp_path):
     _prepare_cli(
         monkeypatch,
@@ -160,6 +206,30 @@ def test_cli_passes_explicit_qgis_staging_root_to_preflight(monkeypatch, tmp_pat
     rgb_main.main()
 
     assert captured["qgis_staging_root"] == tmp_path / "qgis-staging"
+    assert captured["include_task4_all_assets_zip"] is True
+
+
+def test_cli_does_not_add_task4_zip_estimate_for_task2_only(
+    monkeypatch,
+    tmp_path,
+):
+    captured = {}
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", "--task2"],
+    )
+
+    def capture_preflight(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "volumes": []}
+
+    monkeypatch.setattr(rgb_main, "build_storage_preflight", capture_preflight)
+
+    rgb_main.main()
+
+    assert captured["webodm_mode"] == "task2"
+    assert captured["include_task4_all_assets_zip"] is False
 
 
 def test_resume_preflight_rebinds_workspace_and_skips_completed_webodm_cache(
@@ -259,6 +329,130 @@ def test_cli_passes_publication_confirmation_when_activation_is_explicit(
 
     [pipeline] = FakeRGBPipeline.instances
     assert pipeline.run_kwargs["publication_confirmation"] == confirmation
+
+
+def test_cli_passes_exact_empty_webodm_project_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    run_id = "run-empty-project"
+    confirmation = (
+        f"CREATE TASK4 IN EMPTY WEBODM PROJECT 429 FOR RUN {run_id}"
+    )
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            "AH_026_source",
+            "--resume",
+            "--run-id",
+            run_id,
+            "--force-stage",
+            "webodm_task4",
+            "--recover-empty-webodm-project",
+            "task4",
+            "--webodm-recovery-project-id",
+            "429",
+            "--webodm-recovery-confirmation",
+            confirmation,
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda _database, _run_id: {
+            "run_id": run_id,
+            "source_dir": str(tmp_path / "source"),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda _database, _run_id: {"webodm": "requires_recovery"},
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.run_kwargs["empty_webodm_recovery"] == {
+        "operation": "task4",
+        "project_id": 429,
+        "confirmation": confirmation,
+    }
+
+
+@pytest.mark.parametrize(
+    "extra_args, expected_message",
+    [
+        (
+            ["--recover-empty-webodm-project", "task4"],
+            "--recover-empty-webodm-project requires --resume",
+        ),
+        (
+            [
+                "--resume",
+                "--run-id",
+                "recovery-run",
+                "--recover-empty-webodm-project",
+                "task4",
+            ],
+            "--webodm-recovery-project-id is required",
+        ),
+        (
+            [
+                "--resume",
+                "--run-id",
+                "recovery-run",
+                "--recover-empty-webodm-project",
+                "task4",
+                "--webodm-recovery-project-id",
+                "429",
+            ],
+            "--force-stage webodm_task4",
+        ),
+        (
+            [
+                "--resume",
+                "--run-id",
+                "recovery-run",
+                "--force-stage",
+                "webodm_task4",
+                "--recover-empty-webodm-project",
+                "task4",
+                "--webodm-recovery-project-id",
+                "429",
+                "--webodm-recovery-confirmation",
+                "wrong",
+            ],
+            "--webodm-recovery-confirmation must exactly match",
+        ),
+        (
+            ["--webodm-recovery-project-id", "429"],
+            "require --recover-empty-webodm-project",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_empty_webodm_project_recovery(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    extra_args,
+    expected_message,
+):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", *extra_args],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert expected_message in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
 
 
 @pytest.mark.parametrize(

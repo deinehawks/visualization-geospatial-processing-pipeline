@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Any, Optional, Set, List, Tuple, Mapping
 from shared.logging import quality_gate_prompt, pipeline_header, pipeline_footer, pipeline_paused, pipeline_canceled, set_stage_context, log_event
@@ -85,6 +86,7 @@ class RGBPipeline(
         skip_task1_webodm: bool = False,
         task1_bounded: bool = False,
         force_segregation: bool = False,
+        rgb_only: bool = False,
         webodm_mode: str = "task4",   # "task2" | "task4" | "both"
         use_year_subdir_override: Optional[bool] = None,
         db_file: Optional[Path] = None,
@@ -159,6 +161,7 @@ class RGBPipeline(
         self.skip_task1_webodm = skip_task1_webodm
         self.task1_bounded     = task1_bounded
         self.force_segregation = force_segregation
+        self.rgb_only          = bool(rgb_only)
         self.webodm_mode       = webodm_mode.strip().lower()
 
         # Derive task skip flags from webodm_mode
@@ -242,11 +245,13 @@ class RGBPipeline(
             surveys_root=self.surveys_root,
             year=self.year,
             logger=self.loggers["pipeline"],
+            rgb_only=self.rgb_only,
         )
 
         self.rgb_path: Optional[Path] = None
         self._webodm_projects_created_this_process: set[int] = set()
         self._resume_had_webodm_history = False
+        self._empty_webodm_recovery: Optional[dict[str, Any]] = None
 
     # Helpers
     def _set_survey_artifact_context(self, survey_id: str, rgb_path: Path) -> None:
@@ -466,6 +471,7 @@ class RGBPipeline(
             "kml_boundary.published.processed_files.geojson",
             "kml_boundary.published.processed_files.csv",
             "webodm.published.webodm_odm.task2_all_assets_zip",
+            "webodm.published.webodm_odm.task4_all_assets_zip",
             "qgis.published.qgis_clipped_ortho",
             "qgis.published.tiles_dir",
         }
@@ -1019,6 +1025,8 @@ class RGBPipeline(
         success: Optional[bool] = None,
         runtime_seconds: Optional[float] = None,
         binding_source: str = 'pipeline',
+        audit: Optional[Dict[str, Any]] = None,
+        append_history: bool = False,
     ) -> dict:
         operation_attempt = self.repo.get_latest_stage(
             self.run_id,
@@ -1044,6 +1052,8 @@ class RGBPipeline(
                 runtime_seconds=runtime_seconds,
                 binding_source=binding_source,
                 stage_attempt_id=stage_attempt_id,
+                audit=audit,
+                append_history=append_history,
             )
         except WebODMBindingConflictError as exc:
             raise StageRequiresRecovery(
@@ -1091,6 +1101,115 @@ class RGBPipeline(
         web.setdefault('downloads', {}).setdefault(task_key, {})
         self._save_webodm_checkpoint(web)
         return binding
+
+    def _authorize_empty_webodm_project_recovery(
+        self,
+        *,
+        processor: Any,
+        task_key: str,
+        project_id: int,
+        task_name: str,
+        binding: Optional[Mapping[str, Any]],
+    ) -> bool:
+        recovery = self._empty_webodm_recovery
+        if recovery is None:
+            return False
+
+        requested_operation = str(recovery.get('operation') or '')
+        requested_project = recovery.get('project_id')
+        expected_confirmation = (
+            f'CREATE {task_key.upper()} IN EMPTY WEBODM PROJECT '
+            f'{project_id} FOR RUN {self.run_id}'
+        )
+        if requested_operation != task_key or requested_operation != 'task4':
+            raise StageRequiresRecovery(
+                f'Empty-project recovery targets {requested_operation!r}, not '
+                f'{task_key!r}.',
+            )
+        if requested_project is None or int(requested_project) != int(project_id):
+            raise StageRequiresRecovery(
+                f'Empty-project recovery project {requested_project!r} does not '
+                f'match persisted project {project_id}.',
+            )
+        if recovery.get('confirmation') != expected_confirmation:
+            raise StageRequiresRecovery(
+                'Empty-project recovery confirmation does not exactly match '
+                f'{expected_confirmation!r}.',
+            )
+        if binding is None:
+            raise StageRequiresRecovery(
+                f'Empty-project recovery requires a persisted {task_key} binding.'
+            )
+        if int(project_id) in self._webodm_projects_created_this_process:
+            raise StageRequiresRecovery(
+                'Empty-project recovery requires a project persisted by an '
+                'earlier process.'
+            )
+        if binding.get('task_id'):
+            raise StageRequiresRecovery(
+                f'Empty-project recovery cannot replace bound task '
+                f'{binding["task_id"]}.',
+            )
+
+        try:
+            project_tasks = processor.list_project_tasks(int(project_id))
+        except WebODMTaskLookupError as exc:
+            raise StageRequiresRecovery(
+                f'Could not verify that WebODM project {project_id} is empty; '
+                'refusing task creation.',
+                output={
+                    'status': 'requires_recovery',
+                    'operation_key': task_key,
+                    'project_id': project_id,
+                },
+            ) from exc
+        if project_tasks:
+            task_summaries = [
+                {
+                    'id': task.get('id'),
+                    'name': task.get('name'),
+                    'status': task.get('status'),
+                }
+                for task in project_tasks
+            ]
+            raise StageRequiresRecovery(
+                f'WebODM project {project_id} contains {len(project_tasks)} '
+                'task(s); refusing empty-project recovery. Repair the exact '
+                'task UUID instead.',
+                output={
+                    'status': 'requires_recovery',
+                    'operation_key': task_key,
+                    'project_id': project_id,
+                    'remote_tasks': task_summaries,
+                },
+            )
+
+        authorized_at = datetime.now(timezone.utc).isoformat()
+        self._persist_webodm_binding(
+            task_key=task_key,
+            project_id=int(project_id),
+            task_name=task_name,
+            local_status='empty_project_recovery_authorized',
+            binding_source='operator_empty_project_recovery',
+            audit={
+                'event': 'empty_webodm_project_recovery_authorized',
+                'authorized_at': authorized_at,
+                'operation_key': task_key,
+                'project_id': int(project_id),
+                'verified_remote_task_count': 0,
+                'confirmation': expected_confirmation,
+            },
+            append_history=True,
+        )
+        log_event(
+            self.loggers['webodm'],
+            'empty_webodm_project_recovery_authorized',
+            run_id=self.run_id,
+            operation_key=task_key,
+            project_id=project_id,
+            verified_remote_task_count=0,
+        )
+        return True
 
     def _restore_webodm_identity(self) -> None:
         legacy_web = self.state.get('webodm')
@@ -1600,8 +1719,15 @@ class RGBPipeline(
         task_key: str,
         published_dir: Path,
         filename: str,
+        estimated_bytes: int = 0,
     ) -> tuple[Path | None, Path | None]:
         workspace_dir = self.workspace_layout.webodm_odm / task_key
+        if estimated_bytes > 0:
+            self._check_write_capacity(
+                role="all_assets_zip_download",
+                path=workspace_dir,
+                required_bytes=int(estimated_bytes),
+            )
         workspace_dir.mkdir(parents=True, exist_ok=True)
         workspace_path = workspace_dir / filename
 
@@ -1671,6 +1797,7 @@ class RGBPipeline(
                 else bool(self.config.get("experiment", {}).get("use_year_subdir", True))
             ),
             force=self.force_segregation,
+            rgb_only=self.rgb_only,
         )
 
         # .../<year>/<survey_id>/rgb by default; can be without year subdir.
@@ -3733,7 +3860,16 @@ class RGBPipeline(
             if binding.get('task_id'):
                 existing_task_id = str(binding['task_id'])
 
-        if (
+        recovery_authorized = False
+        if self._empty_webodm_recovery is not None:
+            recovery_authorized = self._authorize_empty_webodm_project_recovery(
+                processor=processor,
+                task_key=task_key,
+                project_id=int(project_id),
+                task_name=task_name,
+                binding=binding,
+            )
+        elif (
             not existing_task_id
             and self._resume_had_webodm_history
             and int(project_id) not in self._webodm_projects_created_this_process
@@ -3859,6 +3995,11 @@ class RGBPipeline(
                 task_name=task_name,
                 remote_status='queued',
                 local_status='task_created',
+                binding_source=(
+                    'operator_empty_project_recovery'
+                    if recovery_authorized
+                    else 'pipeline'
+                ),
             )
 
             success, runtime, _info = processor.wait_for_completion(
@@ -4009,6 +4150,46 @@ class RGBPipeline(
                 )
             else:
                 logger.warning(f"Could not download {task_key} orthomosaic.")
+
+        if exports_cfg.get("enabled", False) and exports_cfg.get(
+            "all_assets_zip", {}
+        ).get("enabled", False):
+            zip_cfg = exports_cfg["all_assets_zip"]
+            task_zip_override = self.export_name_overrides.get(task_key)
+            if task_zip_override:
+                zip_filename = f"{task_zip_override}-all.zip"
+            else:
+                zip_filename = zip_cfg.get(
+                    "filename_template",
+                    "{survey_id}-RGB-{flag}-all.zip",
+                ).format(
+                    survey_id=survey_id,
+                    flag=task_flag,
+                )
+
+            workspace_zip, published_zip = self._download_all_assets_zip_to_workspace(
+                processor=processor,
+                project_id=int(project_id),
+                task_id=str(current_task_id),
+                task_key=task_key,
+                published_dir=rgb_path / "odm",
+                filename=zip_filename,
+                estimated_bytes=self._directory_size(image_folder),
+            )
+            if published_zip:
+                metadata_key = f"{task_key}_all_assets_zip"
+                task_downloads["all_assets_zip"] = str(published_zip)
+                web.setdefault("workspace", {}).setdefault(
+                    "webodm_odm", {}
+                )[metadata_key] = str(workspace_zip)
+                web.setdefault("published", {}).setdefault(
+                    "webodm_odm", {}
+                )[metadata_key] = str(published_zip)
+            else:
+                logger.warning(
+                    f"{task_label} all-assets zip was not downloaded "
+                    "(endpoint missing or failed)."
+                )
 
         self.state["webodm"] = web
 
@@ -4317,7 +4498,38 @@ class RGBPipeline(
         raise_on_error: bool = False,
         publication_confirmation: Optional[str] = None,
         keep_workspace: bool = False,
+        empty_webodm_recovery: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
+        force_stages = force_stages or set()
+        if empty_webodm_recovery is not None:
+            recovery = dict(empty_webodm_recovery)
+            if not resume:
+                raise ValueError('empty WebODM project recovery requires resume=True')
+            if recovery.get('operation') != 'task4':
+                raise ValueError('empty WebODM project recovery supports task4 only')
+            if 'webodm_task4' not in force_stages:
+                raise ValueError(
+                    'empty WebODM project recovery requires force stage webodm_task4'
+                )
+            project_id = recovery.get('project_id')
+            if project_id is None or int(project_id) <= 0:
+                raise ValueError(
+                    'empty WebODM project recovery requires a positive project ID'
+                )
+            expected_confirmation = (
+                'CREATE TASK4 IN EMPTY WEBODM PROJECT '
+                f'{int(project_id)} FOR RUN {self.run_id}'
+            )
+            if recovery.get('confirmation') != expected_confirmation:
+                raise ValueError(
+                    'empty WebODM project recovery requires exact confirmation: '
+                    f'{expected_confirmation!r}'
+                )
+            recovery['project_id'] = int(project_id)
+            self._empty_webodm_recovery = recovery
+        else:
+            self._empty_webodm_recovery = None
+
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
         log_event(
@@ -4351,7 +4563,6 @@ class RGBPipeline(
                 "Failed while attempting to resume paused run")
 
         total_start = time.perf_counter()
-        force_stages = force_stages or set()
         self._resume_had_webodm_history = bool(
             resume and self.repo.get_latest_stage(self.run_id, 'webodm')
         )

@@ -141,6 +141,13 @@ Status: **Implemented and verified** with fake WebODM and temporary SQLite/files
 - `--force-stage webodm_task4` re-enters Task 4 reconciliation and artifact delivery while reusing the canonical remote task. It does not authorize a new task.
 - A remotely completed task resumes at orthomosaic export. Task 4 and the outer WebODM stage complete only after non-empty workspace and compatibility-mirror orthomosaics exist.
 - `tools/repair_webodm_binding.py` is dry-run by default. `--apply` records a validated replacement binding and audit history; it never mutates WebODM.
+- Task 4 empty-project recovery is a separate, explicit mutation path. It
+  requires resume, `webodm_task4` force selection, the persisted project ID,
+  and an exact run/project confirmation. It lists all remote project tasks and
+  permits normal Task 4 creation only when the verified list is exactly empty.
+- Empty-project authorization appends binding history before upload. A nonempty,
+  malformed, or unavailable task list, a changed project identity, or an
+  existing UUID remains `requires_recovery` and cannot create a task.
 
 ## Unresolved State Decisions
 

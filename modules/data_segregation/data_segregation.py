@@ -34,8 +34,15 @@ from shared.logging import (
     log_step,
     log_warn,
 )
+from shared.source_images import (
+    JPEG_SUFFIXES,
+    count_nonmatching_jpegs,
+    discover_source_images,
+    image_selection_mode,
+    is_selected_source_image,
+)
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
+IMAGE_EXTENSIONS = JPEG_SUFFIXES
 BOUNDARY_EXTENSIONS = {".kml", ".kmz"}
 
 DATASET_FOLDER_PATTERN = re.compile(
@@ -69,6 +76,7 @@ def resolve_source_dataset_dir(
     source_dir: Path,
     logger: logging.Logger,
     date_hint: Optional[str] = None,
+    uav_folder: Optional[str] = None,
 ) -> Path:
     """
     Resolve the actual dataset folder.
@@ -81,10 +89,12 @@ def resolve_source_dataset_dir(
         FIELD_DATA_ROOT=Y:/field-data/2026/sorted, Z:/field-data-2026/sorted
     """
     source_dir = Path(str(source_dir).strip()).expanduser()
+    selected_uav = _normalize_uav_folder_name(uav_folder)
 
     # Direct path — no search needed
     if source_dir.exists() and source_dir.is_dir():
         if _is_probable_dataset_folder(source_dir):
+            validate_source_uav_folder(source_dir, selected_uav)
             log_ok(logger, f"Source dataset resolved directly: {source_dir}")
             return source_dir
 
@@ -118,6 +128,7 @@ def resolve_source_dataset_dir(
         candidates = _find_dataset_candidates(
             search_root=root,
             dataset_query=dataset_query,
+            uav_folder=selected_uav,
         )
         all_candidates.extend(candidates)
 
@@ -134,6 +145,16 @@ def resolve_source_dataset_dir(
         )
 
     if not all_candidates:
+        matching_elsewhere: list[Path] = []
+        if selected_uav:
+            for root in searched_roots:
+                matching_elsewhere.extend(
+                    _find_dataset_candidates(
+                        search_root=root,
+                        dataset_query=dataset_query,
+                    )
+                )
+
         sample_folders: list[Path] = []
         for root in searched_roots[:2]:  # sample from first two roots only
             sample_folders.extend(_sample_dataset_folders(root))
@@ -147,11 +168,23 @@ def resolve_source_dataset_dir(
             )
 
         roots_str = "\n".join(f"  - {r}" for r in searched_roots)
+        uav_detail = (
+            f"UAV folder filter: {selected_uav}\n"
+            if selected_uav
+            else ""
+        )
+        elsewhere_hint = ""
+        if matching_elsewhere:
+            elsewhere_hint = (
+                "\n\nMatching dataset locations outside the requested UAV folder:\n"
+                + "\n".join(f"  - {path}" for path in matching_elsewhere[:10])
+            )
         raise FileNotFoundError(
             f"Dataset folder was not found.\n"
             f"Dataset query: {dataset_query}\n"
+            f"{uav_detail}"
             f"Searched roots:\n{roots_str}"
-            f"{hint}"
+            f"{elsewhere_hint or hint}"
         )
 
     all_candidates.sort(key=_dataset_candidate_sort_key, reverse=True)
@@ -231,6 +264,7 @@ def _find_dataset_candidates(
     *,
     search_root: Path,
     dataset_query: str,
+    uav_folder: Optional[str] = None,
 ) -> list[Path]:
     target = _normalize_folder_name(dataset_query)
 
@@ -243,6 +277,8 @@ def _find_dataset_candidates(
 
         if not _is_probable_dataset_folder(path):
             continue
+        if uav_folder and not _is_beneath_named_folder(path, uav_folder):
+            continue
 
         normalized_name = _normalize_folder_name(path.name)
 
@@ -252,6 +288,59 @@ def _find_dataset_candidates(
             partial_matches.append(path)
 
     return exact_matches or partial_matches
+
+
+def _normalize_uav_folder_name(value: Optional[str]) -> Optional[str]:
+    if value is None:
+        return None
+    name = str(value).strip()
+    if not name:
+        raise ValueError("--uav requires a non-empty folder name.")
+    if name in {".", ".."} or "/" in name or "\\" in name:
+        raise ValueError(
+            "--uav must be one folder name, for example: --uav M3M_A"
+        )
+    return name
+
+
+def _is_beneath_named_folder(path: Path, folder_name: str) -> bool:
+    target = folder_name.casefold()
+    return any(parent.name.casefold() == target for parent in path.parents)
+
+
+def validate_source_uav_folder(
+    source_dir: Path,
+    uav_folder: Optional[str],
+) -> Path:
+    selected_uav = _normalize_uav_folder_name(uav_folder)
+    source = Path(source_dir)
+    if selected_uav and not _is_beneath_named_folder(source, selected_uav):
+        raise ValueError(
+            f"Selected dataset is not beneath UAV folder {selected_uav!r}: "
+            f"{source}"
+        )
+    return source
+
+
+def _validate_flattened_image_names(images: list[Path]) -> None:
+    by_name: dict[str, list[Path]] = {}
+    for image in images:
+        by_name.setdefault(image.name.casefold(), []).append(image)
+
+    conflicts = [paths for paths in by_name.values() if len(paths) > 1]
+    if not conflicts:
+        return
+
+    details = "\n".join(
+        f"  - {path}"
+        for paths in conflicts[:10]
+        for path in paths
+    )
+    raise ValueError(
+        "Selected source images contain duplicate destination filenames. "
+        "The flat images/raw output would overwrite data:\n"
+        f"{details}"
+    )
 
 
 def _is_probable_dataset_folder(path: Path) -> bool:
@@ -343,6 +432,7 @@ def run(
     force: bool = False,
     survey_id_override: Optional[str] = None,
     use_year_subdir: bool = True,
+    rgb_only: bool = False,
 ) -> Dict[str, Any]:
 
     log_section(logger, "DATA SEGREGATION")
@@ -414,14 +504,18 @@ def run(
 
     log_step(logger, 3, "Discover source images")
 
-    images = [
-        f
-        for f in source_dir.rglob("*")
-        if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
-    ]
+    source_files = [path for path in source_dir.rglob("*") if path.is_file()]
+    images = discover_source_images(source_dir, rgb_only=rgb_only)
 
     if not images:
-        raise ValueError("No JPG/JPEG images found in source directory.")
+        expected = "images ending in _D.JPG" if rgb_only else "JPG/JPEG images"
+        raise ValueError(f"No {expected} found in source directory.")
+
+    _validate_flattened_image_names(images)
+    excluded_nonmatching_jpegs = count_nonmatching_jpegs(
+        source_files,
+        rgb_only=rgb_only,
+    )
 
     total_bytes = sum(p.stat().st_size for p in images)
     gb = total_bytes / (1024 ** 3)
@@ -461,15 +555,9 @@ def run(
 
     log_step(logger, 5, "Locate and copy boundary file (KML/KMZ)")
 
-    kml_files = [
-        f for f in source_dir.rglob("*")
-        if f.is_file() and f.suffix.lower() == ".kml"
-    ]
+    kml_files = [f for f in source_files if f.suffix.lower() == ".kml"]
 
-    kmz_files = [
-        f for f in source_dir.rglob("*")
-        if f.is_file() and f.suffix.lower() == ".kmz"
-    ]
+    kmz_files = [f for f in source_files if f.suffix.lower() == ".kmz"]
 
     boundary_dir = dirs["boundary"]
     selected_kml_path: Optional[Path] = None
@@ -508,8 +596,7 @@ def run(
         found_files = sorted(
             {
                 file.suffix.lower() or "[no extension]"
-                for file in source_dir.rglob("*")
-                if file.is_file()
+                for file in source_files
             }
         )
         raise ValueError(
@@ -526,11 +613,13 @@ def run(
     log_step(logger, 6, "Audit ignored files")
 
     ignored_counts: Dict[str, int] = {}
-    for file in source_dir.rglob("*"):
-        if file.is_file():
-            ext = file.suffix.lower()
-            if ext not in BOUNDARY_EXTENSIONS and ext not in IMAGE_EXTENSIONS:
-                ignored_counts[ext] = ignored_counts.get(ext, 0) + 1
+    for file in source_files:
+        ext = file.suffix.lower()
+        if ext in BOUNDARY_EXTENSIONS:
+            continue
+        if is_selected_source_image(file, rgb_only=rgb_only):
+            continue
+        ignored_counts[ext] = ignored_counts.get(ext, 0) + 1
 
     if ignored_counts:
         log_warn(logger, f"Ignored file types: {ignored_counts}")
@@ -546,6 +635,8 @@ def run(
         "source_context": source_context,
         "created_at":    datetime.now().isoformat(),
         "image_count":   len(images),
+        "image_selection_mode": image_selection_mode(rgb_only=rgb_only),
+        "excluded_nonmatching_jpeg_count": excluded_nonmatching_jpegs,
         "kml_file":      f"{survey_id}.kml",
         "ignored_files": ignored_counts,
     }
@@ -565,6 +656,8 @@ def run(
         "survey_id":   survey_id,
         "survey_path": str(survey_path),
         "image_count": len(images),
+        "image_selection_mode": image_selection_mode(rgb_only=rgb_only),
+        "excluded_nonmatching_jpeg_count": excluded_nonmatching_jpegs,
         "kml_file":    f"{survey_id}.kml",
         "manifest":    str(manifest_path),
         "dirs":        {k: str(v) for k, v in dirs.items()},

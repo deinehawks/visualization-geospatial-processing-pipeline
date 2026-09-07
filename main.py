@@ -21,7 +21,10 @@ from shared.storage_preflight import (
     is_sqlite_full_error,
     require_storage_capacity,
 )
-from modules.data_segregation.data_segregation import resolve_source_dataset_dir
+from modules.data_segregation.data_segregation import (
+    resolve_source_dataset_dir,
+    validate_source_uav_folder,
+)
 
 
 def read_run_state_read_only(database: Path, run_id: str) -> dict | None:
@@ -209,6 +212,7 @@ def resolve_cli_source_dir(
     run_id: str | None,
     logger: logging.Logger,
     date_hint: str | None = None,
+    uav_folder: str | None = None,
     repository: PipelineRepo | None = None,
     run_record: dict | None = None,
 ) -> Path:
@@ -229,6 +233,7 @@ def resolve_cli_source_dir(
                 f"Cannot resume run {run_id!r}: run record has no source_dir."
             )
         resolved = Path(source_dir)
+        validate_source_uav_folder(resolved, uav_folder)
         logger.info("Resume source dataset restored from run state: %s", resolved)
         return resolved
 
@@ -238,12 +243,27 @@ def resolve_cli_source_dir(
         survey_arg,
         logger,
         date_hint=date_hint,
+        uav_folder=uav_folder,
     )
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run production RGB pipeline")
     parser.add_argument("--survey", required=True, help="Survey folder inside FIELD_DATA_ROOT")
+    parser.add_argument(
+        "--uav",
+        default=None,
+        metavar="FOLDER",
+        help=(
+            "Restrict dataset lookup to an exact UAV parent-folder name, "
+            "for example M3M_A."
+        ),
+    )
+    parser.add_argument(
+        "--rgb",
+        action="store_true",
+        help="Select only DJI RGB source images whose names end in _D.JPG.",
+    )
     parser.add_argument("--year", type=int, default=2026)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--run-id", default=None)
@@ -316,6 +336,29 @@ def main() -> None:
         default=None,
         help='Exact phrase required for rebind: "REBIND WORKSPACE <run-id>".',
     )
+    parser.add_argument(
+        "--recover-empty-webodm-project",
+        choices=["task4"],
+        default=None,
+        help=(
+            "Explicitly authorize creation of Task 4 in a persisted WebODM "
+            "project only after WebODM confirms that the project has zero tasks."
+        ),
+    )
+    parser.add_argument(
+        "--webodm-recovery-project-id",
+        type=int,
+        default=None,
+        help="Persisted WebODM project ID expected by empty-project recovery.",
+    )
+    parser.add_argument(
+        "--webodm-recovery-confirmation",
+        default=None,
+        help=(
+            'Exact phrase required for recovery: "CREATE TASK4 IN EMPTY WEBODM '
+            'PROJECT <project-id> FOR RUN <run-id>".'
+        ),
+    )
 
     # WebODM task mode: mutually exclusive flags
     task_group = parser.add_mutually_exclusive_group()
@@ -350,6 +393,39 @@ def main() -> None:
             "--workspace-rebind-confirmation requires "
             "--rebind-workspace-to-configured-root"
         )
+    recovery_companions_present = bool(
+        args.webodm_recovery_project_id is not None
+        or args.webodm_recovery_confirmation
+    )
+    if recovery_companions_present and not args.recover_empty_webodm_project:
+        parser.error(
+            "--webodm-recovery-project-id and --webodm-recovery-confirmation "
+            "require --recover-empty-webodm-project"
+        )
+    if args.recover_empty_webodm_project:
+        if not args.resume:
+            parser.error("--recover-empty-webodm-project requires --resume")
+        if args.webodm_recovery_project_id is None:
+            parser.error(
+                "--webodm-recovery-project-id is required when using "
+                "--recover-empty-webodm-project"
+            )
+        if args.webodm_recovery_project_id <= 0:
+            parser.error("--webodm-recovery-project-id must be positive")
+        if "webodm_task4" not in set(args.force_stage or []):
+            parser.error(
+                "--recover-empty-webodm-project task4 requires "
+                "--force-stage webodm_task4"
+            )
+        expected_recovery_confirmation = (
+            "CREATE TASK4 IN EMPTY WEBODM PROJECT "
+            f"{args.webodm_recovery_project_id} FOR RUN {args.run_id}"
+        )
+        if args.webodm_recovery_confirmation != expected_recovery_confirmation:
+            parser.error(
+                "--webodm-recovery-confirmation must exactly match: "
+                f"{expected_recovery_confirmation!r}"
+            )
 
     config: dict[str, Any] = load_pipeline_config()
     base_dir = Path(".")
@@ -391,6 +467,7 @@ def main() -> None:
         run_id=selected_run_id,
         logger=resolver_logger,
         date_hint=args.date,
+        uav_folder=args.uav,
         run_record=run_record,
     )
 
@@ -438,6 +515,16 @@ def main() -> None:
         force_stages=set(args.force_stage or []),
         qgis_enabled=bool((config.get("qgis") or {}).get("enabled", True)),
     )
+    exports_config = config.get("exports") or {}
+    task4_all_assets_zip_enabled = bool(
+        storage_stage_needs["include_upload_cache"]
+        and webodm_mode in {"task4", "both"}
+        and exports_config.get("enabled", False)
+        and (exports_config.get("all_assets_zip") or {}).get(
+            "enabled",
+            False,
+        )
+    )
     storage_report = build_storage_preflight(
         source_dir=source_dir,
         database_path=database_path,
@@ -450,6 +537,7 @@ def main() -> None:
         temp_root=Path(tempfile.gettempdir()),
         webodm_mode=webodm_mode,
         **storage_stage_needs,
+        include_task4_all_assets_zip=task4_all_assets_zip_enabled,
         min_free_gb=int(storage_config.get("min_free_gb", 10)),
         min_free_percent=int(storage_config.get("min_free_percent", 5)),
         published_min_free_gb=int(
@@ -458,6 +546,7 @@ def main() -> None:
         published_min_free_percent=int(
             storage_config.get("published_min_free_percent", 0)
         ),
+        rgb_only=args.rgb,
     )
     print(format_storage_report(storage_report))
     try:
@@ -474,6 +563,8 @@ def main() -> None:
     print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
     print(f"WebODM mode  : {mode_display}")
     print(f"Cross-run    : {'disabled' if args.disable_cross_run else 'enabled'}")
+    print(f"UAV folder   : {args.uav or 'any'}")
+    print(f"Image mode   : {'DJI *_D.JPG only' if args.rgb else 'all JPG/JPEG'}")
     print(f"Workspace    : {workspace_root}")
     if args.rebind_workspace_to_configured_root:
         print(
@@ -505,11 +596,21 @@ def main() -> None:
             webodm_mode=webodm_mode,
             task1_bounded=False,
             force_segregation=False,
+            rgb_only=args.rgb,
         )
 
         result = pipeline.run(
             resume=args.resume,
             force_stages=set(args.force_stage or []),
+            empty_webodm_recovery=(
+                {
+                    "operation": args.recover_empty_webodm_project,
+                    "project_id": args.webodm_recovery_project_id,
+                    "confirmation": args.webodm_recovery_confirmation,
+                }
+                if args.recover_empty_webodm_project
+                else None
+            ),
             publication_confirmation=(
                 args.publication_confirmation if args.activate_publication else None
             ),

@@ -2208,6 +2208,63 @@ This slice does not add UI/API mutation endpoints, does not recover stale locks,
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
 
+## DJI M3M UAV-folder and RGB ingestion
+
+Date: 2026-09-04.
+
+The CLI now exposes independent `--uav <folder>` and `--rgb` controls.
+UAV selection filters dataset candidates by an exact, case-insensitive ancestor
+folder before date disambiguation or the existing full-path prompt. RGB mode
+recursively selects only DJI `*_D.JPG` files across arbitrary nested capture
+splits. Legacy all-JPG/JPEG behavior remains the default.
+
+Stage preflight, storage estimates, and segregation share one selector. The
+flat `images/raw` contract is preserved, case-insensitive basename collisions
+fail before copying, and manifests record the selection mode and nonmatching
+JPEG count. Resume remains schema-compatible and trusts persisted `source_dir`;
+an optional resume `--uav` validates that path.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused M3M, CLI, storage, resume, construction, and selected-stage coverage:
+  139 passed.
+- `python -m pytest --collect-only -q`: 337 collected.
+- `python -m pytest -q`: 337 passed.
+
+No real pipeline, field-data root, network share, production database, WebODM,
+QGIS/GDAL, operator `.env`, or destructive operation was accessed.
+
+## Explicit empty-WebODM-project Task 4 recovery
+
+Date: 2026-09-03.
+
+Task 4 resume now has a narrowly guarded recovery for the crash window where an
+earlier process persisted a WebODM project but stopped before any task was
+created. The CLI and `RGBPipeline.run()` require resume, `webodm_task4` force
+selection, the persisted project ID, and the exact phrase `CREATE TASK4 IN EMPTY
+WEBODM PROJECT <project-id> FOR RUN <run-id>`.
+
+The pipeline lists every remote project task immediately before upload and
+enters the existing Task 4 creation path only for a well-formed, complete,
+zero-task response. Authorization is appended to binding history before upload,
+and the returned UUID is persisted through the existing canonical binding path.
+Normal resume remains exact-UUID-only. Existing tasks, existing UUIDs, identity
+conflicts, malformed responses, and lookup/authentication/network failures all
+fail closed without upload, adoption, replacement, or deletion.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused empty-project recovery coverage: 25 passed.
+- Complete WebODM recovery, CLI, and RGB stage files: 120 passed.
+- `python -m pytest --collect-only -q`: 322 collected.
+- `python -m pytest -q`: 322 passed.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, survey dataset,
+network share, operator `.env`, project/task deletion, or production recovery
+was accessed or executed.
+
 ## Resume-aware storage preflight and explicit legacy workspace rebind
 
 Date: 2026-09-02.
@@ -2416,3 +2473,31 @@ This fixes resumability for interrupted QGIS tile and clipped-orthomosaic mirror
 Full unignored collection remains blocked by an unrelated `tests/test_logging_context_ownership.py` import of missing root module `query_survey_stats`. The default suite with that file ignored reached 205 passed and 3 unrelated failures in `tests/test_main_resume_source.py` because `resolve_cli_source_dir()` no longer accepts `field_data_root`.
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+
+## Task 4 full ODM ZIP delivery
+
+Date: 2026-09-04.
+
+The existing `EXPORT_ALL_ASSETS_ZIP` export now applies to the default Task 4
+workflow as well as Task 2. A successful Task 4 downloads `all.zip` into
+`workspace/webodm/odm/task4`, mirrors it to legacy `rgb/odm`, and records
+`downloads.task4.all_assets_zip` plus Task 4-specific workspace and
+published metadata. Publication planning now permits that exact ZIP field.
+
+Storage preflight adds one source-image-size estimate to both workspace and
+published output for pending Task 4 ZIP work and displays the estimate.
+Runtime rechecks workspace capacity before download and checks the actual ZIP
+size before published mirroring. A failed optional ZIP download leaves an
+existing published ZIP unchanged. Completed Task 4 stages remain skipped by
+ordinary resume; explicit forced reconciliation reuses the canonical UUID.
+
+### Validation
+
+- Python compilation for changed implementation and tests passed.
+- Focused storage, CLI, and RGBPipeline files passed 108/108.
+- `python -m pytest --collect-only -q` collected 342 tests.
+- `python -m pytest -q` passed 342/342.
+
+No real pipeline, WebODM request, QGIS/GDAL command, production database,
+production survey data, network share, operator `.env`, or destructive
+operation was used.

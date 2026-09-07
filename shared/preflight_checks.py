@@ -6,6 +6,8 @@ from typing import Any, Dict, Iterable, Mapping, Optional, NoReturn
 
 import requests
 
+from shared.source_images import discover_source_images, image_selection_mode
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg"}
 BOUNDARY_EXTENSIONS = {".kml", ".kmz"}
@@ -51,6 +53,7 @@ class PipelinePreflight:
         year: int,
         logger=None,
         webodm_timeout_seconds: int = 5,
+        rgb_only: bool = False,
     ) -> None:
         self.config = config
         self.source_dir = Path(source_dir)
@@ -58,6 +61,7 @@ class PipelinePreflight:
         self.year = int(year)
         self.logger = logger
         self.webodm_timeout_seconds = int(webodm_timeout_seconds)
+        self.rgb_only = bool(rgb_only)
 
     def check_stage(
         self,
@@ -124,24 +128,34 @@ class PipelinePreflight:
                 ],
             )
 
-        image_count = self._count_files(
-            self.source_dir,
-            IMAGE_EXTENSIONS,
-            recursive=True,
+        image_count = len(
+            discover_source_images(
+                self.source_dir,
+                rgb_only=self.rgb_only,
+            )
         )
 
         if image_count <= 0:
+            expected = (
+                'files ending in _D.JPG'
+                if self.rgb_only
+                else '.jpg or .jpeg'
+            )
             self._fail(
                 stage,
-                "no JPG/JPEG images were found in the source survey folder",
+                "no selected RGB images were found in the source survey folder"
+                if self.rgb_only
+                else "no JPG/JPEG images were found in the source survey folder",
                 details=[
                     f"Source directory: {self.source_dir}",
-                    "Expected files: .jpg or .jpeg",
+                    f"Expected files: {expected}",
                 ],
                 suggestions=[
-                    "Copy the drone JPEG images into the survey folder.",
+                    "Copy the DJI *_D.JPG images into the survey folder."
+                    if self.rgb_only
+                    else "Copy the drone JPEG images into the survey folder.",
                     "Check if the images are inside a nested folder.",
-                    "Confirm the image file extensions are .jpg or .jpeg.",
+                    "Confirm the intended image-selection CLI mode.",
                 ],
             )
 
@@ -186,6 +200,9 @@ class PipelinePreflight:
             "ok": True,
             "stage": stage,
             "source_images": image_count,
+            "image_selection_mode": image_selection_mode(
+                rgb_only=self.rgb_only
+            ),
             "boundary_files": boundary_count,
         }
 
