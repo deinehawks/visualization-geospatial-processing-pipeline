@@ -8,11 +8,13 @@ import shared.artifacts as artifacts_module
 from shared.artifacts import (
     ARTIFACT_CLEANUP_AUDIT_DIR,
     ARTIFACT_CLEANUP_SENTINEL_NAME,
+    RUN_WORKSPACE_OWNERSHIP_NAME,
     PublicationArtifact,
     activate_publication,
     activate_publication_with_lock,
     activate_publication_set_with_lock,
     create_run_workspace,
+    cleanup_completed_run_workspace,
     describe_published_survey,
     describe_run_workspace,
     execute_artifact_cleanup,
@@ -50,6 +52,184 @@ def test_run_workspace_paths_are_unique_for_same_survey(tmp_path):
     assert second.images_raw == workspace_root / "run-002" / "images" / "raw"
     assert first.qgis_tiles_round.is_dir()
     assert second.qgis_tiles_round.is_dir()
+    ownership = json.loads(
+        (first.root / RUN_WORKSPACE_OWNERSHIP_NAME).read_text(encoding="utf-8")
+    )
+    assert ownership["run_id"] == "run-001"
+    assert Path(ownership["workspace_root"]) == workspace_root
+
+
+def _completed_run_cleanup_fixture(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    workspace = plan_run_workspace(workspace_root, "run-001")
+    create_run_workspace(workspace)
+    workspace_output = workspace.images_path / "kept.jpg"
+    workspace_output.write_bytes(b"kept image")
+
+    other_workspace = plan_run_workspace(workspace_root, "run-002")
+    create_run_workspace(other_workspace)
+    (other_workspace.images_path / "other.jpg").write_bytes(b"other run")
+
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    published_output = published.root / "images" / "path" / "kept.jpg"
+    published_output.parent.mkdir(parents=True)
+    published_output.write_bytes(b"kept image")
+    return (
+        workspace_root,
+        workspace,
+        workspace_output,
+        other_workspace,
+        published,
+        published_output,
+    )
+
+
+def test_completed_run_cleanup_archives_evidence_then_deletes_only_owned_run(tmp_path):
+    (
+        workspace_root,
+        workspace,
+        workspace_output,
+        other_workspace,
+        published,
+        published_output,
+    ) = _completed_run_cleanup_fixture(tmp_path)
+
+    result = cleanup_completed_run_workspace(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        workspace_root=workspace_root,
+        published=published,
+        output_pairs=[(workspace_output, published_output)],
+        stage_summaries={"cross_run_filter": {"total_kept": 1}},
+        image_classifications=[
+            {
+                "relative_path": "kept.jpg",
+                "disposition": "kept",
+                "reasons": [],
+            }
+        ],
+    )
+
+    assert result["status"] == "completed"
+    assert not workspace.root.exists()
+    assert other_workspace.root.is_dir()
+    assert published_output.is_file()
+    audit = json.loads(Path(result["audit_path"]).read_text(encoding="utf-8"))
+    assert audit["status"] == "completed"
+    assert audit["run_id"] == "run-001"
+    assert audit["file_count"] >= 2
+    assert audit["total_bytes"] >= len(b"kept image")
+    assert audit["image_classifications"][0]["relative_path"] == "kept.jpg"
+    assert audit["verified_outputs"][0]["published_relative_path"] == (
+        "images/path/kept.jpg"
+    )
+
+
+def test_completed_run_cleanup_rejects_preexisting_workspace_without_ownership(tmp_path):
+    workspace_root = tmp_path / "workspaces"
+    workspace = plan_run_workspace(workspace_root, "run-001")
+    workspace.root.mkdir(parents=True)
+    create_run_workspace(workspace)
+    published = plan_published_survey(tmp_path / "surveys", 2026, "AH-026019")
+    published.root.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="ownership evidence is missing"):
+        cleanup_completed_run_workspace(
+            run_id="run-001",
+            survey_id="AH-026019",
+            workspace=workspace,
+            workspace_root=workspace_root,
+            published=published,
+            output_pairs=[],
+            stage_summaries={},
+        )
+
+    assert workspace.root.is_dir()
+
+
+def test_completed_run_cleanup_requires_verified_published_output(tmp_path):
+    (
+        workspace_root,
+        workspace,
+        workspace_output,
+        _,
+        published,
+        published_output,
+    ) = _completed_run_cleanup_fixture(tmp_path)
+    published_output.unlink()
+
+    with pytest.raises(ValueError, match="Required published file is missing"):
+        cleanup_completed_run_workspace(
+            run_id="run-001",
+            survey_id="AH-026019",
+            workspace=workspace,
+            workspace_root=workspace_root,
+            published=published,
+            output_pairs=[(workspace_output, published_output)],
+            stage_summaries={},
+        )
+
+    assert workspace.root.is_dir()
+
+
+def test_completed_run_cleanup_audit_failure_preserves_workspace(tmp_path):
+    (
+        workspace_root,
+        workspace,
+        workspace_output,
+        _,
+        published,
+        published_output,
+    ) = _completed_run_cleanup_fixture(tmp_path)
+
+    def fail_audit(path, payload):
+        raise OSError("controlled audit failure")
+
+    with pytest.raises(OSError, match="controlled audit failure"):
+        cleanup_completed_run_workspace(
+            run_id="run-001",
+            survey_id="AH-026019",
+            workspace=workspace,
+            workspace_root=workspace_root,
+            published=published,
+            output_pairs=[(workspace_output, published_output)],
+            stage_summaries={},
+            write_json=fail_audit,
+        )
+
+    assert workspace.root.is_dir()
+
+
+def test_completed_run_cleanup_delete_failure_keeps_audit_and_reports_failure(tmp_path):
+    (
+        workspace_root,
+        workspace,
+        workspace_output,
+        _,
+        published,
+        published_output,
+    ) = _completed_run_cleanup_fixture(tmp_path)
+
+    def fail_delete(path):
+        raise OSError("controlled delete failure")
+
+    result = cleanup_completed_run_workspace(
+        run_id="run-001",
+        survey_id="AH-026019",
+        workspace=workspace,
+        workspace_root=workspace_root,
+        published=published,
+        output_pairs=[(workspace_output, published_output)],
+        stage_summaries={},
+        remove_tree=fail_delete,
+    )
+
+    assert result["status"] == "failed"
+    assert workspace.root.is_dir()
+    audit = json.loads(Path(result["audit_path"]).read_text(encoding="utf-8"))
+    assert audit["status"] == "failed"
+    assert audit["error_type"] == "OSError"
 
 
 @pytest.mark.parametrize("unsafe_run_id", ["../escape", "nested/run", "", ".", ".."])

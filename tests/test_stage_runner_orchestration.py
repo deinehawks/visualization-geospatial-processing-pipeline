@@ -6,7 +6,8 @@ import pytest
 
 from shared.db.repo import PipelineRepo
 from shared.logging import get_logger
-from shared.stage_runner import StageRequiresRecovery, StageRunner
+from shared.stage_runner import StageFailedWithOutput, StageRequiresRecovery, StageRunner
+from shared.storage_preflight import StorageCapacityError
 from tests.fakes import FakeWebODM, PermanentWebODMError
 
 
@@ -209,6 +210,76 @@ def test_stage_runner_records_requires_recovery_status_and_output(
     assert repo.get_latest_stage_output(RUN_ID, STAGE_NAME) is None
 
 
+def test_stage_runner_records_failed_status_with_diagnostic_output(
+    temporary_path_layout,
+):
+    _, runner = build_runner(temporary_path_layout.database_path)
+    state = {}
+
+    def operation_failed():
+        raise StageFailedWithOutput(
+            "controlled operation failure",
+            output={"operation_key": "task2", "task_id": "task-0002"},
+        )
+
+    with pytest.raises(StageFailedWithOutput, match="controlled operation failure"):
+        runner.run(
+            STAGE_NAME,
+            operation_failed,
+            output_key="operation_probe",
+            state=state,
+            retry_attempts=1,
+            retry_delay_seconds=0,
+        )
+
+    stage = read_stage(temporary_path_layout.database_path)
+    output = json.loads(stage["output_json"])
+    assert stage["status"] == "failed"
+    assert stage["error_message"] == "controlled operation failure"
+    assert output == {"operation_key": "task2", "task_id": "task-0002"}
+    assert state["operation_probe"] == output
+
+
+def test_stage_runner_partial_result_remains_resume_eligible(
+    temporary_path_layout,
+):
+    repo, runner = build_runner(temporary_path_layout.database_path)
+    calls = []
+
+    def run_operation():
+        calls.append(len(calls) + 1)
+        return {
+            "run_status": "partially_completed" if len(calls) == 1 else "completed"
+        }
+
+    def status_from_result(result):
+        return str(result["run_status"])
+
+    first = runner.run(
+        STAGE_NAME,
+        run_operation,
+        result_status=status_from_result,
+        retry_attempts=1,
+        retry_delay_seconds=0,
+    )
+
+    assert first["run_status"] == "partially_completed"
+    assert read_stage(temporary_path_layout.database_path)["status"] == "partially_completed"
+    assert repo.get_latest_stage_output(RUN_ID, STAGE_NAME) is None
+
+    second = runner.run(
+        STAGE_NAME,
+        run_operation,
+        result_status=status_from_result,
+        retry_attempts=1,
+        retry_delay_seconds=0,
+    )
+
+    assert calls == [1, 2]
+    assert second["run_status"] == "completed"
+    assert read_stage(temporary_path_layout.database_path)["status"] == "completed"
+
+
 def test_stage_runner_records_generic_non_cancellation_runtime_failure(
     temporary_path_layout,
 ):
@@ -228,6 +299,34 @@ def test_stage_runner_records_generic_non_cancellation_runtime_failure(
     stage = read_stage(temporary_path_layout.database_path)
     assert stage["status"] == "failed"
     assert stage["error_message"] == "ordinary runtime failure"
+
+
+def test_stage_runner_does_not_retry_storage_capacity_failure(
+    temporary_path_layout,
+):
+    _repo, runner = build_runner(temporary_path_layout.database_path)
+    calls = 0
+
+    def fail_capacity():
+        nonlocal calls
+        calls += 1
+        raise StorageCapacityError(
+            "published storage capacity blocked",
+            report={"ok": False, "volumes": []},
+        )
+
+    with pytest.raises(StorageCapacityError, match="capacity blocked"):
+        runner.run(
+            STAGE_NAME,
+            fail_capacity,
+            retry_attempts=3,
+            retry_delay_seconds=0,
+        )
+
+    assert calls == 1
+    stage = read_stage(temporary_path_layout.database_path)
+    assert stage["status"] == "failed"
+    assert stage["error_message"] == "published storage capacity blocked"
 
 
 @pytest.mark.parametrize(
@@ -256,8 +355,12 @@ def test_stage_runner_preserves_explicit_pipeline_control_signal(
         )
 
     stage = read_stage(temporary_path_layout.database_path)
-    assert stage["status"] == "running"
-    assert stage["error_message"] is None
+    if signal == "__PIPELINE_PAUSED__":
+        assert stage["status"] == "paused"
+        assert stage["error_message"] == "Paused by pipeline control"
+    else:
+        assert stage["status"] == "running"
+        assert stage["error_message"] is None
 
 
 def test_stage_runner_preserves_webodm_ui_cancellation_translation(

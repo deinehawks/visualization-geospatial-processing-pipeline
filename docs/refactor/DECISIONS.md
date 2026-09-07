@@ -496,3 +496,203 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   - If staging is abandoned, hidden activation candidates may need operator-reviewed cleanup; visible published artifacts and `publication.json` remain unchanged.
   - Legacy mirrors, automatic runtime activation, cleanup metadata archival, and production-scale SMB behavior remain separate follow-up concerns.
 - **Related files or issues:** R02, R07, R10, R11; `shared/artifacts.py`; `pipelines/rgb_pipeline.py`; `tests/test_phase3_artifact_workspace.py`; `tests/test_rgb_pipeline_single_stage_execution.py`; ADR-016; ADR-018; ADR-023; Phase 3.
+
+### ADR-025 - Clean verified completed-run workspaces by default
+
+- **Decision ID:** ADR-025
+- **Date:** 2026-08-19
+- **Status:** Accepted and implemented
+- **Context:** Run workspaces duplicate large image, WebODM, and QGIS outputs. ADR-022 required persistent lightweight evidence before removing those copies.
+- **Decision:**
+  - Full normal and resumed runs with final status exactly `completed` clean their owned workspace by default.
+  - `--keep-workspace`, selected-stage execution, and every non-completed terminal status retain the workspace.
+  - Persist run/survey success before cleanup, verify mirrored or activated outputs, write cleanup audit evidence, and delete only the exact owned `<workspace-root>/<run-id>` directory.
+  - Cleanup blocks for missing ownership, output mismatch, unsafe containment, or audit-write failure.
+  - Cleanup failure leaves run status `completed` and emits a warning/audit outcome.
+- **Consequences:**
+  - New workspaces carry `.run-workspace.json`; older workspaces remain resumable but are not automatically deleted without ownership evidence.
+  - Cleanup audits retain relative filenames, counts, bytes, stage summaries, verified output mappings, and available cross-run classification reasons.
+  - Legacy survey outputs are not deleted, so this does not reduce storage occupied by required published paths.
+- **Related files or issues:** ADR-019; ADR-020; ADR-022; `main.py`; `pipelines/rgb_pipeline.py`; `shared/artifacts.py`; Phase 3.
+
+### ADR-026 - Persist combined WebODM operations as separate resumable stages
+
+- **Decision ID:** ADR-026
+- **Date:** 2026-08-19
+- **Status:** Accepted and implemented
+- **Approval context:** The user approved hardening the existing `--both-tasks` runtime after completed-run workspace cleanup.
+- **Decision:**
+  - Keep `webodm` as a compatibility coordinator while recording Task 4 and Task 2 as `webodm_task4` and `webodm_task2` stage attempts.
+  - Execute Task 4 before Task 2 and stop before Task 2 when Task 4 fails.
+  - Persist failed operation output evidence without classifying an ordinary operation failure as `requires_recovery`.
+  - Record the coordinator as `partially_completed` after Task 4 success / Task 2 failure so resume re-enters it, loads completed Task 4 evidence, and retries only Task 2.
+  - Preserve the aggregate `state["webodm"]` shape for QGIS, publication, checkpoints, and existing consumers.
+- **Consequences:**
+  - No database migration is required; existing append-only `stages` rows carry the new operation records.
+  - Successful Task 4 work is not rerun by default when Task 2 is retried.
+  - Dedicated external-operation IDs, full option snapshots/metrics, and API/UI read projection remain follow-up work.
+- **Related files or issues:** `pipelines/rgb_pipeline.py`; `shared/stage_runner.py`; `docs/architecture/decisions.md`; `docs/architecture/run-state-model.md`; CW-ADR-005.
+
+### ADR-027 - Separate bulky run storage and fail closed on capacity
+
+- **Decision ID:** ADR-027
+- **Date:** 2026-09-02
+- **Status:** Accepted and implemented; operator rollout pending.
+- **Approval context:** After a live `database or disk is full` failure, the user
+  approved keeping state storage separate, routing cache/QGIS staging/workspaces to D:, and
+  adding configurable absolute and percentage reserves.
+- **Decision:**
+  - Keep SQLite, logs, and checkpoints on the state volume.
+  - Configure bulky cache, QGIS staging, and fresh workspaces independently with
+    `UPLOAD_CACHE_ROOT`, `QGIS_LOCAL_STAGING_DIR`, and `WORKSPACE_ROOT`.
+  - Reserve twice the exact source-image bytes for QGIS staging at startup and
+    retain the actual just-in-time raster capacity check.
+  - Persist each fresh run's workspace root; resume never silently rebinds it.
+  - Aggregate estimated writes per physical volume and require the larger of the
+    absolute or percentage reserve before pipeline construction.
+  - Recheck capacity at major local copy boundaries and never interpret a
+    capacity failure as permission to fall back to direct network/source I/O.
+  - Preserve legacy null workspace records at the repository-local root.
+- **Consequences:** A run may be blocked even when its bulky D: volume has space
+  if the separate state, output, or temporary volume is below reserve. Estimates
+  reduce predictable failures but cannot guarantee WebODM/GDAL output sizes.
+  Active runs are unaffected until the isolated branch and operator configuration
+  are deliberately rolled out.
+- **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
+  `shared/db/migrations/m003_run_workspace_root.py`;
+  `docs/refactor/STORAGE_PREFLIGHT_PLAN.md`; ADR-025.
+
+### ADR-028 - Make resume capacity stage-aware and legacy rebind explicit
+
+- **Decision ID:** ADR-028
+- **Date:** 2026-09-02
+- **Status:** Accepted and implemented in an isolated feature worktree; operational integration pending.
+- **Approval context:** A legacy run had completed WebODM and quality-gate stages
+  but failed QGIS after the E: volume filled. The user approved moving its next
+  workspace attempt to D: while retaining the old workspace until success.
+- **Decision:**
+  - Read latest stage attempts through SQLite read-only mode before resume
+    preflight and estimate bulk writes only for stages that will run.
+  - Keep upload-cache capacity for incomplete or forced WebODM and quality-gate
+    work; omit it when both are completed. Keep QGIS staging capacity only when
+    QGIS will run.
+  - Apply percentage reserve only to volumes with estimated bulk writes;
+    state-only volumes still require the configured absolute reserve.
+  - Preserve legacy workspace pinning by default. Permit rebind only with
+    `--rebind-workspace-to-configured-root` and exact `REBIND WORKSPACE <run-id>`
+    confirmation, a non-legacy configured root, no conflicting persisted root,
+    and no unowned target workspace.
+  - Leave the old workspace unchanged. Delete it only after a separately
+    validated successful resume and an exact destructive-operation review.
+- **Consequences:** The audited QGIS-only resume no longer reserves space for a
+  completed WebODM upload, while D: still reserves QGIS staging plus workspace
+  writes. E: must still meet the absolute state reserve. Rebinding does not copy
+  or reclaim legacy data, so recovery evidence remains available until success
+  is proven.
+- **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
+  `docs/refactor/STORAGE_PREFLIGHT_PLAN.md`; ADR-025; ADR-027.
+
+### ADR-029 - Use a split reserve policy for exact published mirrors
+
+- **Decision ID:** ADR-029
+- **Date:** 2026-09-02
+- **Status:** Accepted and implemented in an isolated feature worktree; operational integration pending.
+- **Approval context:** A QGIS resume completed and verified its local clip but
+  the runtime mirror check applied 10% of a large legacy publication volume.
+  Startup had inspected a different configured UNC alias and therefore passed.
+- **Decision:**
+  - Default general bulk-storage reserve to 10 GiB and 5% of volume.
+  - Configure published file/directory mirrors independently at 10 GiB and 0%
+    because their exact pending bytes (including copy overhead) are checked
+    immediately before mutation.
+  - Use a resumed run's persisted surveys root for startup preflight and pipeline
+    routing, and reserve one source-image set for pending published output.
+  - Keep stricter general policy when published and non-published writes share a
+    physical volume.
+  - Treat `StorageCapacityError` as non-retryable while still recording the
+    stage failure and preserving the original exception.
+- **Consequences:** Large publication volumes no longer require an arbitrary
+  percentage reserve for a bounded exact mirror, while every copy must still
+  leave at least 10 GiB free. Startup reports the legacy destination rather than
+  a configured alias. Storage cannot be reclaimed by immediate retries, so a
+  capacity block now fails once.
+- **Related files or issues:** `main.py`; `shared/config.py`;
+  `shared/storage_preflight.py`; `shared/stage_runner.py`;
+  `pipelines/rgb_pipeline.py`; ADR-027; ADR-028.
+
+### ADR-030 - Recover only a verified empty persisted WebODM project
+
+- **Decision ID:** ADR-030
+- **Date:** 2026-09-03
+- **Status:** Accepted and implemented.
+- **Approval context:** Run `a14e462b-74ba-4f80-9232-2183f3e903b6` persisted
+  WebODM project 429 but stopped before Task 4 creation, leaving no UUID that
+  the existing repair tool could validate.
+- **Decision:**
+  - Keep normal resume exact-UUID-only and fail closed by default.
+  - Add Task 4-only recovery requiring resume, `webodm_task4` force selection,
+    the persisted project ID, and an exact run/project confirmation.
+  - List every task immediately before upload and authorize normal creation only
+    when the complete project task list is exactly empty.
+  - Append authorization evidence to `webodm_tasks` history before upload; use
+    the normal creation path and immediately persist the returned UUID.
+  - Refuse nonempty, malformed, unavailable, newly created, or conflicting
+    projects without name-based adoption, replacement, or deletion.
+- **Consequences:** The project-created/task-not-created crash window is
+  recoverable without weakening duplicate prevention. If creation returns
+  ambiguously and a task appears, the next recovery refuses creation and the
+  exact UUID repair workflow applies. No schema migration is required.
+- **Related files or issues:** `main.py`; `pipelines/rgb_pipeline.py`;
+  `modules/webodm/webodm_processor.py`; ADR-026; CW-ADR-008; CW-ADR-009.
+
+### ADR-031 - Select M3M UAV folders separately from RGB imagery
+
+- **Decision ID:** ADR-031
+- **Date:** 2026-09-04
+- **Status:** Accepted and implemented.
+- **Decision:**
+  - Add exact, case-insensitive `--uav <folder>` candidate filtering without
+    hard-coding known M3M folder names.
+  - Keep `--rgb` independent and invocation-scoped; it selects only
+    case-insensitive `*_D.JPG` files.
+  - Recursively combine every nested capture split without parsing or limiting
+    `NofM` folder names.
+  - Preserve the flat raw-image contract but fail before copying when selected
+    source basenames collide case-insensitively.
+  - Use one image selector for stage preflight, storage estimates, and
+    segregation. Preserve legacy all-JPG/JPEG behavior by default.
+- **Consequences:** M3M RGB ingestion excludes multispectral TIF bands and
+  nonmatching JPEGs without coupling folder selection to a future `--ms`
+  mode. Existing run rows need no migration because resume already persists
+  the concrete source path.
+- **Related files or issues:** `main.py`;
+  `modules/data_segregation/data_segregation.py`;
+  `shared/source_images.py`; CW-ADR-010.
+
+### ADR-032 - Extend the existing all-assets ZIP export to Task 4
+
+- **Decision ID:** ADR-032
+- **Date:** 2026-09-04
+- **Status:** Accepted and implemented.
+- **Approval context:** The operator approved full ODM ZIP delivery for the
+  default Task 4 workflow without requiring Task 2.
+- **Decision:**
+  - Keep `EXPORTS_ENABLED` and `EXPORT_ALL_ASSETS_ZIP` as the shared Task 2
+    and Task 4 controls; do not add another CLI flag or database migration.
+  - Download a successful Task 4 `all.zip` to
+    `workspace/webodm/odm/task4` before mirroring it to legacy `rgb/odm`.
+  - Record additive Task 4 download, workspace, and published artifact paths,
+    and allow the Task 4 ZIP through publication planning.
+  - Reserve one source-image-size estimate on both workspace and published
+    destinations at startup, recheck workspace capacity immediately before
+    download, and check the completed ZIP size before published mirroring.
+  - Preserve Task 2's optional export semantics: a missing or failed ZIP logs
+    a warning and cannot replace an existing published ZIP.
+  - Keep completed operation attempts authoritative. Backfill requires an
+    explicit forced Task 4 reconciliation that reuses the exact durable UUID.
+- **Consequences:** Default Task 4 runs with the existing export flag enabled
+  perform an additional potentially large download and consume workspace plus
+  published storage. Orthomosaic success remains independent from optional ZIP
+  availability. Existing Task 2 behavior and database schemas are unchanged.
+- **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
+  `pipelines/rgb_pipeline.py`; ADR-023; ADR-027; CW-ADR-011.

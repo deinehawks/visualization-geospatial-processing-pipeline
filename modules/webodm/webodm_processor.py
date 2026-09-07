@@ -14,6 +14,15 @@ import shutil
 import tempfile
 import struct
 
+
+class WebODMTaskNotFound(RuntimeError):
+    pass
+
+
+class WebODMTaskLookupError(RuntimeError):
+    pass
+
+
 class WebODMProcessor:
     def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
         self.base_url = url.rstrip("/")
@@ -79,10 +88,20 @@ class WebODMProcessor:
 
                 # If JWT expired or session lost auth somehow
                 if resp.status_code in (401, 403):
+                    last_err = WebODMTaskLookupError(
+                        f'WebODM task lookup authentication failed with '
+                        f'status {resp.status_code}'
+                    )
                     self.logger.warning(
                         f"get_task auth error (status={resp.status_code}). Re-authenticating...")
                     self._reset_session(reauth=True)
                     continue
+
+                if resp.status_code == 404:
+                    raise WebODMTaskNotFound(
+                        f'WebODM task not found: project_id={project_id} '
+                        f'task_id={task_id}'
+                    )
 
                 resp.raise_for_status()
                 return resp.json()
@@ -101,10 +120,17 @@ class WebODMProcessor:
                 time.sleep(backoff * attempt)
                 continue
 
-            except Exception as e:
+            except WebODMTaskNotFound:
                 raise
+            except WebODMTaskLookupError:
+                raise
+            except Exception as e:
+                raise WebODMTaskLookupError(
+                    f'WebODM task lookup failed: project_id={project_id} '
+                    f'task_id={task_id}: {e}'
+                ) from e
 
-        raise RuntimeError(
+        raise WebODMTaskLookupError(
             f"get_task failed after {retries} retries: {last_err}") from last_err
 
     def get_task_output(self, project_id: int, task_id: str) -> str:
@@ -133,12 +159,11 @@ class WebODMProcessor:
             return "queued", False
 
         code_map = {
-            10: "created",
-            20: "queued",
-            30: "running",
-            40: "completed",
-            50: "failed",
-            60: "canceled",
+            10: 'queued',
+            20: 'running',
+            30: 'failed',
+            40: 'completed',
+            50: 'canceled',
         }
 
         if isinstance(raw_status, int):
@@ -239,11 +264,16 @@ class WebODMProcessor:
                 time.sleep(poll_seconds)
                 continue
 
+            raw_status_value = task_info.get('status')
             status_label, is_terminal = self._normalize_status(
-                task_info.get("status"))
+                raw_status_value
+            )
 
             if status_label != last_status:
-                self.logger.info(f"WebODM status: {status_label}")
+                self.logger.info(
+                    f'WebODM status: {status_label} '
+                    f'(raw={raw_status_value!r})'
+                )
                 last_status = status_label
 
             elapsed = time.time() - start
@@ -1095,12 +1125,53 @@ class WebODMProcessor:
             )
             return None
 
+        except WebODMTaskLookupError:
+            raise
         except Exception as e:
-            self.logger.warning(
-                f"find_task_by_name: failed to query tasks for "
-                f"project {project_id}: {e}"
-            )
-            return None
+            raise WebODMTaskLookupError(
+                f'Failed to query tasks for project {project_id}: {e}'
+            ) from e
+
+    def list_project_tasks(self, project_id: int) -> list[dict[str, Any]]:
+        """Return every task in a project, failing closed on malformed pages."""
+        tasks: list[dict[str, Any]] = []
+        page = 1
+        try:
+            while True:
+                resp = self.session.get(
+                    f"{self.base_url}/api/projects/{int(project_id)}/tasks/",
+                    headers=self.headers,
+                    params={"page": page, "page_size": 100},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+
+                if isinstance(payload, list):
+                    page_tasks = payload
+                    has_more = False
+                elif isinstance(payload, dict):
+                    if "results" not in payload or not isinstance(
+                        payload["results"], list
+                    ):
+                        raise ValueError("task-list response has no results list")
+                    page_tasks = payload["results"]
+                    has_more = bool(payload.get("next"))
+                else:
+                    raise ValueError("task-list response is not a list or object")
+
+                if not all(isinstance(task, dict) for task in page_tasks):
+                    raise ValueError("task-list response contains a non-object task")
+                tasks.extend(dict(task) for task in page_tasks)
+                if not has_more:
+                    return tasks
+                page += 1
+        except WebODMTaskLookupError:
+            raise
+        except Exception as exc:
+            raise WebODMTaskLookupError(
+                f"Failed to list tasks for project {project_id}: {exc}"
+            ) from exc
 
     def get_task_status(self, project_id: int, task_id: str) -> Optional[str]:
         """
@@ -1112,9 +1183,10 @@ class WebODMProcessor:
             status_label, _ = self._normalize_status(task_info.get("status"))
             return status_label
         except Exception as e:
-            self.logger.warning(
-                f"get_task_status failed for task {task_id}: {e}")
-            return None
+            raise WebODMTaskLookupError(
+                f'Failed to get status for project {project_id} '
+                f'task {task_id}: {e}'
+            ) from e
 
     def delete_task(self, project_id: int, task_id: str) -> None:
         """

@@ -306,10 +306,15 @@ def test_rgb_pipeline_defaults_keep_existing_production_wiring(
         (
             "default-construction",
             {
-                "source_dir": str(sample_dataset_dir),
-                "surveys_root": str(temporary_path_layout.surveys_dir),
-                "year": 2026,
-            },
+                    "source_dir": str(sample_dataset_dir),
+                    "surveys_root": str(temporary_path_layout.surveys_dir),
+                    "year": 2026,
+                    "workspace_root": str(
+                        temporary_path_layout.application_root
+                        / "data"
+                        / "workspaces"
+                    ),
+                },
         ),
         ("default-construction", {}),
     ]

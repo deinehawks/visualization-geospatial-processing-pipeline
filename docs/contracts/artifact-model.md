@@ -33,11 +33,11 @@ These are implemented in [shared/artifacts.py](../../shared/artifacts.py). Curre
 | Published survey root | `<surveys_root>/<year>/<survey_id>/rgb/` | Implemented and verified | Existing consumers still depend on it |
 | Publication manifest | `<published rgb>/publication.json` | Partially implemented | Manifest-aware consumers may prefer it when present |
 | Activation evidence | `.activation/<run-id>/...` under published root | Partially implemented | UI should show as recovery/diagnostic evidence, not active output |
-| Cleanup evidence | `.artifact-cleanup-audit/<cleanup-id>.json` | Partially implemented | Cleanup controls remain deferred |
+| Cleanup evidence | `.artifact-cleanup-audit/<cleanup-id>.json` | Implemented for guarded operator cleanup and completed-run cleanup | API may expose immutable cleanup outcome and retained metadata |
 
 ## Workspace Cleanup Semantics
 
-Status: **Approved target behavior**.
+Status: **Implemented and verified** for fully completed full-run workspaces.
 
 Run workspaces can be hundreds of GB, so the target runtime behavior is to
 delete the owned run workspace by default after a fully `completed` run. The
@@ -58,6 +58,18 @@ Compatibility and safety requirements:
 - `partially_completed` cleanup remains deferred until operation-level evidence
   and retry semantics are strong enough to preserve failed-operation evidence
   safely.
+- Automatic cleanup applies only to full normal or resumed runs; selected-stage
+  execution retains its workspace.
+- New run workspaces contain `.run-workspace.json` ownership evidence. Older
+  workspaces without that evidence remain resumable but fail closed for
+  automatic deletion.
+- Before deletion, the pipeline writes
+  `.artifact-cleanup-audit/completed-run-<run_id>.json` with relative file
+  inventory, byte totals, stage summaries, verified output mappings, and
+  available cross-run image classifications.
+- Cleanup failure does not reverse persisted processing success. The run remains
+  `completed`, the workspace is retained where possible, and failure evidence
+  is logged/audited.
 
 ## Artifact Record Contract
 

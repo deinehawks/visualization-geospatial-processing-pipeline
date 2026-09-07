@@ -1,4 +1,4 @@
-﻿# Refactor Current Status
+# Refactor Current Status
 
 ## Summary
 
@@ -2207,6 +2207,239 @@ This slice does not add UI/API mutation endpoints, does not recover stale locks,
 - `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "publication"` - 16 passed, 19 deselected.
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+
+## DJI M3M UAV-folder and RGB ingestion
+
+Date: 2026-09-04.
+
+The CLI now exposes independent `--uav <folder>` and `--rgb` controls.
+UAV selection filters dataset candidates by an exact, case-insensitive ancestor
+folder before date disambiguation or the existing full-path prompt. RGB mode
+recursively selects only DJI `*_D.JPG` files across arbitrary nested capture
+splits. Legacy all-JPG/JPEG behavior remains the default.
+
+Stage preflight, storage estimates, and segregation share one selector. The
+flat `images/raw` contract is preserved, case-insensitive basename collisions
+fail before copying, and manifests record the selection mode and nonmatching
+JPEG count. Resume remains schema-compatible and trusts persisted `source_dir`;
+an optional resume `--uav` validates that path.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused M3M, CLI, storage, resume, construction, and selected-stage coverage:
+  139 passed.
+- `python -m pytest --collect-only -q`: 337 collected.
+- `python -m pytest -q`: 337 passed.
+
+No real pipeline, field-data root, network share, production database, WebODM,
+QGIS/GDAL, operator `.env`, or destructive operation was accessed.
+
+## Explicit empty-WebODM-project Task 4 recovery
+
+Date: 2026-09-03.
+
+Task 4 resume now has a narrowly guarded recovery for the crash window where an
+earlier process persisted a WebODM project but stopped before any task was
+created. The CLI and `RGBPipeline.run()` require resume, `webodm_task4` force
+selection, the persisted project ID, and the exact phrase `CREATE TASK4 IN EMPTY
+WEBODM PROJECT <project-id> FOR RUN <run-id>`.
+
+The pipeline lists every remote project task immediately before upload and
+enters the existing Task 4 creation path only for a well-formed, complete,
+zero-task response. Authorization is appended to binding history before upload,
+and the returned UUID is persisted through the existing canonical binding path.
+Normal resume remains exact-UUID-only. Existing tasks, existing UUIDs, identity
+conflicts, malformed responses, and lookup/authentication/network failures all
+fail closed without upload, adoption, replacement, or deletion.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused empty-project recovery coverage: 25 passed.
+- Complete WebODM recovery, CLI, and RGB stage files: 120 passed.
+- `python -m pytest --collect-only -q`: 322 collected.
+- `python -m pytest -q`: 322 passed.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, survey dataset,
+network share, operator `.env`, project/task deletion, or production recovery
+was accessed or executed.
+
+## Resume-aware storage preflight and explicit legacy workspace rebind
+
+Date: 2026-09-02.
+
+Resume preflight now reads the newest stage attempts through SQLite read-only
+mode and estimates only the remaining bulk work. Completed WebODM and quality
+gate omit upload-cache writes; an incomplete/forced quality gate remains
+conservative because it can request a WebODM fallback. QGIS staging remains two
+times source JPEG bytes when QGIS will run. Volumes with zero estimated writes
+use the configured absolute reserve rather than an unrelated percentage of a
+large state, output, or temporary volume.
+
+Legacy null-root runs remain pinned by default. An explicit CLI rebind requires
+`--rebind-workspace-to-configured-root` plus exact `REBIND WORKSPACE <run-id>`
+confirmation, refuses conflicting persisted roots and unowned target
+directories, and leaves the old workspace unchanged. Python 3.10 SQLite-full
+detection now uses the stable result code fallback when the named constant is
+not exposed.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused storage, resume, and CLI tests: 35 passed.
+- `python -m pytest --collect-only -q`: 291 tests collected.
+- `python -m pytest -q`: 291 passed.
+- `git diff --check`: passed with line-ending conversion warnings only.
+
+All tests used fake disk usage, fake pipeline construction, and pytest-owned
+temporary files/databases. No real pipeline, WebODM, QGIS/GDAL, production
+database, survey/network share, operator `.env`, legacy workspace mutation, or
+destructive cleanup was used. Operational integration, report-only preflight,
+actual resume, success verification, and any deletion remain pending.
+
+## Split published-mirror storage reserve
+
+Date: 2026-09-02.
+
+General cache, QGIS staging, and workspace writes now default to a 10 GiB/5%
+reserve. Published file and directory mirrors have independent 10 GiB/0%
+thresholds because their exact pending bytes plus copy overhead are rechecked
+immediately before mutation. If published and general writes share a volume,
+the stricter applicable policy remains effective.
+
+Resume startup now uses the run's persisted surveys root rather than a current
+configuration alias and reserves one source-image set for pending published
+output. Typed storage-capacity failures are recorded as failed once and bypass
+StageRunner retries.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused configuration, storage, resume/CLI, StageRunner, and RGBPipeline tests: 117 passed.
+- `python -m pytest --collect-only -q`: 297 tests collected.
+- `python -m pytest -q`: 297 passed.
+
+Tests used fake disk usage and pytest-owned files/databases. No production
+`.env`, database, network share, survey data, QGIS/GDAL, pipeline run, or
+workspace deletion was used. Integration and an operator-run report-only check
+remain pending.
+
+## Storage preflight and durable workspace routing
+
+Date: 2026-09-02.
+
+Fresh CLI runs now allocate their run ID before construction, route workspaces
+through `WORKSPACE_ROOT`, and persist that root in additive migration
+`003_run_workspace_root`. Resume reads state in SQLite read-only mode before the
+capacity gate, restores the persisted root, and keeps legacy null records on the
+original repository-local workspace path.
+
+Startup groups all write roles by physical volume, sums estimated writes, and
+requires the larger of `STORAGE_MIN_FREE_GB` or
+`STORAGE_MIN_FREE_PERCENT`. `--storage-preflight-only` reports readiness without
+constructing the pipeline. Typed capacity failures block direct-I/O fallbacks,
+with runtime rechecks at upload caching, QGIS staging/copy-back, and artifact
+mirrors. Startup also reserves twice the exact source-image bytes for the
+explicit QGIS staging root. The approved D: cache/QGIS/workspace settings are documented in
+`.env.template` and `STORAGE_PREFLIGHT_PLAN.md` but no production `.env` changed.
+
+### Validation
+
+- Compilation of all changed Python implementation and test files passed.
+- Focused storage, CLI, migration, resume, construction, and RGB stage tests passed.
+- `python -m pytest --collect-only -q`: 278 collected.
+- `python -m pytest -q`: 278 passed.
+- `git diff --check`: passed; line-ending conversion warnings only.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, network share,
+production data, or operator `.env` was accessed or modified.
+
+## Deterministic WebODM Task 4 pause/resume and repair
+
+Date: 2026-08-28.
+
+Task 1, Task 2, and Task 4 now record canonical run/operation/project/task bindings in the additive `webodm_tasks` persistence model immediately after remote creation and before polling. Normal resume reconciles each exact project ID and task UUID. `--force-stage webodm_task4` performs Task 4 reconciliation/export specifically. Bindings survive pause/failure/success, and reconciliation fails closed on identity conflicts, confirmed missing tasks, lookup failures, failed/canceled tasks, or historical attempts with no durable identity. The compatibility JSON checkpoint is atomic and retained.
+
+Pipeline pause now finalizes active inner and outer attempts as `paused` while explicitly leaving WebODM running remotely. The newest stage attempt controls resume, so an older completion cannot mask a newer forced/paused/failed attempt. WebODM numeric status normalization now matches the API codes used by Task 4 reconciliation. Artifact success requires non-empty workspace and compatibility-mirror orthomosaics; quality gate refuses a missing selected file.
+
+The CLI validates force targets and supports `webodm_task4` as a first-class reconciliation/export alias. `tools/repair_webodm_binding.py` performs exact-task validation in dry-run mode by default; explicit `--apply` appends audit-preserving repair evidence and atomically updates the compatibility checkpoint without changing WebODM.
+
+### Validation
+
+- Python compilation of every changed Python implementation and test file passed.
+- Complete WebODM persistence/recovery, StageRunner, RGBPipeline, fake WebODM, and temporary-database files: 100 passed.
+- `python -m pytest --collect-only -q`: 260 tests collected.
+- `python -m pytest -q`: 260 passed.
+
+All automated cases used pytest-owned temporary SQLite/filesystem paths and fake WebODM clients. No real pipeline, WebODM request, upload/download, project/task mutation, QGIS/GDAL command, production database, survey root, network share, or destructive cleanup operation was used.
+
+## Phase 3 completed-run workspace cleanup
+
+Date: 2026-08-19.
+
+Full normal and resumed runs now clean only their owned run workspace after final status `completed`, required output verification, persisted run/survey success, and durable cleanup-audit preparation. The CLI exposes `--keep-workspace`; selected-stage and every non-completed path retain workspace evidence. Cleanup failures do not reverse processing success.
+
+New workspaces carry `.run-workspace.json` ownership evidence. Cleanup archives relative file inventory, counts, bytes, stage summaries, verified legacy/publication mappings, and available cross-run image classifications under the published survey's `.artifact-cleanup-audit` directory before deletion. Older workspaces without ownership evidence fail closed and remain available for resume or operator review.
+
+### Validation
+
+- Focused cleanup, CLI, filter metadata, and pipeline tests: 135 passed.
+- Default suite excluding the two pre-existing incompatible test files: 218 passed.
+- `python -m py_compile main.py pipelines\rgb_pipeline.py shared\artifacts.py modules\cross_run_image_filter\cross_run_image_filter.py tests\test_cross_run_filter_metadata.py` - passed.
+- Scoped `git diff --check` for changed implementation and test files - passed.
+
+Unignored collection remains blocked because `tests/test_logging_context_ownership.py` imports absent root module `query_survey_stats` while the tracked implementation is `tools/query_survey_stats.py`. The remaining three unrelated failures are in `tests/test_main_resume_source.py`, which still passes removed `field_data_root` arguments.
+
+No real pipeline, external service, production database, network share, production survey root, or production cleanup was accessed.
+
+## Default test-suite compatibility restored
+
+Date: 2026-08-19.
+
+The stale logging parser import now uses the tracked `tools.query_survey_stats` module, and resume-source tests now exercise the current `resolve_cli_source_dir()` signature and direct survey-argument resolver contract. These were test-only compatibility corrections; production behavior did not change.
+
+### Validation
+
+- `python -m pytest -q tests\test_logging_context_ownership.py tests\test_main_resume_source.py` - 11 passed.
+- `python -m pytest --collect-only -q` - 229 tests collected without exclusions.
+- `python -m pytest -q` - 229 passed.
+- Python compilation and scoped `git diff --check` for both changed tests - passed.
+
+No real pipeline, external service, production database, network share, production survey root, or destructive operation was accessed.
+
+## Combined WebODM separate operation-stage persistence
+
+Date: 2026-08-19.
+
+Combined `--both-tasks` processing now retains the compatibility `webodm`
+coordinator while persisting Task 4 and Task 2 as separate `webodm_task4` and
+`webodm_task2` stage attempts. Operation outputs include task identity, status,
+runtime-bearing task data, download and artifact mappings, selected output, and
+failure evidence.
+
+Task 4 still runs before Task 2. A Task 4 failure stops the sequence. Task 4
+success followed by Task 2 failure records Task 2 as failed, records the
+coordinator and run as `partially_completed`, preserves Task 4 output, and
+leaves the coordinator resume-eligible. A later resume skips completed Task 4
+and retries Task 2; success clears the partial override.
+
+No schema migration, production dependency, live API/UI mutation, or external
+operation was added. The existing aggregate `webodm` state remains compatible
+for QGIS, quality gate, publication, and legacy consumers.
+
+### Validation
+
+- `python -m py_compile shared\stage_runner.py pipelines\rgb_pipeline.py tests\test_stage_runner_orchestration.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- Combined-mode Task 4 ordering, stop, partial completion, and resume regressions - 3 passed.
+- Complete StageRunner and RGBPipeline orchestration files - 63 passed.
+- `python -m pytest --collect-only -q` - 233 tests collected without exclusions.
+- `python -m pytest -q` - 233 passed.
+- Scoped `git diff --check` - passed.
+
+No real pipeline, WebODM, QGIS/GDAL, production database, production survey
+root, network share, production workspace, or destructive operation was used.
+
 ## Phase 3 guarded publication activation CLI surface
 
 Date: 2026-08-03.
@@ -2221,3 +2454,50 @@ The CLI surface only passes the confirmation phrase into the already-tested `RGB
 - `python -m pytest -q tests\test_main_publication_activation_cli.py tests\test_main_resume_source.py` - 7 passed.
 
 No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+## Phase 3 same-run legacy mirror recovery
+
+Date: 2026-08-12.
+
+`RGBPipeline` legacy workspace-to-published mirror replacement now reconciles same-run hidden temp and backup paths before copying a replacement artifact. Directory mirrors remove stale `.tmp-<run_id>` directories, restore `.bak-<run_id>` directories when the final target is missing, or delete same-run backup leftovers when the final target already exists. File mirrors now apply the equivalent file behavior. Wrong-type stale evidence still fails closed.
+
+This fixes resumability for interrupted QGIS tile and clipped-orthomosaic mirror swaps such as `.round-corners.tmp-<run_id>` or `.round-corners.bak-<run_id>` without weakening workspace ownership checks or touching any path outside the intended legacy mirror parent.
+
+### Validation
+
+- `python -m py_compile pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py -k "legacy_directory_mirror or legacy_file_mirror or qgis_outputs_workspace_then_mirrors_legacy_paths"` - 6 passed, 37 deselected.
+- `python -m pytest -q tests\test_rgb_pipeline_single_stage_execution.py` - 43 passed.
+- `git diff --check -- pipelines\rgb_pipeline.py tests\test_rgb_pipeline_single_stage_execution.py` - passed.
+- `python -m pytest --collect-only -q --ignore=tests/test_logging_context_ownership.py` - 208 tests collected.
+
+Full unignored collection remains blocked by an unrelated `tests/test_logging_context_ownership.py` import of missing root module `query_survey_stats`. The default suite with that file ignored reached 205 passed and 3 unrelated failures in `tests/test_main_resume_source.py` because `resolve_cli_source_dir()` no longer accepts `field_data_root`.
+
+No real RGB pipeline, WebODM, QGIS/GDAL, production database, production survey root, network share mutation, stale-lock recovery, cleanup, or production publication activation was run.
+
+## Task 4 full ODM ZIP delivery
+
+Date: 2026-09-04.
+
+The existing `EXPORT_ALL_ASSETS_ZIP` export now applies to the default Task 4
+workflow as well as Task 2. A successful Task 4 downloads `all.zip` into
+`workspace/webodm/odm/task4`, mirrors it to legacy `rgb/odm`, and records
+`downloads.task4.all_assets_zip` plus Task 4-specific workspace and
+published metadata. Publication planning now permits that exact ZIP field.
+
+Storage preflight adds one source-image-size estimate to both workspace and
+published output for pending Task 4 ZIP work and displays the estimate.
+Runtime rechecks workspace capacity before download and checks the actual ZIP
+size before published mirroring. A failed optional ZIP download leaves an
+existing published ZIP unchanged. Completed Task 4 stages remain skipped by
+ordinary resume; explicit forced reconciliation reuses the canonical UUID.
+
+### Validation
+
+- Python compilation for changed implementation and tests passed.
+- Focused storage, CLI, and RGBPipeline files passed 108/108.
+- `python -m pytest --collect-only -q` collected 342 tests.
+- `python -m pytest -q` passed 342/342.
+
+No real pipeline, WebODM request, QGIS/GDAL command, production database,
+production survey data, network share, operator `.env`, or destructive
+operation was used.
