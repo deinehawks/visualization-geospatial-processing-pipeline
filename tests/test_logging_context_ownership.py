@@ -63,7 +63,11 @@ if "rich" not in sys.modules and importlib.util.find_spec("rich") is None:
     sys.modules["rich.box"] = rich_box_stub
 
 from pipelines.rgb_pipeline import RGBPipeline
-from query_survey_stats import extract_log_insights, parse_event_message, parse_log_events
+from tools.query_survey_stats import (
+    extract_log_insights,
+    parse_event_message,
+    parse_log_events,
+)
 from shared.logging import (
     close_logger,
     get_context_filter,

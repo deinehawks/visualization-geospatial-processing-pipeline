@@ -1,0 +1,3 @@
+# Optional: install only into the interpreter used by the manual sync launcher.
+# Google-maintained token signing/refresh; requests provides the HTTP transport.
+google-auth[requests]==2.56.3

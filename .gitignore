@@ -51,3 +51,6 @@ address this issues.txt
 codes.txt
 data/workspaces/
 data/*.flag
+
+# Optional Google Sheets reporter state; credentials must live outside the repo.
+data/sheet-sync/

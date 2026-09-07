@@ -28,6 +28,10 @@ Architecture decisions are append-only except for status changes, corrections, o
 | CW-ADR-005 | Approved target behavior | Combined WebODM mode uses `--both-tasks` / `Orthomosaic + 3D` with fixed Task 4 then Task 2 execution |
 | CW-ADR-006 | Approved target behavior | Publication runs as one `Activate Publication` stage after quality-gate approval |
 | CW-ADR-007 | Approved target behavior | Fully completed runs clean their run workspace by default, with `--keep-workspace` opt-out |
+| CW-ADR-008 | Implemented and verified | WebODM pause is local detach; task resume uses canonical exact-ID bindings |
+| CW-ADR-009 | Implemented and verified | Explicit Task 4 recovery may create only in a verified empty persisted WebODM project |
+| CW-ADR-010 | Implemented and verified | Keep UAV location and spectral selection independent |
+| CW-ADR-011 | Implemented and verified | Apply the all-assets ZIP export contract to Task 4 |
 
 ## CW-ADR-001 - Shared Contracts Reference Refactor Roadmap
 
@@ -75,7 +79,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 - **Implementation dependency:** Pipeline implementation must add CLI parsing, fixed operation ordering, separate stage records, per-operation resume/retry behavior, operation-level artifacts and publication eligibility, one quality-gate boundary after selected operations, QGIS-per-successful-operation behavior, and `partially_completed` persistence/API mapping.
 ### CW-ADR-005 implementation note - 2026-08-11
 
-The pipeline workstream has implemented the canonical `--both-tasks` CLI/runtime path, Task 4 then Task 2 ordering, `partially_completed` persistence for Task 4 success followed by Task 2 failure, and operation-aware QGIS behavior that runs once per successful WebODM operation in combined mode. Separate per-operation stage records, complete operation metrics, and API/UI projection hardening remain in progress.
+The pipeline workstream has implemented the canonical `--both-tasks` CLI/runtime path, Task 4 then Task 2 ordering, separate `webodm_task4` and `webodm_task2` stage records, resume that preserves completed Task 4 while retrying failed Task 2, `partially_completed` persistence for Task 4 success followed by Task 2 failure, and operation-aware QGIS behavior. Complete operation metrics, durable operation identities, and API/UI projection hardening remain in progress.
 
 ## CW-ADR-006 - Activate Publication Stage
 
@@ -96,4 +100,52 @@ The pipeline workstream has implemented the guarded `activate_publication` Stage
 - **Compatibility requirement:** This intentionally changes the default runtime retention target for successful runs. Cleanup must validate workspace ownership and resolved-path containment, and must never delete published survey outputs, production roots, WebODM state, pause flags, logs, checkpoints needed for recovery, or recovery evidence.
 - **UI/API impact:** Future read projections may expose workspace state such as `retained`, `cleaned`, `cleanup_skipped`, or `cleanup_failed`. UI mutation controls remain deferred until operational cleanup semantics are implemented safely.
 - **Implementation dependency:** Pipeline work must add `--keep-workspace`, default cleanup for fully `completed` runs only, retention for all non-completed paths, clear cleanup logging, and tests using pytest-owned workspaces and published roots.
+
+## CW-ADR-008 - Deterministic WebODM Task Reattachment
+
+- **Status:** Implemented and verified
+- **Context:** A process restart could lose Task 4 identity, causing resume to create a new WebODM project/task or search the wrong project. Pipeline pause also left attempts running while the remote task continued.
+- **Decision:** Pipeline pause is a local detach and does not pause, cancel, or restart WebODM. The newest stage attempt controls resume. The canonical `webodm_tasks` binding stores run, operation, project ID, task UUID, expected name, remote status, and local artifact state. Normal Task 1, Task 2, and Task 4 resume fetches the exact task and fails closed on conflicts, missing identity, confirmed 404, failed/canceled state, or lookup failure. Normal orchestration does not search by name or implicitly delete/re-upload a bound task. Forced Task 4 execution means reconciliation and artifact delivery, never implicit remote replacement.
+- **Compatibility requirement:** The legacy JSON checkpoint remains an atomic recovery mirror and completed-stage output can seed legacy migration only when it does not conflict with the canonical binding. Existing databases receive additive repeatable columns; historical rows remain readable. Duplicate WebODM projects/tasks are never deleted automatically.
+- **UI/API impact:** Read projections should expose the newest stage attempt separately from binding history and should distinguish local `paused`, remote `running/completed/failed/canceled`, `requires_recovery`, and artifact readiness. Mutation endpoints remain deferred.
+- **Recovery:** `tools/repair_webodm_binding.py` validates an exact project/task read-only by default. Explicit `--apply` appends repair/audit evidence and atomically updates the compatibility checkpoint without restarting, canceling, uploading, downloading, or deleting WebODM resources.
+
+## CW-ADR-009 - Explicit Recovery for a Persisted Empty WebODM Project
+
+- **Status:** Implemented and verified
+- **Context:** A process may stop after persisting a WebODM project but before task creation returns a UUID. Normal resume must still refuse ambiguous replacement, but an operator needs a bounded recovery when the exact project is verifiably empty.
+- **Decision:** Task 4 recovery requires resume, `--force-stage webodm_task4`, the persisted project ID, and the exact phrase `CREATE TASK4 IN EMPTY WEBODM PROJECT <project-id> FOR RUN <run-id>`. Immediately before upload, the pipeline lists every task in that project and permits normal Task 4 creation only when the complete response contains zero tasks. Authorization is appended to binding history before upload.
+- **Compatibility requirement:** Normal resume remains exact-UUID-only. Nonempty, unavailable, malformed, newly created, or locally conflicting projects fail closed. Recovery never adopts by name, replaces or deletes a task, or deletes a project.
+- **UI/API impact:** This is a CLI-only operational recovery. API/UI mutation remains deferred; read projections may expose the authorization audit and resulting binding.
+- **Recovery:** If creation returns ambiguously, preserve the project and inspect it. If a task exists, use exact-UUID binding repair; never repeat unguarded creation.
+
+## CW-ADR-010 - Keep UAV Location and Spectral Selection Independent
+
+- **Status:** Implemented and verified
+- **Context:** DJI M3M field data adds UAV parent folders and may contain RGB
+  JPEGs beside multispectral TIF bands across arbitrary nested capture splits.
+- **Decision:** `--uav <folder>` filters dataset candidates by an exact,
+  case-insensitive ancestor folder. Independent `--rgb` selects only filenames
+  ending in `_D.JPG`; selecting an M3M folder does not imply a spectral mode.
+  Nested split folders are traversal details and are not parsed or capped.
+- **Compatibility requirement:** Existing dataset lookup and all-JPG/JPEG
+  segregation remain the default. Resume continues to trust persisted
+  `source_dir`; an optional resume `--uav` only validates that identity.
+- **UI/API impact:** Future start-run contracts must model UAV-folder selection
+  separately from image/spectral mode. Multispectral processing remains deferred.
+
+## CW-ADR-011 - Apply the All-Assets ZIP Export Contract to Task 4
+
+- **Status:** Implemented and verified
+- **Context:** The existing all-assets ZIP configuration and artifact model
+  applied only to Task 2 even though Task 4 is the CLI default.
+- **Decision:** When `EXPORTS_ENABLED` and `EXPORT_ALL_ASSETS_ZIP` are true,
+  a successful Task 4 attempts the same workspace-first `all.zip` delivery
+  used by Task 2. It exposes Task 4-specific download, workspace, and published
+  paths and participates in storage admission and publication planning.
+- **Compatibility requirement:** Task 2 behavior, stage names, durable task
+  identity, and database schemas remain unchanged. ZIP failure is optional and
+  must not overwrite an existing published ZIP.
+- **UI/API impact:** Future artifact projections may expose the Task 4
+  all-assets ZIP using the documented additive metadata fields.
 

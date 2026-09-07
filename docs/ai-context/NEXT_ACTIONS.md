@@ -2,21 +2,31 @@
 
 ## Highest Priority
 
-1. Implement default completed-run workspace cleanup with `--keep-workspace` opt-out.
+1. Resume run `1cd78d5e-331a-4ee5-b05d-047ca8f658e5` normally and verify that
+   it reattaches to its exact existing Task 4 UUID without creating another
+   remote task.
 
-Why this is first: retained run workspaces can consume hundreds of GB per run. The accepted target is to clean fully `completed` run workspaces by default while preserving partial, failed, paused, aborted, canceled, and recovery-required evidence.
+Why this is first: the deleted filtered-image directory has been reconstructed
+and independently verified at 1,153 kept images plus 229 preserved exclusions.
+SQLite and WebODM identity were intentionally left unchanged, so the normal
+resume path is the smallest validation of the repaired artifact state.
 
 ## Recommended Pipeline Sequence
 
-1. Add `--keep-workspace` without changing failure, pause, abort, cancellation, or recovery retention behavior.
+1. Run the ordinary resume command without forcing segregation or filtering;
+   confirm storage preflight passes and the exact persisted Task 4 UUID is
+   reused.
 
-2. Add guarded cleanup for fully `completed` runs only, after final success state persistence and after required outputs are already mirrored or published.
+2. Verify Task 4 artifact delivery, including the optional full ODM ZIP, and
+   the remaining quality-gate/QGIS stages before considering the run complete.
 
-3. Preserve workspaces by default for `partially_completed`, failed, paused, aborted, canceled, and `requires_recovery` paths.
+3. Design a reusable fail-closed recovery tool that binds restoration to the
+   persisted run/survey identity and saved image classifications. Cover missing
+   source, identity mismatch, existing outputs, interrupted copying, and atomic
+   activation with temporary paths and databases.
 
-4. Validate cleanup with pytest-owned workspaces, ownership checks, containment checks, and regression coverage proving published/legacy outputs remain.
-
-5. Continue hardening the approved combined WebODM `--both-tasks` runtime contract, especially separate per-operation stage records and API/UI projection.
+4. Perform the pending controlled M3M `--uav`/`--rgb` validation and keep
+   multispectral processing deferred.
 
 ## Recommended Web/API/UI Sequence
 
