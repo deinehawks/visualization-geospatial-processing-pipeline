@@ -1,5 +1,21 @@
 # Refactor Current Status
 
+## Optional Sheets reporter V1 (2026-09-07)
+
+Added an isolated, manually launched reporter for the three approved monitoring
+tabs. Production pipeline execution, database schemas, and manifests are
+unchanged. Operator metadata and formulas remain manual/preserved. Deployment
+requires a service account and workbook-copy verification on the operator PC.
+See `docs/operators/google-sheets-sync.md` for setup, timing definitions, and
+recovery. This reporting addition does not complete any pending refactor phase.
+
+Validation for this addition: 21 reporter tests and the full 363-test default
+suite passed; 363 tests collected safely; Python compilation and
+`git diff --check` passed. Verification used an isolated Python 3.12 environment,
+pytest 8.4.2, temporary SQLite/state files, and fake Google sessions. No production
+database, Google Sheet, manifest, or survey artifact was modified. Windows BAT
+execution and real Google authentication remain unverified operator rollout steps.
+
 ## Summary
 
 - **Refactor status:** In progress; Phase 2 logging and observability is complete enough to move to Phase 3 planning

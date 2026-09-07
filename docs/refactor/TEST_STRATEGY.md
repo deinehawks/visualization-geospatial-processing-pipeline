@@ -1,5 +1,16 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Optional Sheets reporter tests (2026-09-07)
+
+`tests/test_sheet_sync.py` uses existing temporary SQLite and safety fixtures
+plus fake Google sessions. Coverage includes sparse field ownership, formula
+preservation, duplicate and legacy identity refusal, resume/historical
+selection, persisted catch-up after response loss, nested timing accounting,
+local process locking, bounded reads, and literal (non-formula) writes.
+Run with `python -m pytest -q tests/test_sheet_sync.py`. No new fixture guard,
+test marker, Google credentials, or external integration test is required.
+Windows launcher and real workbook-copy validation remain operator rollout checks.
+
 ## Safety objective
 
 The default developer and CI test workflow must be hermetic with respect to production data and services. Tests should make unsafe access structurally difficult, not depend only on developer caution.
