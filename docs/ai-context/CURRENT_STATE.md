@@ -57,12 +57,17 @@
 - The retained legacy workspace and old upload cache remain recovery evidence
   until their associated runs succeed and are separately approved for cleanup.
 - Full production-scale SMB/open-handle/disconnect validation remains incomplete.
-- Legacy run `1cd78d5e-331a-4ee5-b05d-047ca8f658e5` cannot currently reach
-  WebODM because both its published `images/raw` and `images/path` folders are
-  empty. The existing CLI force-stage wiring is not yet safe for this recovery:
-  forced data segregation does not restore the persisted survey ID or enable
-  the existing-folder override. Do not force that stage until a guarded repair
-  is implemented and validated.
+- Legacy run `1cd78d5e-331a-4ee5-b05d-047ca8f658e5` had its accidentally
+  deleted filtered-image directory reconstructed under explicit authorization.
+  The repair restored exactly 1,153 saved `kept` classifications
+  (21,783,982,080 bytes), preserved all 229 verified `cross-runs` images, and
+  left SQLite and the exact Task 4 binding unchanged. The run is ready for an
+  ordinary resume against project `426` / task
+  `8822d2e6-ea73-40d1-8c3f-0098acddc6a9`.
+- A reusable guarded missing-image-artifact recovery command is not yet
+  implemented. Current `--force-stage data_segregation` wiring does not safely
+  restore the persisted survey ID or enable existing-folder recovery, so it
+  must not be used as a substitute for that future repair path.
 
 ## Working Tree Notes
 
