@@ -1345,3 +1345,44 @@ files passed 108/108, collection found 342 tests, and the full safe suite
 passed 342/342. No real pipeline, WebODM, QGIS/GDAL, production database,
 survey data, network share, operator `.env`, or destructive operation was
 used.
+
+## Guarded resume source-directory rebind coverage
+
+Added on 2026-09-17, source-rebind tests use pytest-owned directories,
+temporary SQLite databases, an injected pipeline, and mocked storage
+preflight.
+
+Coverage proves:
+
+- source rebind requires resume mode, an explicit target, and the exact
+  run-scoped confirmation phrase;
+- the target must exist and retain the persisted dataset identity, including
+  exact reconstruction of underscore-delimited names incorrectly stored as
+  nested `_...` components;
+- storage-preflight-only uses the proposed source without opening a writer;
+- successful preflight persists the source before pipeline construction;
+- the repository update fails closed on changed state, updates source and
+  audit evidence in one transaction, and is idempotent after success; and
+- ordinary resume continues to use its persisted source unchanged.
+
+Changed-file compilation passed, focused validation passed 55/55, collection
+found 387 tests, and the complete safe default suite passed 387/387. No real
+pipeline, external process, service, production database, survey root, network
+share, or operator configuration was used.
+
+## Guarded missing-raw recovery coverage
+
+Added on 2026-09-17, raw-input recovery tests use pytest-owned source, survey,
+workspace, and SQLite paths. Coverage proves exact run-scoped confirmation,
+resume-only and forced-filter requirements, completed-segregation gating,
+plan-only behavior, source-selection compatibility, collision refusal,
+non-overwrite refusal for partial/mismatched raw content, owned-copy restart,
+verified atomic installation, preservation of existing path/cross-run outputs,
+audited stage ordering before the forced filter, and startup/runtime storage
+capacity accounting.
+
+Changed-file compilation passed, the complete focused recovery, storage, CLI,
+resume, and RGB orchestration files passed 150/150, collection found 387 tests,
+and the full safe default suite passed 387/387. No external service, subprocess,
+production database, real dataset, survey/network root, or operator
+configuration was used.

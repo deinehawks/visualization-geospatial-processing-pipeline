@@ -172,6 +172,44 @@ def test_task4_all_assets_zip_adds_workspace_and_published_estimates(
     assert "Task 4 full ODM ZIP: enabled (estimated 0.00 GiB)" in formatted
 
 
+def test_raw_input_recovery_adds_one_source_copy_to_survey_volume(
+    tmp_path: Path,
+):
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "one.jpg").write_bytes(b"a" * 400)
+
+    report = build_storage_preflight(
+        source_dir=source,
+        database_path=tmp_path / "data" / "pipeline.db",
+        logs_dir=tmp_path / "logs",
+        checkpoint_dir=tmp_path / "checkpoints",
+        upload_cache_root=tmp_path / "cache",
+        qgis_staging_root=tmp_path / "qgis-staging",
+        workspace_root=tmp_path / "workspaces",
+        surveys_root=tmp_path / "surveys",
+        temp_root=tmp_path / "temp",
+        webodm_mode="task4",
+        include_upload_cache=False,
+        include_qgis_staging=False,
+        include_workspace=False,
+        include_published_outputs=False,
+        include_raw_input_recovery=True,
+        min_free_gb=0,
+        min_free_percent=0,
+        published_min_free_gb=0,
+        published_min_free_percent=0,
+        disk_usage=lambda _path: _usage(total_gib=100, free_gib=100),
+    )
+
+    assert report["include_raw_input_recovery"] is True
+    assert report["estimated_raw_input_recovery_bytes"] == 400
+    [volume] = report["volumes"]
+    assert volume["required_bytes"] == 400
+    assert "raw_input_recovery" in volume["roles"]
+    assert "Raw-input recovery: enabled" in format_storage_report(report)
+
+
 def test_rgb_preflight_counts_only_dji_d_jpg_images(tmp_path: Path):
     source = tmp_path / "source"
     (source / "1of15").mkdir(parents=True)

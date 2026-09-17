@@ -460,6 +460,86 @@ def block_later_stages(pipeline, calls):
     pipeline.stage_qgis = fail_later_stage("qgis")
 
 
+def test_run_recovers_raw_before_forced_cross_run_filter(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    (sample_dataset_dir / "recovery-source.jpg").write_bytes(
+        b"temporary recovery source"
+    )
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    survey_id = "TEST-SURVEY-RAW-RECOVERY"
+    survey_path = (
+        temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
+    )
+    images_dir = survey_path / "images"
+    path_dir = images_dir / "path"
+    excluded_dir = images_dir / "cross-runs"
+    path_dir.mkdir(parents=True)
+    excluded_dir.mkdir()
+    (path_dir / "existing.jpg").write_bytes(b"existing-path")
+    (excluded_dir / "existing.jpg").write_bytes(b"existing-excluded")
+    segregation_output = {
+        "survey_id": survey_id,
+        "survey_path": str(survey_path),
+        "dirs": {
+            "raw": str(images_dir / "raw"),
+            "path": str(path_dir),
+            "cross_runs": str(excluded_dir),
+        },
+    }
+    repository.attach_survey_id(RUN_ID, survey_id)
+    stage_id = repository.start_stage(RUN_ID, "data_segregation")
+    repository.finish_stage(
+        stage_id,
+        success=True,
+        runtime_seconds=0.1,
+        output=segregation_output,
+    )
+    observed = []
+
+    pipeline.control.start_hotkeys = lambda logger: None
+    pipeline._preflight_stage = lambda stage_name: None
+
+    def cross_run_filter():
+        raw_dir = images_dir / "raw"
+        observed.extend(path.name for path in raw_dir.glob("*.jpg"))
+        assert (path_dir / "existing.jpg").read_bytes() == b"existing-path"
+        assert (
+            excluded_dir / "existing.jpg"
+        ).read_bytes() == b"existing-excluded"
+        return {"crossrun_flag": "xc"}
+
+    pipeline.stage_cross_run_image_filter = cross_run_filter
+
+    result = pipeline.run(
+        resume=True,
+        selected_stages={
+            "data_segregation",
+            "raw_input_recovery",
+            "cross_run_filter",
+        },
+        force_stages={"cross_run_filter"},
+        raw_input_recovery={
+            "confirmation": f"RECOVER RAW FOR RUN {RUN_ID}",
+        },
+        raise_on_error=True,
+    )
+
+    assert observed
+    assert result["raw_input_recovery"]["status"] == "recovered"
+    assert repository.get_latest_stage(
+        RUN_ID,
+        "raw_input_recovery",
+    )["status"] == "completed"
+
+
 def prepare_cross_run_context(pipeline, temporary_path_layout, survey_id="TEST-SURVEY-XRF"):
     survey_path = temporary_path_layout.surveys_dir / "2026" / survey_id / "rgb"
     raw_dir = survey_path / "images" / "raw"

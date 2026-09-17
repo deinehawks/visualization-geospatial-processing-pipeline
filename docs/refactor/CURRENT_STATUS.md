@@ -2517,3 +2517,59 @@ ordinary resume; explicit forced reconciliation reuses the canonical UUID.
 No real pipeline, WebODM request, QGIS/GDAL command, production database,
 production survey data, network share, operator `.env`, or destructive
 operation was used.
+
+## Guarded resume source-directory rebind
+
+Date: 2026-09-17.
+
+Resume now supports an explicit `--rebind-source-dir` recovery guarded by the
+exact phrase `REBIND SOURCE <run-id>`. The requested directory must already
+exist and match the persisted dataset identity. In addition to an unchanged
+leaf name, the validator recognizes the narrowly observed corruption where
+underscores in one dataset folder were stored as nested `_...` path
+components. Storage preflight evaluates the proposed source before any write,
+and `--storage-preflight-only` reports the plan without opening a database
+writer.
+
+After a passing preflight, the repository atomically checks the source value
+read at startup, updates only `runs.source_dir`, and inserts a completed
+`source_rebind` stage containing the old and new paths. Repeating the same
+authorized rebind is idempotent. No schema migration or automatic multi-root
+selection was introduced.
+
+Changed-file compilation passed, focused source-resume and CLI coverage passed
+55/55, collection found 387 tests, and the full safe default suite passed
+387/387. Tests used only pytest-owned paths and temporary SQLite databases.
+No real pipeline, WebODM request, QGIS/GDAL command, production database,
+survey data, network share, or operator `.env` was accessed or modified.
+
+## Guarded missing-raw recovery for resume
+
+Date: 2026-09-17.
+
+Resume now supports `--recover-missing-raw` only with a forced
+`cross_run_filter` attempt and the exact phrase
+`RECOVER RAW FOR RUN <run-id>`. It requires the newest data-segregation
+attempt to be completed and refuses use with `--disable-cross-run`.
+
+The recovery rediscovers images from the persisted/rebound source using the
+same all-JPEG or DJI `*_D.JPG` selection mode as ingestion, rejects flattened
+filename collisions, and refuses partial or mismatched existing `images/raw`
+content. It copies into deterministic run-owned staging beside `raw`, resumes
+an interrupted owned copy, verifies names and sizes, and atomically renames the
+staging directory into place. Existing `images/path` and `images/cross-runs`
+remain unchanged until the existing filter completes and performs its guarded
+legacy replacement. Recovery is persisted as its own `raw_input_recovery`
+stage attempt; no schema migration was required.
+
+Startup storage planning reserves one additional source-image copy on the
+survey volume, and the stage repeats the capacity check immediately before
+copying. `--storage-preflight-only` reports the recovery plan without opening a
+pipeline or writing files.
+
+Changed-file compilation passed, focused recovery/storage/CLI/RGB coverage
+passed 150/150, collection found 387 tests, and the full safe default suite
+passed 387/387. Tests used only pytest-owned paths, temporary SQLite databases,
+and fake external boundaries. No real pipeline, production database, survey or
+field-data root, network share, WebODM request, QGIS/GDAL process, or operator
+`.env` was accessed or modified.

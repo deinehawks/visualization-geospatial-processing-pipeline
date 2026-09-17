@@ -141,6 +141,82 @@ class PipelineRepo:
             ).fetchone()
             return dict(row) if row else None
 
+    def rebind_run_source_dir(
+        self,
+        run_id: str,
+        *,
+        expected_source_dir: str,
+        new_source_dir: str,
+    ) -> dict[str, Any]:
+        """Atomically replace one run source and retain audit evidence.
+
+        The expected value makes the recovery fail closed if another process
+        changes the run after the CLI's read-only resume inspection. Repeating
+        an already-applied rebind is idempotent.
+        """
+        if not run_id:
+            raise ValueError("run_id is required")
+        if not expected_source_dir:
+            raise ValueError("expected_source_dir is required")
+        if not new_source_dir:
+            raise ValueError("new_source_dir is required")
+
+        now = utc_now_iso()
+        with connect(self.db_file) as conn:
+            row = conn.execute(
+                "SELECT source_dir FROM runs WHERE run_id=?",
+                (run_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(
+                    f"Cannot rebind source for missing run {run_id!r}."
+                )
+
+            current_source = row["source_dir"]
+            if current_source == new_source_dir:
+                return {
+                    "changed": False,
+                    "run_id": run_id,
+                    "old_source_dir": current_source,
+                    "new_source_dir": new_source_dir,
+                }
+            if current_source != expected_source_dir:
+                raise RuntimeError(
+                    "Source rebind refused because the persisted source changed "
+                    f"after inspection: expected {expected_source_dir!r}, "
+                    f"found {current_source!r}"
+                )
+
+            audit = {
+                "event": "source_rebind",
+                "old_source_dir": current_source,
+                "new_source_dir": new_source_dir,
+            }
+            cursor = conn.execute(
+                "UPDATE runs SET source_dir=? WHERE run_id=? AND source_dir=?",
+                (new_source_dir, run_id, expected_source_dir),
+            )
+            if cursor.rowcount != 1:
+                raise RuntimeError(
+                    "Source rebind refused because the run changed concurrently."
+                )
+            conn.execute(
+                """
+                INSERT INTO stages (
+                    run_id, stage_name, status, started_at, finished_at,
+                    runtime_seconds, output_json
+                ) VALUES (?, 'source_rebind', 'completed', ?, ?, 0, ?)
+                """,
+                (run_id, now, now, json.dumps(audit)),
+            )
+            conn.commit()
+            return {
+                "changed": True,
+                "run_id": run_id,
+                "old_source_dir": current_source,
+                "new_source_dir": new_source_dir,
+            }
+
     def mark_run_paused(
         self,
         run_id: str,

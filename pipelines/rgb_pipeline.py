@@ -11,7 +11,11 @@ from shared.stage_runner import StageFailedWithOutput, StageRequiresRecovery, St
 from shared.pipeline_control import PipelineControl
 from shared.preflight_checks import PipelinePreflight, PreflightError
 from shared.paths import db_path
-from shared.storage_preflight import StorageCapacityError, check_path_capacity
+from shared.storage_preflight import (
+    StorageCapacityError,
+    check_path_capacity,
+    estimate_jpeg_bytes,
+)
 from shared.artifacts import (
     PublicationArtifact,
     PublishedSurveyLayout,
@@ -36,6 +40,10 @@ from modules.webodm.webodm_processor import (
 from modules.cross_run_image_filter.cross_run_image_filter import run_filter
 from modules.data_segregation.data_segregation import run_data_segregation
 from modules.qgis.qgis_tools import QGISTools
+from shared.raw_input_recovery import (
+    recover_missing_raw_inputs,
+    validate_raw_input_recovery_request,
+)
 
 from pipelines.rgb_helpers import (
     RGBTaskNamingMixin,
@@ -1835,6 +1843,45 @@ class RGBPipeline(
             summary["published"] = describe_published_survey(self.published_layout)
 
         return summary
+
+    def stage_raw_input_recovery(self) -> Dict[str, Any]:
+        logger = self.loggers["cross_run_filter"]
+        rgb_path = self._require_rgb_path()
+        raw_dir = rgb_path / "images" / "raw"
+        required_bytes, _image_count = estimate_jpeg_bytes(
+            self.source_dir,
+            rgb_only=self.rgb_only,
+        )
+        storage_cfg = self.config.get("storage") or {}
+        check_path_capacity(
+            role="raw_input_recovery",
+            path=raw_dir,
+            required_bytes=required_bytes,
+            min_free_gb=int(storage_cfg.get("published_min_free_gb", 10)),
+            min_free_percent=int(
+                storage_cfg.get("published_min_free_percent", 0)
+            ),
+        )
+        logger.warning(
+            "Recovering missing raw inputs for run %s: %s -> %s",
+            self.run_id,
+            self.source_dir,
+            raw_dir,
+        )
+        result = recover_missing_raw_inputs(
+            source_dir=self.source_dir,
+            raw_dir=raw_dir,
+            run_id=self.run_id,
+            rgb_only=self.rgb_only,
+        )
+        logger.info(
+            "Raw-input recovery %s: images=%s bytes=%s target=%s",
+            result.get("status"),
+            result.get("image_count"),
+            result.get("image_bytes"),
+            raw_dir,
+        )
+        return result
 
     def stage_cross_run_image_filter(self) -> Dict[str, Any]:
         logger = self.loggers["cross_run_filter"]
@@ -4499,8 +4546,34 @@ class RGBPipeline(
         publication_confirmation: Optional[str] = None,
         keep_workspace: bool = False,
         empty_webodm_recovery: Optional[Mapping[str, Any]] = None,
+        raw_input_recovery: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         force_stages = force_stages or set()
+        if raw_input_recovery is not None:
+            if not resume:
+                raise ValueError("Raw-input recovery requires resume=True")
+            if "cross_run_filter" not in force_stages:
+                raise ValueError(
+                    "Raw-input recovery requires force stage cross_run_filter"
+                )
+            latest_segregation = self.repo.get_latest_stage(
+                self.run_id,
+                "data_segregation",
+            )
+            if (
+                not latest_segregation
+                or latest_segregation.get("status") != "completed"
+            ):
+                raise ValueError(
+                    "Raw-input recovery requires a completed "
+                    "data_segregation stage"
+                )
+            self._raw_input_recovery = validate_raw_input_recovery_request(
+                dict(raw_input_recovery),
+                self.run_id,
+            )
+        else:
+            self._raw_input_recovery = None
         if empty_webodm_recovery is not None:
             recovery = dict(empty_webodm_recovery)
             if not resume:
@@ -4605,6 +4678,16 @@ class RGBPipeline(
             },
 
         ]
+        if self._raw_input_recovery is not None:
+            stage_steps.insert(
+                1,
+                {
+                    "name": "raw_input_recovery",
+                    "fn": self.stage_raw_input_recovery,
+                    "output_key": "raw_input_recovery",
+                    "stale_running_policy": "rerun",
+                },
+            )
         if publication_confirmation is not None or (
             selected_stages is not None and "activate_publication" in selected_stages
         ):
@@ -4649,6 +4732,10 @@ class RGBPipeline(
         def _force(name: str) -> bool:
             return (
                 name in force_stages
+                or (
+                    name == "raw_input_recovery"
+                    and self._raw_input_recovery is not None
+                )
                 or (name == 'webodm' and 'webodm_task4' in force_stages)
                 or not resume
             )

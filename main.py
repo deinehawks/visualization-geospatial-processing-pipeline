@@ -14,6 +14,7 @@ from shared.config import load_pipeline_config
 from shared.db.repo import PipelineRepo
 from shared.paths import db_path
 from shared.artifacts import RUN_WORKSPACE_OWNERSHIP_NAME
+from shared.raw_input_recovery import raw_input_recovery_confirmation
 from shared.storage_preflight import (
     StorageCapacityError,
     build_storage_preflight,
@@ -205,6 +206,25 @@ def resolve_cli_workspace_root(
     return legacy_root
 
 
+def _source_rebind_dataset_name_matches(
+    persisted_source: Path,
+    target_source: Path,
+) -> bool:
+    persisted = Path(persisted_source)
+    target_name = Path(target_source).name.casefold()
+    if persisted.name.casefold() == target_name:
+        return True
+
+    parts = persisted.parts
+    for index in range(len(parts) - 1):
+        suffix = parts[index:]
+        if not all(part.startswith("_") for part in suffix[1:]):
+            continue
+        if "".join(suffix).casefold() == target_name:
+            return True
+    return False
+
+
 def resolve_cli_source_dir(
     *,
     survey: str,
@@ -215,6 +235,8 @@ def resolve_cli_source_dir(
     uav_folder: str | None = None,
     repository: PipelineRepo | None = None,
     run_record: dict | None = None,
+    rebind_source_dir: str | Path | None = None,
+    rebind_confirmation: str | None = None,
 ) -> Path:
     if resume:
         if not run_id:
@@ -233,6 +255,31 @@ def resolve_cli_source_dir(
                 f"Cannot resume run {run_id!r}: run record has no source_dir."
             )
         resolved = Path(source_dir)
+        if rebind_source_dir is not None:
+            expected_confirmation = f"REBIND SOURCE {run_id}"
+            if rebind_confirmation != expected_confirmation:
+                raise ValueError(
+                    "Source rebind requires exact confirmation: "
+                    f"{expected_confirmation!r}"
+                )
+            target = Path(rebind_source_dir).expanduser()
+            if not target.is_dir():
+                raise FileNotFoundError(
+                    f"Source rebind target is not a directory: {target}"
+                )
+            if not _source_rebind_dataset_name_matches(resolved, target):
+                raise ValueError(
+                    "Source rebind target must match the persisted dataset "
+                    f"identity from {resolved}: {target}"
+                )
+            rebound = target.resolve(strict=True)
+            validate_source_uav_folder(rebound, uav_folder)
+            logger.warning(
+                "Resume source dataset rebind proposed: %s -> %s",
+                resolved,
+                rebound,
+            )
+            return rebound
         validate_source_uav_folder(resolved, uav_folder)
         logger.info("Resume source dataset restored from run state: %s", resolved)
         return resolved
@@ -337,6 +384,33 @@ def main() -> None:
         help='Exact phrase required for rebind: "REBIND WORKSPACE <run-id>".',
     )
     parser.add_argument(
+        "--rebind-source-dir",
+        default=None,
+        metavar="PATH",
+        help=(
+            "For a resume, replace the persisted missing source directory "
+            "with this explicit existing dataset path after storage preflight."
+        ),
+    )
+    parser.add_argument(
+        "--source-rebind-confirmation",
+        default=None,
+        help='Exact phrase required for rebind: "REBIND SOURCE <run-id>".',
+    )
+    parser.add_argument(
+        "--recover-missing-raw",
+        action="store_true",
+        help=(
+            "For a resume, reconstruct a missing images/raw directory from "
+            "the persisted source before forcing cross_run_filter."
+        ),
+    )
+    parser.add_argument(
+        "--raw-recovery-confirmation",
+        default=None,
+        help='Exact phrase required: "RECOVER RAW FOR RUN <run-id>".',
+    )
+    parser.add_argument(
         "--recover-empty-webodm-project",
         choices=["task4"],
         default=None,
@@ -393,6 +467,42 @@ def main() -> None:
             "--workspace-rebind-confirmation requires "
             "--rebind-workspace-to-configured-root"
         )
+    if args.source_rebind_confirmation and not args.rebind_source_dir:
+        parser.error("--source-rebind-confirmation requires --rebind-source-dir")
+    if args.rebind_source_dir:
+        if not args.resume:
+            parser.error("--rebind-source-dir requires --resume")
+        expected_source_confirmation = f"REBIND SOURCE {args.run_id}"
+        if args.source_rebind_confirmation != expected_source_confirmation:
+            parser.error(
+                "--source-rebind-confirmation must exactly match: "
+                f"{expected_source_confirmation!r}"
+            )
+    if args.raw_recovery_confirmation and not args.recover_missing_raw:
+        parser.error(
+            "--raw-recovery-confirmation requires --recover-missing-raw"
+        )
+    if args.recover_missing_raw:
+        if not args.resume:
+            parser.error("--recover-missing-raw requires --resume")
+        if args.disable_cross_run:
+            parser.error(
+                "--recover-missing-raw cannot be combined with "
+                "--disable-cross-run"
+            )
+        if "cross_run_filter" not in set(args.force_stage or []):
+            parser.error(
+                "--recover-missing-raw requires "
+                "--force-stage cross_run_filter"
+            )
+        expected_raw_confirmation = raw_input_recovery_confirmation(
+            args.run_id
+        )
+        if args.raw_recovery_confirmation != expected_raw_confirmation:
+            parser.error(
+                "--raw-recovery-confirmation must exactly match: "
+                f"{expected_raw_confirmation!r}"
+            )
     recovery_companions_present = bool(
         args.webodm_recovery_project_id is not None
         or args.webodm_recovery_confirmation
@@ -450,6 +560,14 @@ def main() -> None:
             selected_run_id,
         )
 
+    if (
+        args.recover_missing_raw
+        and latest_stage_statuses.get("data_segregation") != "completed"
+    ):
+        parser.error(
+            "--recover-missing-raw requires a completed data_segregation stage"
+        )
+
     if args.node_id is not None:
         config["webodm"]["node_id"] = args.node_id
 
@@ -469,6 +587,8 @@ def main() -> None:
         date_hint=args.date,
         uav_folder=args.uav,
         run_record=run_record,
+        rebind_source_dir=args.rebind_source_dir,
+        rebind_confirmation=args.source_rebind_confirmation,
     )
 
     # Determine webodm_mode from CLI flags
@@ -537,6 +657,7 @@ def main() -> None:
         temp_root=Path(tempfile.gettempdir()),
         webodm_mode=webodm_mode,
         **storage_stage_needs,
+        include_raw_input_recovery=args.recover_missing_raw,
         include_task4_all_assets_zip=task4_all_assets_zip_enabled,
         min_free_gb=int(storage_config.get("min_free_gb", 10)),
         min_free_percent=int(storage_config.get("min_free_percent", 5)),
@@ -553,8 +674,34 @@ def main() -> None:
         require_storage_capacity(storage_report)
     except StorageCapacityError:
         raise SystemExit(3)
+    if args.rebind_source_dir:
+        action = (
+            "PLAN ONLY - database unchanged"
+            if args.storage_preflight_only
+            else "AUTHORIZED - persisted before pipeline construction"
+        )
+        print(
+            "Source rebind: "
+            f"{run_record['source_dir']} -> {source_dir} ({action})"
+        )
+    if args.recover_missing_raw:
+        action = (
+            "PLAN ONLY - no files copied"
+            if args.storage_preflight_only
+            else "AUTHORIZED - runs before cross_run_filter"
+        )
+        print(f"Raw-input recovery: {action}")
     if args.storage_preflight_only:
         return
+
+    if args.rebind_source_dir:
+        rebind_result = PipelineRepo(database_path).rebind_run_source_dir(
+            selected_run_id,
+            expected_source_dir=str(run_record["source_dir"]),
+            new_source_dir=str(source_dir),
+        )
+        outcome = "updated" if rebind_result["changed"] else "already current"
+        print(f"Source rebind persisted: {outcome}")
 
     print("\n===== PRODUCTION RGB PIPELINE =====")
     print(f"Source dir   : {source_dir}")
@@ -609,6 +756,11 @@ def main() -> None:
                     "confirmation": args.webodm_recovery_confirmation,
                 }
                 if args.recover_empty_webodm_project
+                else None
+            ),
+            raw_input_recovery=(
+                {"confirmation": args.raw_recovery_confirmation}
+                if args.recover_missing_raw
                 else None
             ),
             publication_confirmation=(

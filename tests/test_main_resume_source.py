@@ -1,3 +1,4 @@
+import json
 import logging
 from pathlib import Path
 import sqlite3
@@ -123,6 +124,137 @@ def test_resume_source_dir_requires_existing_run_record(tmp_path):
             logger=logging.getLogger("tests.main.missing"),
             repository=repository,
         )
+
+
+def test_resume_source_rebind_uses_existing_explicit_target(tmp_path):
+    run_id = "run-source-rebind"
+    persisted = tmp_path / "old-root" / "ABC_001_same_dataset"
+    target = tmp_path / "new-root" / persisted.name
+    target.mkdir(parents=True)
+
+    resolved = rgb_main.resolve_cli_source_dir(
+        survey=persisted.name,
+        resume=True,
+        run_id=run_id,
+        logger=logging.getLogger("tests.main.source-rebind"),
+        run_record={"source_dir": str(persisted)},
+        rebind_source_dir=target,
+        rebind_confirmation=f"REBIND SOURCE {run_id}",
+    )
+
+    assert resolved == target.resolve(strict=True)
+
+
+def test_resume_source_rebind_repairs_underscores_stored_as_separators(tmp_path):
+    run_id = "run-source-rebind"
+    persisted = (
+        tmp_path
+        / "old-root"
+        / "TLW-001"
+        / "_6.3Ha"
+        / "_A2S"
+        / "_80m"
+        / "_85f75s"
+        / "_5mps"
+    )
+    target = (
+        tmp_path
+        / "new-root"
+        / "TLW-001_6.3Ha_A2S_80m_85f75s_5mps"
+    )
+    target.mkdir(parents=True)
+
+    resolved = rgb_main.resolve_cli_source_dir(
+        survey=target.name,
+        resume=True,
+        run_id=run_id,
+        logger=logging.getLogger("tests.main.source-rebind-separators"),
+        run_record={"source_dir": str(persisted)},
+        rebind_source_dir=target,
+        rebind_confirmation=f"REBIND SOURCE {run_id}",
+    )
+
+    assert resolved == target.resolve(strict=True)
+
+
+def test_resume_source_rebind_rejects_different_dataset_name(tmp_path):
+    run_id = "run-source-rebind"
+    persisted = tmp_path / "old-root" / "ABC_001_same_dataset"
+    target = tmp_path / "new-root" / "ABC_002_different_dataset"
+    target.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="match the persisted dataset identity"):
+        rgb_main.resolve_cli_source_dir(
+            survey=persisted.name,
+            resume=True,
+            run_id=run_id,
+            logger=logging.getLogger("tests.main.source-rebind-name"),
+            run_record={"source_dir": str(persisted)},
+            rebind_source_dir=target,
+            rebind_confirmation=f"REBIND SOURCE {run_id}",
+        )
+
+
+def test_repository_source_rebind_is_atomic_audited_and_idempotent(tmp_path):
+    database = tmp_path / "pipeline.db"
+    repository = PipelineRepo(database)
+    old_source = str(tmp_path / "old-root" / "ABC_001_same_dataset")
+    new_source = str(tmp_path / "new-root" / "ABC_001_same_dataset")
+    repository.create_run("run-source-rebind", source_dir=old_source)
+
+    result = repository.rebind_run_source_dir(
+        "run-source-rebind",
+        expected_source_dir=old_source,
+        new_source_dir=new_source,
+    )
+
+    assert result["changed"] is True
+    assert repository.get_run("run-source-rebind")["source_dir"] == new_source
+    audit_stage = repository.get_latest_stage(
+        "run-source-rebind",
+        "source_rebind",
+    )
+    assert audit_stage["status"] == "completed"
+    assert json.loads(audit_stage["output_json"]) == {
+        "event": "source_rebind",
+        "old_source_dir": old_source,
+        "new_source_dir": new_source,
+    }
+
+    repeated = repository.rebind_run_source_dir(
+        "run-source-rebind",
+        expected_source_dir=old_source,
+        new_source_dir=new_source,
+    )
+
+    assert repeated["changed"] is False
+    with sqlite3.connect(database) as connection:
+        audit_count = connection.execute(
+            "SELECT COUNT(*) FROM stages WHERE run_id=? AND stage_name=?",
+            ("run-source-rebind", "source_rebind"),
+        ).fetchone()[0]
+    assert audit_count == 1
+
+
+def test_repository_source_rebind_refuses_changed_persisted_value(tmp_path):
+    repository = PipelineRepo(tmp_path / "pipeline.db")
+    current_source = str(tmp_path / "current" / "ABC_001_same_dataset")
+    repository.create_run("run-source-rebind", source_dir=current_source)
+
+    with pytest.raises(RuntimeError, match="persisted source changed"):
+        repository.rebind_run_source_dir(
+            "run-source-rebind",
+            expected_source_dir=str(
+                tmp_path / "stale" / "ABC_001_same_dataset"
+            ),
+            new_source_dir=str(tmp_path / "new" / "ABC_001_same_dataset"),
+        )
+
+    assert repository.get_run("run-source-rebind")["source_dir"] == current_source
+    assert repository.get_latest_stage(
+        "run-source-rebind",
+        "source_rebind",
+    ) is None
 
 
 def test_fresh_run_uses_configured_workspace_root(tmp_path):

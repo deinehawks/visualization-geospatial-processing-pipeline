@@ -516,3 +516,338 @@ def test_cli_rejects_half_enabled_workspace_rebind(
     assert expected_message in capsys.readouterr().err
     assert FakeRGBPipeline.instances == []
 
+
+@pytest.mark.parametrize(
+    "argv, expected_message",
+    [
+        (
+            ["--survey", "dataset", "--rebind-source-dir", "new-source"],
+            "--rebind-source-dir requires --resume",
+        ),
+        (
+            [
+                "--survey",
+                "dataset",
+                "--source-rebind-confirmation",
+                "REBIND SOURCE run-1",
+            ],
+            "--source-rebind-confirmation requires --rebind-source-dir",
+        ),
+        (
+            [
+                "--survey",
+                "dataset",
+                "--resume",
+                "--run-id",
+                "run-1",
+                "--rebind-source-dir",
+                "new-source",
+                "--source-rebind-confirmation",
+                "wrong",
+            ],
+            "--source-rebind-confirmation must exactly match",
+        ),
+    ],
+)
+def test_cli_rejects_unsafe_source_rebind_combinations(
+    monkeypatch, tmp_path, capsys, argv, expected_message
+):
+    _prepare_cli(monkeypatch, tmp_path, argv)
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert expected_message in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
+
+
+def test_source_rebind_preflight_only_does_not_update_database(
+    monkeypatch, tmp_path
+):
+    run_id = "run-source-rebind-plan"
+    old_source = tmp_path / "old-root" / "ABC_001_same_dataset"
+    new_source = tmp_path / "new-root" / old_source.name
+    new_source.mkdir(parents=True)
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            old_source.name,
+            "--resume",
+            "--run-id",
+            run_id,
+            "--rebind-source-dir",
+            str(new_source),
+            "--source-rebind-confirmation",
+            f"REBIND SOURCE {run_id}",
+            "--storage-preflight-only",
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda _database, _run_id: {
+            "run_id": run_id,
+            "source_dir": str(old_source),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda _database, _run_id: {},
+    )
+
+    class UnexpectedRepository:
+        def __init__(self, _database):
+            pytest.fail("preflight-only source rebind must not open a writer")
+
+    monkeypatch.setattr(rgb_main, "PipelineRepo", UnexpectedRepository)
+
+    rgb_main.main()
+
+    assert FakeRGBPipeline.instances == []
+
+
+def test_source_rebind_persists_before_pipeline_construction(
+    monkeypatch, tmp_path
+):
+    run_id = "run-source-rebind-apply"
+    old_source = tmp_path / "old-root" / "ABC_001_same_dataset"
+    new_source = tmp_path / "new-root" / old_source.name
+    new_source.mkdir(parents=True)
+    calls = []
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            old_source.name,
+            "--resume",
+            "--run-id",
+            run_id,
+            "--rebind-source-dir",
+            str(new_source),
+            "--source-rebind-confirmation",
+            f"REBIND SOURCE {run_id}",
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda _database, _run_id: {
+            "run_id": run_id,
+            "source_dir": str(old_source),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda _database, _run_id: {},
+    )
+
+    class RecordingRepository:
+        def __init__(self, database):
+            self.database = database
+
+        def rebind_run_source_dir(
+            self,
+            requested_run_id,
+            *,
+            expected_source_dir,
+            new_source_dir,
+        ):
+            calls.append(
+                {
+                    "run_id": requested_run_id,
+                    "expected": expected_source_dir,
+                    "new": new_source_dir,
+                }
+            )
+            return {"changed": True}
+
+    monkeypatch.setattr(rgb_main, "PipelineRepo", RecordingRepository)
+
+    rgb_main.main()
+
+    assert calls == [
+        {
+            "run_id": run_id,
+            "expected": str(old_source),
+            "new": str(new_source.resolve(strict=True)),
+        }
+    ]
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.init_kwargs["source_dir"] == new_source.resolve(strict=True)
+
+
+def test_cli_passes_guarded_raw_input_recovery(monkeypatch, tmp_path):
+    run_id = "run-raw-recovery"
+    confirmation = f"RECOVER RAW FOR RUN {run_id}"
+    captured = {}
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            "AH_026_source",
+            "--resume",
+            "--run-id",
+            run_id,
+            "--force-stage",
+            "cross_run_filter",
+            "--recover-missing-raw",
+            "--raw-recovery-confirmation",
+            confirmation,
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda *_args: {
+            "run_id": run_id,
+            "source_dir": str(tmp_path / "source"),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda *_args: {
+            "data_segregation": "completed",
+            "cross_run_filter": "completed",
+        },
+    )
+
+    def capture_preflight(**kwargs):
+        captured.update(kwargs)
+        return {"ok": True, "volumes": []}
+
+    monkeypatch.setattr(rgb_main, "build_storage_preflight", capture_preflight)
+
+    rgb_main.main()
+
+    assert captured["include_raw_input_recovery"] is True
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.run_kwargs["force_stages"] == {"cross_run_filter"}
+    assert pipeline.run_kwargs["raw_input_recovery"] == {
+        "confirmation": confirmation,
+    }
+
+
+def test_raw_recovery_preflight_only_does_not_construct_pipeline(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    run_id = "run-raw-recovery-plan"
+    confirmation = f"RECOVER RAW FOR RUN {run_id}"
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey",
+            "AH_026_source",
+            "--resume",
+            "--run-id",
+            run_id,
+            "--force-stage",
+            "cross_run_filter",
+            "--recover-missing-raw",
+            "--raw-recovery-confirmation",
+            confirmation,
+            "--storage-preflight-only",
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda *_args: {
+            "source_dir": str(tmp_path / "source"),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda *_args: {"data_segregation": "completed"},
+    )
+
+    rgb_main.main()
+
+    assert FakeRGBPipeline.instances == []
+    assert "PLAN ONLY - no files copied" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "extra_args, expected_message",
+    [
+        (
+            ["--recover-missing-raw"],
+            "--recover-missing-raw requires --resume",
+        ),
+        (
+            ["--raw-recovery-confirmation", "wrong"],
+            "requires --recover-missing-raw",
+        ),
+        (
+            [
+                "--resume",
+                "--run-id",
+                "run-raw",
+                "--recover-missing-raw",
+            ],
+            "--force-stage cross_run_filter",
+        ),
+        (
+            [
+                "--resume",
+                "--run-id",
+                "run-raw",
+                "--force-stage",
+                "cross_run_filter",
+                "--recover-missing-raw",
+                "--raw-recovery-confirmation",
+                "wrong",
+            ],
+            "--raw-recovery-confirmation must exactly match",
+        ),
+        (
+            [
+                "--resume",
+                "--run-id",
+                "run-raw",
+                "--force-stage",
+                "cross_run_filter",
+                "--recover-missing-raw",
+                "--raw-recovery-confirmation",
+                "RECOVER RAW FOR RUN run-raw",
+                "--disable-cross-run",
+            ],
+            "cannot be combined with --disable-cross-run",
+        ),
+    ],
+)
+def test_cli_rejects_unsafe_raw_recovery_combinations(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    extra_args,
+    expected_message,
+):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", *extra_args],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert expected_message in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
+

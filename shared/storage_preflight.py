@@ -171,6 +171,7 @@ def build_storage_preflight(
     include_qgis_staging: bool = True,
     include_workspace: bool = True,
     include_published_outputs: bool = True,
+    include_raw_input_recovery: bool = False,
     include_task4_all_assets_zip: bool = False,
     min_free_gb: int = 10,
     min_free_percent: int = 5,
@@ -208,6 +209,9 @@ def build_storage_preflight(
         if include_published_outputs
         else 0
     )
+    raw_input_recovery_bytes = (
+        source_bytes if include_raw_input_recovery else 0
+    )
     report = inspect_storage_requirements(
         [
             StorageRequirement('pipeline_database', Path(database_path)),
@@ -224,6 +228,13 @@ def build_storage_preflight(
                 'published_outputs',
                 Path(surveys_root),
                 published_bytes,
+                min_free_gb=published_min_free_gb,
+                min_free_percent=published_min_free_percent,
+            ),
+            StorageRequirement(
+                'raw_input_recovery',
+                Path(surveys_root),
+                raw_input_recovery_bytes,
                 min_free_gb=published_min_free_gb,
                 min_free_percent=published_min_free_percent,
             ),
@@ -246,11 +257,13 @@ def build_storage_preflight(
             ),
             'estimated_workspace_bytes': workspace_bytes,
             'estimated_published_output_bytes': published_bytes,
+            'estimated_raw_input_recovery_bytes': raw_input_recovery_bytes,
             'webodm_mode': mode,
             'include_upload_cache': bool(include_upload_cache),
             'include_qgis_staging': bool(include_qgis_staging),
             'include_workspace': bool(include_workspace),
             'include_published_outputs': bool(include_published_outputs),
+            'include_raw_input_recovery': bool(include_raw_input_recovery),
             'include_task4_all_assets_zip': bool(
                 include_task4_all_assets_zip
             ),
@@ -272,6 +285,9 @@ def format_storage_report(report: Mapping[str, object]) -> str:
     task4_zip_gib = int(
         report.get('estimated_task4_all_assets_zip_bytes', 0)
     ) / GIB
+    raw_recovery_gib = int(
+        report.get('estimated_raw_input_recovery_bytes', 0)
+    ) / GIB
     lines = [
         '===== STORAGE PREFLIGHT =====',
         f'Result: {result}',
@@ -282,6 +298,12 @@ def format_storage_report(report: Mapping[str, object]) -> str:
             f'(estimated {task4_zip_gib:.2f} GiB)'
             if task4_zip_enabled
             else 'Task 4 full ODM ZIP: disabled'
+        ),
+        (
+            'Raw-input recovery: enabled '
+            f'(estimated {raw_recovery_gib:.2f} GiB)'
+            if report.get('include_raw_input_recovery')
+            else 'Raw-input recovery: disabled'
         ),
     ]
     for value in report.get('volumes', []):
