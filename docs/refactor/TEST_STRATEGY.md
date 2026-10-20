@@ -1,5 +1,57 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Integrated generator coverage (2026-10-20)
+
+Added a pure generator regression module and extended the fake Qt window tests.
+All fixtures are pytest-owned: tiny KML/KMZ boundaries, placeholder TIFF files,
+JSON manifests, and fake QProcess/editor-loading boundaries. No geospatial
+executable is launched and no source drive, `.env`, persistent DB, credential,
+pipeline, or service is used. Existing autouse safety guards remain unchanged.
+
+Coverage includes explicit folder/rgb/ID and manifest lookup, immediate-year
+scope, ordered roots/ambiguity, Task 4 and manual candidates, publication
+selection, escaped references, malformed manifests, duplicate/missing inputs,
+single/combined and boundary-only packages, no reference-mode TIFF copies,
+unchanged legacy copy defaults, exclusive/contained output paths, finite/nonempty
+geometry, immutable requests, request replay refusal, helper mutual exclusion,
+failure/cancellation evidence, failed-start/corrupt-receipt cleanup, exact UI
+selections, navigation, and unsaved-safe handoff/load failures.
+
+The generator entry point is tested before QGIS initialization. Remembered roots
+are read as literals without startup enumeration. Existing V2 history/recovery/
+preset and renderer regressions remain in the focused run. Exact commands and
+acceptance mapping are in `docs/operators/map-editor.md`; collection-only and
+scoped whitespace checks include the newly added modules. Live TIFF readability,
+real Qt behavior/display scaling, and render alignment are operator-only checks
+requiring separately authorized storage and QGIS access.
+
+Final results: 320 focused tests passed, all 773 safe default tests passed, and
+773 tests collected safely. Syntax and scoped tracked/new-file whitespace checks
+passed (only existing Windows LF/CRLF conversion warnings). No test architecture,
+dependency, external-test permission, or safety-guard exemption was introduced.
+
+## Map Editor V2 acceptance coverage (2026-10-20)
+
+Added pure workflow tests plus extended fake Qt/session/renderer tests. Coverage
+includes selection/action availability, view-only outlines and page zoom,
+100-step grouped history, dirty/save semantics, failed-edit/rebuild rollback,
+independent basemap/overlay styling, SVG pin color/size/CRS/tip, adaptive grid
+visibility/precision, both inset CRS transformations, and persistence through
+paper/CRS changes. Typed presets exclude survey content from style reuse.
+
+V1/V2 round trips and V1 overwrite refusal are tested with pytest-owned files.
+Recovery tests prove per-design/per-session identity, atomic snapshots, consent,
+dismissal without deletion, undo-to-saved resolution, invalid/corrupt references,
+read-only failure reporting, and source/export-attempt write refusal. Snapshot
+exports receive exact V2 styles alongside existing maps/text; source and previous
+outputs remain intact on failure. Existing import/subprocess/service guards and
+test levels are unchanged; no real Qt/QGIS or new test dependencies are needed.
+
+273 focused tests passed; the complete safe default suite and collection passed
+725 tests. The operator guide contains exact commands, changed-file scope, and
+the separately authorized visual checklist. Mocked rendering is not evidence
+of actual tile coverage, native font appearance, or high-DPI UI correctness.
+
 ## Upper inset marker coverage (2026-10-19)
 
 New checks cover upper-pin editor defaults, explicit boundary metadata/design

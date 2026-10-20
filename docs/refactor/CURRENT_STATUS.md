@@ -1,5 +1,64 @@
 # Refactor Current Status
 
+## Integrated Map Generator implementation (2026-10-20)
+
+The approved Generate Map page is implemented alongside the V2 editor. Startup
+without inputs shows the generator; package/design launch arguments still open
+the editor. Explicit processed folders or IDs use ordered, remembered roots and
+bounded database-free discovery, with visible exact candidates, ambiguity
+selection, Task 4 preference/override, and ordered multi-survey packages.
+
+Generation writes new exclusive timestamp/UUID packages, copies small boundary
+inputs only, and references original TIFFs. Source containment, complete inputs,
+and nonempty finite geometry are validated. Existing CLI/BAT TIFF copying stays
+the default. A shared helper gate prevents discovery/generation/export overlap;
+immutable requests, stage logs, receipts, cancellation, retry isolation, and
+protected editor handoff retain evidence and preserve existing designs/outputs.
+
+Validation: 320 focused checks and all 773 guarded default tests passed; 773
+tests collected safely. Changed-file syntax and scoped whitespace checks passed.
+The operator guide records exact commands, acceptance coverage, and the remaining
+separately authorized real-storage/Qt/QGIS checklist.
+
+Created two generator source modules and one regression module. Modified four
+existing application modules, window tests/fixture, and four documentation files;
+no moves/deletions or dependency/schema/design-format changes. Prior V2 work and
+unrelated local changes remain untouched. Application source changed, but no
+production dataset/database/credentials/runtime settings or existing generated
+output was changed. No production pipeline, WebODM, QGIS/GDAL, source-drive,
+external, destructive, commit, or push operation was performed. Live Qt/QGIS and
+real storage checks remain pending separate operator authorization. This does
+not mark any wider refactor/rollout phase complete.
+
+## Map Editor V2 implementation (2026-10-20)
+
+The approved fixed-layout upgrade is implemented behind the existing launcher:
+modern light three-panel workspace, click selection with a view-only outline,
+contextual property tabs, distinct page/map zoom, action availability, and
+100-step transactional undo/redo with drag/typing grouping. Each map owns its
+basemap/overlay styling; either inset supports project CRS or EPSG:4326. Grid
+line/label visibility and styling retain adaptive coordinate/scale furniture.
+
+Version-2 JSON adds `map_styles` and `grid_style`; V1 inputs remain readable and
+cannot be overwritten by V2 Save. Typed location/style presets are separate,
+with built-in city/country views. Atomic 30-second per-design/per-session
+recovery writes only metadata, requires consent, and retains resolved evidence.
+One owned export helper still captures immutable exact-state snapshots into
+unique output folders, with log stages and explicit output-opening actions.
+
+Validation: 273 focused checks and all 725 guarded default tests passed;
+725 tests collected safely. Changed Python syntax and scoped whitespace checks
+passed. The operator guide records exact commands and acceptance-to-test mapping.
+Added one workflow module and one regression-test module; modified four existing
+source modules, the pin SVG, four test modules, and four documentation files.
+No files were moved/deleted by this task; unrelated pre-existing BAT deletions
+and local notes/query defaults were preserved. No dependencies, DB schema,
+production data, credentials, source drives, previous outputs, pipeline runs,
+QGIS/GDAL execution, or operational external service was used or changed.
+Official public API documentation was consulted read-only. Live Qt/QGIS visual
+rollout remains pending separate authorization; no wider refactor phase is
+marked complete and no commit/push was performed for this implementation.
+
 ## Upper inset location pin (2026-10-19)
 
 The operator requested pins for the Davao City upper inset as well as the

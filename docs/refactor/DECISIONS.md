@@ -1,5 +1,64 @@
 # Architectural Decision Log
 
+## Integrated processed-map generator — accepted implementation (2026-10-20)
+
+The operator approved a Generate Map page alongside the existing V2 editor.
+Use a separate internal request entry point before QGIS initialization, never
+the map CLI that loads `.env` or its database-backed dataset-name resolver.
+Discovery is bounded to explicit survey folders/roots and immediate year
+folders; manifests cannot authorize reads outside selected surveys. Ordered
+root matches remain visible, and ambiguity requires operator selection.
+
+Extend package creation through optional resolved inputs, TIFF storage mode,
+and exclusive directory creation. New GUI packages reference absolute TIFFs
+using existing reader-compatible metadata; existing CLI/BAT defaults still
+copy. Multiple surveys remain separate raster layers with combined boundaries.
+New packages use timestamp/UUID names and reject overlapping/broad destinations.
+
+A per-window ownership gate serializes discovery, generation, and export.
+Each helper gets an immutable request and unique attempt, uses explicit process
+arguments without a shell, and retains failures/cancellation evidence. The
+attempt receipt/result plus validated package references determine completion;
+exit success alone is insufficient. Cancellation wins over a racing successful
+receipt for automatic handoff. Completed packages survive editor-load failures
+and declined unsaved-work prompts. No retry reuses an output or attempt.
+
+No design-format change, dependency, worker queue, DB migration, source-data
+mutation, or broader pipeline integration is needed. Rollback uses the unchanged
+old CLI/BAT or an untouched existing design/package; reference packages require
+their original survey storage. Real storage/GIS rollout remains separately
+authorized, not part of automated validation.
+
+## Map Editor V2 - accepted implementation (2026-10-20)
+
+The operator approved upgrading the current launcher, modern light styling,
+fixed-layout workflow tools, independent frame styling, and separate location/
+style presets. V2 remains a single-PC Qt/QGIS desktop editor with no new runtime
+dependencies, worker queues, source processing, direct TIFF import, or layout
+geometry editing. Widget styling is local to the window and does not restyle
+print fonts. Selection highlighting belongs to the view, not the export scene.
+
+Use metadata snapshots for bounded history/recovery; apply normal navigation,
+text, and styling incrementally, with full layout rebuilds for paper/CRS/import
+and failure recovery. Build/validate a replacement before attaching its scene.
+Per-frame cloned basemaps and overlays prevent cross-map style leakage; data
+sources remain referenced. The shared renderer accepts optional `map_styles`
+and `grid_style`; existing CLI/BAT defaults remain intact.
+
+Version-2 designs add those style fields, and version-1 inputs remain readable.
+First saving V1 requires a separate V2 copy, with low-level overwrite refusal.
+Package loading prefers the suggested V2 filename, then V1. Presets are typed,
+versioned, and cannot carry survey references/wording/extents in a style preset.
+Recovery is per-design/per-session, atomic, consent-based, and never a write to
+the named design. Resolving recovery preserves evidence instead of deleting it.
+Only explicit save/discard or undo back to saved resolves pending changes.
+
+Export remains one owned helper using an immutable captured design and a unique
+attempt folder. Prior exports and failed evidence remain intact. Rollback is
+reverting the scoped source change and reopening the untouched V1 copy; older
+code is not expected to read V2 design files. Real rendering, Windows display
+scaling, and preview/PDF comparison require separately authorized visual rollout.
+
 ## Lower overview frame CRS - accepted follow-up (2026-10-19)
 
 The operator approved trying geographic WGS 84 for the national overview after
