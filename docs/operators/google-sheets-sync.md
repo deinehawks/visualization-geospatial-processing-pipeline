@@ -25,7 +25,8 @@ Closing it never stops the pipeline. Resume keeps the same run row.
 
 3. Keep the service-account JSON outside this repository, e.g.
    `C:\pipeline-secrets\sheets-service-account.json`. Do not paste it into chat,
-   commit it, or use the production `.env` file for this reporter.
+   commit it, or place the JSON contents in `.env`. The repository `.env` may
+   contain only the workbook ID and the path to this external credentials file.
 
 4. In the same command prompt used to launch the reporter, configure:
 
@@ -39,6 +40,17 @@ Closing it never stops the pipeline. Resume keeps the same run row.
    in again). `PIPELINE_SYNC_PYTHON` optionally selects an absolute interpreter
    path. Otherwise the launcher prefers `.venv310\Scripts\python.exe`, then
    `python` from PATH. The launcher sets the working directory to the repository.
+
+   The CLI also loads `<repository>/.env` before reading these settings, so this
+   is supported:
+
+   ```ini
+   PIPELINE_SHEET_ID=your-workbook-id
+   PIPELINE_SHEETS_CREDENTIALS=C:/pipeline-secrets/sheets-service-account.json
+   ```
+
+   Existing process, User, or Machine environment values take precedence over
+   `.env`. Restart the terminal after changing Windows environment variables.
 
 5. Use a **copy of the workbook** first: set `PIPELINE_SHEET_ID` to the copy ID.
    Keep the production ID above for the later live switch.

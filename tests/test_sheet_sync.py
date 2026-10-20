@@ -11,7 +11,7 @@ from shared.sheet_sync.engine import (KEYS, TABS, MANUAL, headers, load_state,
                                      plan_updates, select_runs, single_worker)
 from shared.sheet_sync.google import GoogleSheets, TransientSyncError
 from shared.sheet_sync.projection import project, read_snapshot
-from tools.sync_pipeline_sheet import sync_once, main
+from tools.sync_pipeline_sheet import ROOT, load_cli_environment, main, sync_once
 
 
 RUN_HEADERS = ["Pipeline Run ID", "Process Started Time (Raw)", "Process Finished Time (Raw)",
@@ -290,12 +290,31 @@ def test_missing_headers_unknown_status_and_invalid_duration():
 
 
 def test_cli_help_and_config_fail_without_database_access(monkeypatch):
+    loaded = []
     with pytest.raises(SystemExit) as exc:
-        main(["--help"])
+        main(['--help'], environment_loader=lambda: loaded.append(True))
     assert exc.value.code == 0
-    monkeypatch.delenv("PIPELINE_SHEET_ID", raising=False)
-    monkeypatch.delenv("PIPELINE_SHEETS_CREDENTIALS", raising=False)
-    assert main([]) == 1
+    assert loaded == [True]
+    monkeypatch.delenv('PIPELINE_SHEET_ID', raising=False)
+    monkeypatch.delenv('PIPELINE_SHEETS_CREDENTIALS', raising=False)
+    assert main([], environment_loader=lambda: None) == 1
+
+
+def test_cli_environment_loader_reads_repo_dotenv_without_override(monkeypatch):
+    import dotenv
+
+    calls = []
+    monkeypatch.setattr(
+        dotenv,
+        'load_dotenv',
+        lambda **kwargs: calls.append(kwargs),
+    )
+
+    load_cli_environment()
+
+    assert calls == [
+        {'dotenv_path': ROOT / '.env', 'override': False},
+    ]
 
 
 def test_google_reads_bounded_pages_and_keeps_formulas_and_holes():

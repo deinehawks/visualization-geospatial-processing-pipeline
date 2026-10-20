@@ -22,6 +22,13 @@ LOG = logging.getLogger("sheet_sync")
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def load_cli_environment():
+    # Keep dotenv loading at the CLI boundary so importing this tool stays safe.
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=ROOT / '.env', override=False)
+
+
 def sync_once(database, state_path, spreadsheet_id, sheet, *, dry_run=False):
     runs, stages = read_snapshot(database)
     projection = project(runs, stages)
@@ -55,7 +62,8 @@ def parser():
     return result
 
 
-def main(argv=None):
+def main(argv=None, *, environment_loader=None):
+    (environment_loader or load_cli_environment)()
     args = parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     sheet = None
