@@ -1,5 +1,88 @@
 # Refactor Current Status
 
+## Upper inset location pin (2026-10-19)
+
+The operator requested pins for the Davao City upper inset as well as the
+Philippines lower inset. New editor defaults now use an upper pin, while explicit
+saved/package marker choices retain precedence. The experiment
+`stm_50m_A3_V2.bat` enables `MAP_EXPORT_BOUNDARY_INSET_OVERLAY=pin`; the shared
+batch renderer now honors and records that setting. Other batch workflows keep
+their boundary default. Bounds, zoom, CRS, the main orthomosaic boundary, lower
+inset settings, and source geometry are unchanged. Reuses the existing 4 mm pin.
+
+Validation: 220 focused checks passed, all 672 guarded default tests passed,
+and 672 tests collected safely. Syntax and scoped whitespace checks passed.
+Modified two source modules, one experiment BAT, two test modules, and three
+documentation files; no files created, moved, or deleted in this follow-up.
+Production source code changed, but no pipeline, QGIS/GDAL, tile service, real
+dataset, existing output, database, or operator `.env` was accessed or changed.
+No external or destructive operation occurred. Visual rendering was not run;
+existing designs require selecting Upper Inset -> Inset marker -> Pin and saving.
+
+## Geographic CRS for the lower overview inset (2026-10-19)
+
+The editor now defaults its lower overview to WGS 84 / EPSG:4326 and offers a
+Lower inset CRS selector (EPSG:4326 or same as main map). The main orthomosaic
+and upper inset retain their existing CRS. Snapshots store each frame's actual
+CRS; old overview extents are transformed in memory and fitted to the fixed
+frame when needed. Bounds entry, reset, overlay selection, and final rendering
+use the selected frame CRS. Locator geometry retains its source CRS for QGIS
+on-the-fly transformation; no TIFF or boundary data is reprojected on disk.
+
+Normal BAT/CLI exports keep their project-CRS default. The approved
+`stm_50m_A3_V2.bat` explicitly opts into `MAP_EXPORT_OVERVIEW_CRS=EPSG:4326`.
+Literal BAT importing and resolved rendering metadata support this setting.
+
+Validation: 207 focused checks and all 659 guarded default tests passed;
+659 tests collected safely. Syntax and scoped whitespace checks passed. Only
+editor/exporter source, the experiment BAT, four test modules, and four docs
+were modified; no files were created, moved, or deleted in this follow-up.
+No real QGIS/GDAL, tile service, source drive, production database, `.env`, or
+existing map output was accessed or changed. The white-strip diagnosis remains
+provisional until an operator reopens and exports the design: missing tiles can
+also leave blank areas. Real visual rollout is not marked complete.
+
+## Map editor Windows export fonts and coordinate font control (2026-10-19)
+
+The operator reported black glyph blocks in both exported image and PDF. The
+supplied log repeatedly reported a missing `/fonts` directory; the editor's
+helper had forced Qt `offscreen` on Windows. Helpers now choose native
+`windows` on Windows, preserving non-Windows headless behavior, and an empty
+font database stops an editor export before package/output work.
+
+Added a main-map coordinate-label font size control (1–72 pt; default 6 pt).
+It updates the live adaptive grid, persists in design/options/render metadata,
+and survives navigation, paper changes, and export snapshots. Older version-1
+designs need no migration and receive 6 pt. Legacy CLI grid defaults stay 6 pt.
+
+Validation: 185 focused checks passed, safe collection found 637 tests, and the
+full guarded suite passed 637/637. Syntax and scoped whitespace checks passed.
+The supplied export log/snapshot were read-only; no output, source dataset,
+production database, or `.env` changed. No QGIS/GDAL execution or real visual
+regeneration was performed; the operator must restart and re-export to verify
+the corrected appearance. No files were created, moved, or deleted in this fix.
+
+## Desktop map editor implementation (2026-10-19)
+
+Added `run_map_editor.bat` / `map_editor.py` and a lazy Qt/QGIS fixed-layout
+window. Shared layout construction accepts explicit rendering options and
+uses live inset layers for editing; existing batch exports retain their legacy
+defaults. The editor supports independent pan/zoom/scale/bounds, explicit
+auto-fit, adaptive furniture, text/font/color edits, A3/A4, marker selection,
+safe literal BAT import, and versioned design save/reopen. Inputs remain
+referenced and read-only. One owned helper exports immutable snapshots into
+unique attempt folders; failures/cancellation preserve partial evidence and
+previous exports. Future batch metadata records resolved rendering settings.
+
+Automated validation: 167 focused editor/map/import checks passed; safe
+collection found 619 tests, and the full guarded suite passed 619/619. No
+QGIS/GDAL, GUI, real raster, network share, WebODM, production database, `.env`,
+or destructive production operation was used. Operator instructions and the
+separately authorized visual rollout checklist are in
+`docs/operators/map-editor.md`. Real Qt/QGIS rendering, responsiveness, and
+preview/export appearance remain unvalidated on the operator workstation;
+this does not mark visual rollout or any wider refactor phase complete.
+
 ## Optional Sheets reporter V1 (2026-09-07)
 
 Added an isolated, manually launched reporter for the three approved monitoring
@@ -2518,6 +2601,54 @@ No real pipeline, WebODM request, QGIS/GDAL command, production database,
 production survey data, network share, operator `.env`, or destructive
 operation was used.
 
+## Guarded QGIS tile-rebuild recovery
+
+Date: 2026-09-11.
+
+Resumed QGIS tiling now classifies the two observed unreadable existing-tile
+GDAL signatures as non-transient. The QGIS stage records one diagnostic
+failure rather than spending three attempts on the same damaged tile set.
+
+An opt-in CLI recovery accepts `task2` or `task4` only with resume mode, an
+exact run ID, a failed or incomplete QGIS stage, local staging, and the exact
+run/task confirmation. Immediately before tiling, it verifies the active path
+is the configured run-owned staging target, rejects symlinks, inventories the
+tree, and moves it to a timestamped same-volume quarantine with atomic JSON
+recovery metadata. Fresh tiling then starts with no active tile directory and
+continues to reuse the verified clipped orthomosaic. Quarantine evidence is
+never deleted automatically. Storage-preflight-only reports the plan without
+moving files.
+
+### Validation
+
+- Changed Python compilation passed.
+- Focused QGIS recovery, QGIS command, CLI, and RGBPipeline coverage passed
+  113/113.
+- `python -m pytest --collect-only -q` collected 376 tests.
+- `python -m pytest -q` passed 376/376.
+- Tests used only pytest-owned paths, temporary databases, and mocked QGIS
+  command boundaries.
+
+No real pipeline, QGIS/GDAL process, WebODM request, production database,
+survey data, network share, operator `.env`, or production tile directory was
+accessed or modified.
+
+## Google Sheets sync repository `.env` loading
+
+Date: 2026-09-11.
+
+The manually launched Sheets reporter now loads `<repository>/.env` at its CLI
+entry point before argument defaults read `PIPELINE_SHEET_ID` and
+`PIPELINE_SHEETS_CREDENTIALS`. Importing the module remains side-effect-free,
+and existing process environment variables take precedence. The credentials
+value remains a path to an external service-account JSON file, not embedded
+credential content.
+
+Changed-file compilation passed, focused sync/import/dotenv safety coverage
+passed 31/31, collection found 377 tests, and the full safe suite passed
+377/377. No production `.env`, database, Google endpoint, credentials file, or
+pipeline resource was read or accessed.
+
 ## Guarded resume source-directory rebind
 
 Date: 2026-09-17.
@@ -2528,8 +2659,8 @@ exist and match the persisted dataset identity. In addition to an unchanged
 leaf name, the validator recognizes the narrowly observed corruption where
 underscores in one dataset folder were stored as nested `_...` path
 components. Storage preflight evaluates the proposed source before any write,
-and `--storage-preflight-only` reports the plan without opening a database
-writer.
+and
+`--storage-preflight-only` reports the plan without opening a database writer.
 
 After a passing preflight, the repository atomically checks the source value
 read at startup, updates only `runs.source_dir`, and inserts a completed
@@ -2568,8 +2699,94 @@ copying. `--storage-preflight-only` reports the recovery plan without opening a
 pipeline or writing files.
 
 Changed-file compilation passed, focused recovery/storage/CLI/RGB coverage
-passed 150/150, collection found 387 tests, and the full safe default suite
-passed 387/387. Tests used only pytest-owned paths, temporary SQLite databases,
+passed 157/157, collection found 401 tests, and the full safe default suite
+passed 401/401. Tests used only pytest-owned paths, temporary SQLite databases,
 and fake external boundaries. No real pipeline, production database, survey or
 field-data root, network share, WebODM request, QGIS/GDAL process, or operator
 `.env` was accessed or modified.
+
+## Guarded recovery for a deleted WebODM Task 4 project
+
+Date: 2026-09-18.
+
+Resume now supports an explicit `--recover-missing-webodm-project task4`
+recovery for a persisted Task 4 project that WebODM confirms is missing. The
+operator must force `webodm_task4`, provide the missing project ID, and enter
+the exact run-scoped confirmation phrase. Storage-preflight-only reports the
+plan without contacting WebODM or changing the database.
+
+Execution performs an exact project lookup and proceeds only on a confirmed
+404. Authentication, network, server, malformed-response, identity, existing
+task UUID, and other durable-task conflicts fail closed. Before project
+creation it writes an atomic run-owned recovery receipt. A confirmed new
+project is persisted through append-only binding history and recovery audit
+metadata before the ordinary Task 4 upload/task flow continues. Ambiguous
+creation outcomes block automatic retry so a second project is not created.
+No database schema migration was required.
+
+Changed-file compilation passed, focused WebODM/CLI/RGB recovery coverage
+passed 173/173, collection found 429 tests, and the full safe default suite
+passed 429/429. Tests used only fake WebODM clients, pytest-owned paths, and
+temporary SQLite databases. No real pipeline, WebODM request, production
+database, survey data, network share, QGIS/GDAL process, or operator `.env`
+was accessed or modified.
+
+## Fail-closed raster metadata manifest records
+
+Date: 2026-10-02.
+
+Every WebODM orthomosaic and QGIS-clipped orthomosaic is now inspected with
+the configured `gdalinfo -json` before it can replace the published TIFF. The
+pipeline validates the GeoTIFF driver, dimensions, band types and bit depth,
+software tag, compression, pixel size and unit, and EPSG CRS. It records those
+values under stable task-scoped keys in the existing `rgb/manifest.json`,
+together with the filename, survey-relative path, role, run ID, and file size.
+
+Manifest changes are additive, preserve existing fields, replace a task record
+idempotently, and use a flushed atomic same-directory replacement. A missing,
+malformed, or wrong-survey manifest and missing or malformed required raster
+metadata fail before the published TIFF is replaced. A manifest commit failure
+after a successful mirror is classified as requiring recovery rather than
+success. Existing manifests without `raster_outputs` remain compatible; no
+database schema migration was required. The TIFF bytes themselves are not
+rewritten, so Windows Explorer may still omit properties for large/BigTIFF
+files even though the authoritative metadata is present in the manifest.
+
+Changed Python compilation passed, focused metadata tests passed 11/11, the
+complete RGB single-stage regression file passed 92/92, collection found 441
+tests, and the full safe default suite passed 441/441. Tests used only
+pytest-owned paths, temporary SQLite databases, fake WebODM clients, and fake
+GDAL/QGIS boundaries. No real pipeline, QGIS/GDAL executable, WebODM request,
+production database, survey data, network share, or operator `.env` was
+accessed or modified.
+
+## Guarded recovery for a never-created combined-run Task 2
+
+Date: 2026-10-14.
+
+Combined-run resume now supports an explicit
+`--recover-missing-webodm-task task2` path when Task 4 is already durably bound
+and completed but Task 2 was never created. It requires resume, both-task mode,
+a forced `webodm_task2` attempt, the exact persisted project ID, and the
+run-scoped phrase `CREATE TASK2 IN WEBODM PROJECT <project-id> FOR RUN
+<run-id>`. Plan-only mode reports the authorization without contacting WebODM
+or opening a database writer.
+
+Execution lists the complete task set for the exact project and proceeds only
+when it contains exactly the locally bound Task 4 UUID and name, with completed
+local and remote status. Extra, missing, malformed, mismatched, or incomplete
+tasks and all lookup failures stop before upload. Authorization is recorded in
+append-only binding audit history before creation, and the normal Task 2 path
+persists the returned UUID immediately. Ordinary resume remains fail-closed.
+The exact-UUID binding repair tool now accepts Task 2 for ambiguous-create
+recovery. No schema migration was required.
+
+Changed-file compilation passed, the complete CLI/WebODM recovery files passed
+89/89, focused pipeline recovery cases passed 8/8, and collection found 456
+tests. The full safe suite passed 431/456; all 25 failures were existing
+storage-capacity checks because the workstation had about 6.54 GiB free on
+`C:` while the configured reserve requires 10 GiB. The new fake-WebODM
+recovery cases passed. Tests used only temporary SQLite databases, pytest-owned
+paths, and fake WebODM clients. No real pipeline, WebODM request, production
+database, survey data, network share, QGIS/GDAL process, or operator `.env`
+was accessed or modified.

@@ -1,5 +1,53 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Upper inset marker coverage (2026-10-19)
+
+New checks cover upper-pin editor defaults, explicit boundary metadata/design
+preservation, literal BAT pin importing, export snapshot transfer, and upper BAT
+marker selection in both live and final rendering (including invalid/unset
+fallback and resolved metadata). Existing pin geometry and fixed print-size
+checks remain in place. The focused set passes 220 tests, the safe suite passes
+672 tests, and collection finds 672 tests. QGIS/Qt/process boundaries stay mocked;
+no fixture, test level, or external permission changes were introduced.
+
+## Lower overview CRS coverage (2026-10-19)
+
+Mocked regression tests cover independent lower-frame CRS routing in live and
+final rendering; matching basemap/overlay CRS and extent; legacy batch defaults
+and invalid-value fallback; literal BAT CRS import; mixed-CRS design round trips;
+legacy saved-extent transformation and frame fitting without state mutation;
+per-frame snapshots, bounds, pins, reset, UI selection, and exact helper export
+state. Existing pin tests ensure source geometry retains its original CRS.
+The focused map/editor/import set passes 207 tests; the safe default suite and
+collection pass 659 tests. No new fixture, test level, dependency, or external
+permission is introduced. Actual tile coverage and preview-to-PDF alignment
+require the separately authorized operator visual check.
+
+## Desktop map editor validation (2026-10-19)
+
+Follow-up font coverage verifies Windows native Qt backend selection and QProcess
+environment wiring, empty-font refusal before package/output work, fractional
+coordinate-font sizes in grid rendering, UI updates, saved-design/legacy defaults,
+paper/navigation persistence, and transfer into export snapshots. All use mocked
+Qt/QGIS. The focused editor/map set passes 185 checks; safe collection and the
+full default suite pass 637 checks. Actual font appearance still requires the
+separately authorized visual rollout check.
+
+The editor model/session/window tests use pytest-owned map packages with tiny
+placeholder TIFFs, fake QGIS layouts, mocked Qt widgets/events, and injected
+process objects. They do not initialize Qt/QGIS or spawn a helper. Coverage
+includes literal-only BAT import, precedence, versioned design round trips,
+source-package write refusal, independent navigation, explicit auto-fit,
+text/paper/marker updates, live inset rendering without image writes, furniture
+refresh, unsaved-change prompts, immutable snapshots, one-process ownership,
+cancellation, and preservation of source/previous outputs on failure.
+
+Run `python -m pytest tests/test_map_editor_model.py tests/test_map_editor_session.py
+tests/test_map_editor_window.py tests/test_qgis_print_exporter_config.py -q`
+(one command line). Existing safety fixtures/guards and external-test exclusions
+remain unchanged. The separately authorized operator visual checklist is in
+`docs/operators/map-editor.md`; mocked checks do not replace that rollout check.
+
 ## Optional Sheets reporter tests (2026-09-07)
 
 `tests/test_sheet_sync.py` uses existing temporary SQLite and safety fixtures
@@ -7,6 +55,8 @@ plus fake Google sessions. Coverage includes sparse field ownership, formula
 preservation, duplicate and legacy identity refusal, resume/historical
 selection, persisted catch-up after response loss, nested timing accounting,
 local process locking, bounded reads, and literal (non-formula) writes.
+It also proves the CLI invokes an injected environment loader before parsing
+and that the real loader targets the repository `.env` with override disabled.
 Run with `python -m pytest -q tests/test_sheet_sync.py`. No new fixture guard,
 test marker, Google credentials, or external integration test is required.
 Windows launcher and real workbook-copy validation remain operator rollout checks.
@@ -1346,6 +1396,35 @@ passed 342/342. No real pipeline, WebODM, QGIS/GDAL, production database,
 survey data, network share, operator `.env`, or destructive operation was
 used.
 
+## Guarded QGIS tile-rebuild recovery coverage
+
+Added on 2026-09-11, recovery tests use pytest-owned tile trees, temporary
+SQLite databases, fixed clocks, and fake QGIS command runners.
+
+Coverage proves:
+
+- exact run/task confirmation and supported task validation;
+- exact configured-path containment and symlink refusal before mutation;
+- timestamped same-volume quarantine, file/byte inventory, and atomic JSON
+  metadata;
+- rollback to the original active path when metadata persistence fails;
+- storage-preflight-only reports a plan without constructing the pipeline or
+  moving files;
+- a completed QGIS stage rejects rebuild authorization;
+- a valid CLI request reaches the pipeline unchanged;
+- known corrupt-resume signatures produce a typed diagnostic with one tiling
+  attempt despite the normal three-attempt stage policy;
+- guarded recovery starts clean tiling with `resume=False` and preserves the
+  quarantine record in stage output; and
+- ordinary resume and existing QGIS behavior remain covered by the broader
+  regression files.
+
+Changed-file compilation passed, focused validation passed 113/113, collection
+found 376 tests, and the complete safe default suite passed 376/376. No real
+pipeline, QGIS/GDAL executable, WebODM endpoint,
+production database, survey root, network share, or operator configuration is
+used by these tests.
+
 ## Guarded resume source-directory rebind coverage
 
 Added on 2026-09-17, source-rebind tests use pytest-owned directories,
@@ -1382,7 +1461,86 @@ audited stage ordering before the forced filter, and startup/runtime storage
 capacity accounting.
 
 Changed-file compilation passed, the complete focused recovery, storage, CLI,
-resume, and RGB orchestration files passed 150/150, collection found 387 tests,
-and the full safe default suite passed 387/387. No external service, subprocess,
+resume, and RGB orchestration files passed 157/157, collection found 401 tests,
+and the full safe default suite passed 401/401. No external service, subprocess,
 production database, real dataset, survey/network root, or operator
 configuration was used.
+
+## Confirmed-deleted WebODM project recovery coverage
+
+Added on 2026-09-18, missing-project recovery tests use fake WebODM clients,
+pytest-owned checkpoint paths, and temporary SQLite databases. Coverage proves:
+
+- exact CLI confirmation, resume, forced Task 4, mode, and project-ID gating;
+- storage-preflight-only reports a plan without constructing the pipeline or
+  contacting WebODM;
+- an exact project lookup must return 404, while authentication, network,
+  server, malformed-payload, and mismatched-ID responses fail closed;
+- an existing project, existing Task 4 UUID, or conflicting durable task
+  refuses replacement;
+- project creation is recorded by an atomic run-owned receipt before binding
+  mutation, and an ambiguous create blocks duplicate automatic creation;
+- a verified `project_created` receipt can reconcile the binding without
+  creating another project;
+- placeholder legacy task bindings are rebound consistently so later resume
+  restores one canonical replacement project; and
+- successful recovery appends binding/audit history and then creates exactly
+  one normal Task 4 task.
+
+Changed-file compilation passed, focused validation passed 173/173, collection
+found 429 tests, and the full safe default suite passed 429/429. No real
+WebODM endpoint, pipeline, production database, survey/network root,
+QGIS/GDAL process, or operator configuration was used.
+
+## Raster metadata manifest coverage
+
+Added on 2026-10-02, raster metadata tests use placeholder TIFF files under
+pytest-owned temporary directories and injected `gdalinfo` results. No test
+executes GDAL or reads a real raster.
+
+Coverage proves:
+
+- `gdalinfo -json` fields map to program name, dimensions, width, height,
+  band count, per-channel and total bit depth, compression, signed pixel size,
+  pixel-size unit, EPSG CRS, band details, and file size;
+- absent required fields, unsupported band types, unreadable rasters, invalid
+  JSON, and GDAL failures fail closed while preserving exception causes;
+- manifest updates preserve unrelated survey fields, validate survey identity,
+  remain idempotent by task key, and use atomic replacement without stale temp
+  files;
+- WebODM records metadata before publishing an orthomosaic, and QGIS records
+  both the selected source and task-scoped clipped orthomosaic;
+- a clipped-raster metadata failure leaves the previous published TIFF intact
+  and prevents tile generation; and
+- existing orthomosaic, resume, multi-task, clipping, and mirroring behavior
+  remains covered by the complete RGB single-stage regression file.
+
+Changed Python compilation passed, focused metadata tests passed 11/11, the RGB
+single-stage file passed 92/92, collection found 441 tests, and the complete
+safe default suite passed 441/441.
+
+## Missing combined-run Task 2 recovery coverage
+
+Added on 2026-10-14, these tests use temporary SQLite databases,
+pytest-owned paths, and a fake WebODM processor. Coverage proves:
+
+- CLI and programmatic entry points require resume, both-task mode, forced
+  `webodm_task2`, a positive project ID, and the exact run-scoped confirmation;
+- storage-preflight-only is a non-mutating plan and does not construct the
+  pipeline or contact WebODM;
+- recovery creates exactly one Task 2 only when the complete remote task list
+  contains exactly the bound, completed Task 4 with matching UUID and name;
+- extra, missing, malformed, mismatched, or non-completed remote task state
+  refuses creation;
+- authorization audit evidence is durable before creation and the existing
+  Task 4 binding is preserved; and
+- exact-UUID repair planning supports both Task 2 and Task 4 without replacing
+  binding history.
+
+Changed-file compilation passed, the complete CLI/WebODM recovery files passed
+89/89, focused pipeline recovery cases passed 8/8, and collection found 456
+tests. The full safe suite passed 431/456; all 25 failures were existing
+free-space checks because the workstation's `C:` drive had about 6.54 GiB
+available against the configured 10 GiB reserve. No real service, subprocess,
+production database, dataset, survey/network root, or operator configuration
+was used.

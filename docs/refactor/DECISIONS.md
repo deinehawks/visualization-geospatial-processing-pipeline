@@ -1,5 +1,41 @@
 # Architectural Decision Log
 
+## Lower overview frame CRS - accepted follow-up (2026-10-19)
+
+The operator approved trying geographic WGS 84 for the national overview after
+a Philippines inset rendered a white strip in the local projected map CRS.
+The editor lower inset supports EPSG:4326 (new editor default) or the main map's
+CRS. Do not switch the main orthomosaic, upper inset, or source datasets, and do
+not use EPSG:3857 as the output frame CRS. The tiled basemap keeps its native
+source CRS and QGIS transforms layers for display.
+
+Version-1 designs remain readable. Missing overview CRS settings take the editor
+default; legacy projected extents are transformed, not reinterpreted as degrees.
+Each new snapshot records the actual per-frame CRS. Basemap pictures and live
+overlays use the same destination CRS and extent in export. Normal batch defaults
+remain unchanged, with an explicit environment opt-in for the experiment BAT.
+Rollback is selecting Same as main map or setting the BAT value to `project`;
+the original design/output files and source data remain untouched unless the
+operator explicitly saves a design. This is a targeted rendering change, not
+proof of the original gap's cause; real visual confirmation remains pending.
+
+## Desktop map editor — accepted scope (2026-10-19)
+
+The operator approved a single-PC fixed-layout editor using the installed QGIS
+and Qt runtime. Share layout construction through explicit render options while
+preserving legacy CLI/BAT defaults. Editor layouts use separate QGIS projects
+and live inset layers; final exports regenerate inset images using the captured
+extents. Opening packages is read-only and never invokes package creation,
+SQLite, WebODM, or `.env` loading. Versioned designs reference existing inputs;
+BAT import parses whitelisted literals without interpretation. Each export has
+an immutable snapshot and unique output directory, in one owned helper process.
+Cancellation targets that process only. Failed/partial attempts are preserved.
+
+No new dependencies, database changes, general layout designer, automatic
+cleanup, TIFF copying, or pipeline execution are included. Real QGIS/Qt visual
+rollout validation remains separately authorized; mocked tests cannot establish
+interactive rendering correctness on the operator workstation.
+
 ## Google Sheets reporter V1 — accepted implementation scope (2026-09-07)
 
 The operator approved a manually launched, single-PC, read-only SQLite reporter
@@ -85,7 +121,9 @@ These entries identify required decisions without selecting final architectures.
 
 ## Decision index
 
-ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018, ADR-019, ADR-020, ADR-021, ADR-022, ADR-023, and ADR-024 are accepted. ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become **Proposed** only when a concrete option is prepared for review.
+ADR-001, ADR-002, ADR-003, and ADR-013 through ADR-036 are accepted.
+ADR-004 through ADR-012 remain unresolved and must remain **Pending** or become
+**Proposed** only when a concrete option is prepared for review.
 
 ### ADR-003 - Separate run-owned workspace from published survey artifacts
 
@@ -708,3 +746,161 @@ ADR-001, ADR-002, ADR-003, ADR-013, ADR-014, ADR-015, ADR-016, ADR-017, ADR-018,
   availability. Existing Task 2 behavior and database schemas are unchanged.
 - **Related files or issues:** `main.py`; `shared/storage_preflight.py`;
   `pipelines/rgb_pipeline.py`; ADR-023; ADR-027; CW-ADR-011.
+
+### ADR-033 - Quarantine corrupt resumed QGIS tiles before an explicit rebuild
+
+- **Decision ID:** ADR-033
+- **Date:** 2026-09-11
+- **Status:** Accepted and implemented.
+- **Approval context:** The operator approved a narrowly scoped recovery for a
+  production resume that repeatedly reused an unreadable partial tile during
+  GDAL overview generation.
+- **Decision:**
+  - Keep ordinary fresh runs and resumes unchanged.
+  - Recognize the two observed GDAL unreadable-tile signatures only when
+    resume mode found existing tiles, and record one non-retryable diagnostic
+    failure containing the exact recovery confirmation.
+  - Require `--resume`, an exact run ID, a failed or incomplete QGIS stage,
+    local QGIS staging, `--rebuild-qgis-tiles task2|task4`, and an exact
+    run/task-bound confirmation before recovery can mutate files.
+  - Resolve the active tile directory to the exact configured
+    staging/run/task/mode target, reject symlinks and path mismatches, and move
+    the whole directory to a timestamped same-volume quarantine.
+  - Preserve an atomic JSON recovery record with source and quarantine paths,
+    confirmation, file count, byte count, task, run, mode, and UTC timestamp.
+  - Generate replacement tiles from an empty active target while reusing the
+    already verified clipped orthomosaic. Never delete quarantine evidence
+    automatically.
+  - Make storage-preflight-only validate and report the authorization without
+    moving the tile directory.
+- **Alternatives considered:** Validate every existing PNG before resume;
+  delete the one reported tile; delete the entire tile tree automatically; or
+  retain generic three-attempt QGIS retries. Full validation is expensive and
+  still race-prone, single-file repair may miss other partial tiles, deletion
+  loses evidence, and generic retries deterministically reuse corruption.
+- **Consequences:** Recovery is deliberate, auditable, and rollback evidence
+  is retained, but quarantine temporarily doubles tile storage and the clean
+  production rebuild remains operator-run and potentially long-running.
+- **Related files or issues:** `shared/qgis_tile_recovery.py`;
+  `modules/qgis/qgis_tools.py`; `pipelines/rgb_pipeline.py`; `main.py`;
+  ADR-008; ADR-027.
+
+### ADR-034 - Replace a confirmed-deleted WebODM Task 4 project explicitly
+
+- **Decision ID:** ADR-034
+- **Date:** 2026-09-18
+- **Status:** Accepted and implemented.
+- **Approval context:** The operator approved a guarded recovery for an
+  existing run whose persisted Task 4 project no longer exists in WebODM.
+- **Decision:**
+  - Keep ordinary resume exact-project/exact-task only and unchanged.
+  - Require resume mode, Task 4-only mode, forced `webodm_task4`, the exact
+    persisted project ID, and the run-bound phrase `CREATE REPLACEMENT WEBODM
+    PROJECT FOR MISSING PROJECT <project-id> FOR RUN <run-id>`.
+  - Fetch the exact project and authorize replacement only for an
+    authenticated `404`; authentication, permission, network, server, and
+    malformed-response failures remain indeterminate and fail closed.
+  - Refuse replacement when Task 4 or another operation has a durable task
+    UUID. Permit project-only legacy placeholders, then append replacement
+    placeholder bindings so later resume observes one canonical project.
+  - Write an atomic run-scoped recovery receipt before project creation,
+    record the returned replacement ID before binding changes, and block
+    blind retries after an ambiguous create response.
+  - Append the replacement and previous identity to binding audit history;
+    never delete the old binding, a possible remote project, or a task.
+  - Continue through the normal Task 4 creation path only after the
+    replacement binding is durable.
+- **Alternatives considered:** Start a new run; manually edit SQLite and the
+  JSON checkpoint; treat any project lookup failure as absence; or retry
+  project creation without durable intent. These either abandon the required
+  run identity or risk duplicate/untraceable remote projects.
+- **Consequences:** A confirmed-deleted project can be recovered without a
+  schema migration. The operation creates a real remote project and may then
+  upload imagery. An ambiguous creation is intentionally blocked for manual
+  review rather than retried automatically.
+- **Related files or issues:** `main.py`;
+  `modules/webodm/webodm_processor.py`; `pipelines/rgb_pipeline.py`;
+  `docs/operators/webodm-resume.md`; ADR-030; CW-ADR-008; CW-ADR-009.
+
+### ADR-035 - Publish required raster metadata in the survey manifest
+
+- **Decision ID:** ADR-035
+- **Date:** 2026-10-02
+- **Status:** Accepted and implemented.
+- **Approval context:** The operator approved an additive manifest schema and
+  fail-closed validation after Windows Explorer omitted standard properties for
+  large orthomosaic and clipped-orthomosaic TIFFs even though GDAL could read
+  their metadata.
+- **Decision:**
+  - Treat configured `gdalinfo -json` output as the authoritative inspection
+    boundary for every WebODM and QGIS-clipped orthomosaic, regardless of file
+    size.
+  - Require a GeoTIFF driver, positive dimensions, readable homogeneous band
+    bit depth, `TIFFTAG_SOFTWARE`, compression (defaulting valid uncompressed
+    output to `NONE`), nonzero pixel sizes, a supported coordinate-system unit,
+    and an identifiable EPSG CRS.
+  - Store an additive task-scoped record in `rgb/manifest.json` containing the
+    requested metadata plus filename, relative path, role, run ID, band detail,
+    driver, and file size. Preserve unrelated manifest fields and replace the
+    same stable key idempotently.
+  - Validate both raster metadata and manifest survey identity before replacing
+    a published TIFF. Commit the manifest through a flushed same-directory
+    temporary file and atomic replace. If commit fails after the TIFF mirror,
+    mark the stage as requiring recovery.
+  - Accept existing manifests without `raster_outputs`; require the existing
+    manifest itself and do not introduce a database migration or rewrite TIFF
+    bytes merely to influence Windows Explorer.
+- **Alternatives considered:** Rely on Windows Explorer; write Windows DPI tags
+  into each TIFF; create a separate metadata sidecar per raster; or continue
+  publishing when inspection fails. Explorer is not a reliable BigTIFF
+  inspector, print DPI is not geospatial pixel resolution, separate sidecars
+  fragment survey metadata, and permissive publication cannot guarantee the
+  requested fields.
+- **Consequences:** Orthomosaic publication now requires working configured
+  GDAL inspection and a valid survey manifest. Older manifests remain readable,
+  and removing the new runtime calls rolls behavior back without a schema
+  downgrade; already written `raster_outputs` fields are additive and harmless
+  to older readers. Atomic replacement prevents truncated JSON, but concurrent
+  same-survey read-modify-write ownership remains governed by the broader
+  publication/concurrency work.
+- **Related files or issues:** `shared/raster_metadata.py`;
+  `pipelines/rgb_pipeline.py`; `tests/test_raster_metadata.py`;
+  `tests/test_rgb_pipeline_single_stage_execution.py`; ADR-005; ADR-008;
+  ADR-013.
+
+### ADR-036 - Create a missing Task 2 only after exact combined-run proof
+
+- **Decision ID:** ADR-036
+- **Date:** 2026-10-14
+- **Status:** Accepted and implemented.
+- **Approval context:** The operator approved a recovery path for an existing
+  combined run whose Task 4 completed but whose Task 2 was never created.
+- **Decision:**
+  - Keep ordinary resume fail-closed when a requested operation has no durable
+    task UUID.
+  - Require resume, both-task mode, forced `webodm_task2`, the exact project
+    ID, and the run-bound phrase `CREATE TASK2 IN WEBODM PROJECT <project-id>
+    FOR RUN <run-id>`.
+  - Fetch the complete project task list immediately before upload and permit
+    creation only when it contains exactly the locally bound Task 4 UUID and
+    name with completed local and remote status.
+  - Treat extra, absent, malformed, mismatched, incomplete, or indeterminate
+    remote state as a refusal; never adopt a task by name or delete/restart the
+    existing Task 4.
+  - Persist recovery authorization in binding audit history before entering
+    the normal Task 2 create path, then persist the returned UUID immediately.
+  - Extend exact-UUID binding repair to Task 2 so an ambiguous create can be
+    reconciled without repeating the non-idempotent create call.
+  - Keep storage-preflight-only local and non-mutating. Do not introduce a
+    schema migration.
+- **Alternatives considered:** Start a new Task 2-only run; edit SQLite and the
+  checkpoint manually; infer absence from the local binding alone; or create
+  whenever no matching Task 2 name is found. These lose combined-run lineage
+  or risk duplicate remote work when project enumeration is incomplete.
+- **Consequences:** The narrow Task4-complete/Task2-never-created state is
+  recoverable under the original run ID. The execution command performs one
+  real upload and task creation after exact proof; an ambiguous result requires
+  inspection and exact-UUID repair rather than automatic retry.
+- **Related files or issues:** `main.py`; `pipelines/rgb_pipeline.py`;
+  `tools/repair_webodm_binding.py`; `docs/operators/webodm-resume.md`;
+  ADR-026; ADR-030; ADR-034.
