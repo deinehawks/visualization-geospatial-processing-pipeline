@@ -14,6 +14,7 @@ from shared.config import load_pipeline_config
 from shared.db.repo import PipelineRepo
 from shared.paths import db_path
 from shared.artifacts import RUN_WORKSPACE_OWNERSHIP_NAME
+from shared.qgis_tile_recovery import qgis_tile_rebuild_confirmation
 from shared.raw_input_recovery import raw_input_recovery_confirmation
 from shared.storage_preflight import (
     StorageCapacityError,
@@ -331,13 +332,14 @@ def main() -> None:
             "kml_boundary",
             "webodm",
             "webodm_task4",
+            "webodm_task2",
             "quality_gate",
             "qgis",
             "activate_publication",
         ],
         help=(
             "Force a completed stage to rerun during resume. "
-            "webodm_task4 reconciles/downloads the existing Task 4. "
+            "webodm_task4 and webodm_task2 target one WebODM operation. "
             "Can be used multiple times."
         ),
     )
@@ -433,6 +435,67 @@ def main() -> None:
             'PROJECT <project-id> FOR RUN <run-id>".'
         ),
     )
+    parser.add_argument(
+        "--recover-missing-webodm-project",
+        choices=["task4"],
+        default=None,
+        help=(
+            "Explicitly authorize replacement of a persisted Task 4 project "
+            "only after WebODM confirms that the exact project is missing."
+        ),
+    )
+    parser.add_argument(
+        "--missing-webodm-project-id",
+        type=int,
+        default=None,
+        help="Persisted WebODM project ID expected to be missing.",
+    )
+    parser.add_argument(
+        "--missing-webodm-recovery-confirmation",
+        default=None,
+        help=(
+            'Exact phrase required: "CREATE REPLACEMENT WEBODM PROJECT FOR '
+            'MISSING PROJECT <project-id> FOR RUN <run-id>".'
+        ),
+    )
+    parser.add_argument(
+        "--recover-missing-webodm-task",
+        choices=["task2"],
+        default=None,
+        help=(
+            "Explicitly authorize creation of a never-created Task 2 in an "
+            "existing combined-mode project after exact Task 4 verification."
+        ),
+    )
+    parser.add_argument(
+        "--webodm-task-recovery-project-id",
+        type=int,
+        default=None,
+        help="Persisted WebODM project ID expected by missing-task recovery.",
+    )
+    parser.add_argument(
+        "--webodm-task-recovery-confirmation",
+        default=None,
+        help=(
+            'Exact phrase required: "CREATE TASK2 IN WEBODM PROJECT '
+            '<project-id> FOR RUN <run-id>".'
+        ),
+    )
+
+    parser.add_argument(
+        '--rebuild-qgis-tiles',
+        choices=['task2', 'task4'],
+        default=None,
+        metavar='TASK',
+        help='Quarantine and rebuild one failed run-owned QGIS tile set.',
+    )
+    parser.add_argument(
+        '--qgis-tile-rebuild-confirmation',
+        default=None,
+        help=(
+            'Exact phrase required: REBUILD QGIS TILES <task> FOR RUN <run-id>.'
+        ),
+    )
 
     # WebODM task mode: mutually exclusive flags
     task_group = parser.add_mutually_exclusive_group()
@@ -503,6 +566,23 @@ def main() -> None:
                 "--raw-recovery-confirmation must exactly match: "
                 f"{expected_raw_confirmation!r}"
             )
+    if args.qgis_tile_rebuild_confirmation and not args.rebuild_qgis_tiles:
+        parser.error(
+            '--qgis-tile-rebuild-confirmation requires --rebuild-qgis-tiles'
+        )
+    if args.rebuild_qgis_tiles:
+        if not args.resume:
+            parser.error('--rebuild-qgis-tiles requires --resume')
+        expected_qgis_confirmation = qgis_tile_rebuild_confirmation(
+            args.run_id,
+            args.rebuild_qgis_tiles,
+        )
+        if args.qgis_tile_rebuild_confirmation != expected_qgis_confirmation:
+            parser.error(
+                '--qgis-tile-rebuild-confirmation must exactly match: '
+                f'{expected_qgis_confirmation!r}'
+            )
+
     recovery_companions_present = bool(
         args.webodm_recovery_project_id is not None
         or args.webodm_recovery_confirmation
@@ -537,6 +617,109 @@ def main() -> None:
                 f"{expected_recovery_confirmation!r}"
             )
 
+    missing_recovery_companions_present = bool(
+        args.missing_webodm_project_id is not None
+        or args.missing_webodm_recovery_confirmation
+    )
+    if (
+        missing_recovery_companions_present
+        and not args.recover_missing_webodm_project
+    ):
+        parser.error(
+            "--missing-webodm-project-id and "
+            "--missing-webodm-recovery-confirmation require "
+            "--recover-missing-webodm-project"
+        )
+    if (
+        args.recover_missing_webodm_project
+        and args.recover_empty_webodm_project
+    ):
+        parser.error(
+            "--recover-missing-webodm-project cannot be combined with "
+            "--recover-empty-webodm-project"
+        )
+    if args.recover_missing_webodm_project:
+        if not args.resume:
+            parser.error("--recover-missing-webodm-project requires --resume")
+        if args.missing_webodm_project_id is None:
+            parser.error(
+                "--missing-webodm-project-id is required when using "
+                "--recover-missing-webodm-project"
+            )
+        if args.missing_webodm_project_id <= 0:
+            parser.error("--missing-webodm-project-id must be positive")
+        if "webodm_task4" not in set(args.force_stage or []):
+            parser.error(
+                "--recover-missing-webodm-project task4 requires "
+                "--force-stage webodm_task4"
+            )
+        if args.task2 or args.both_tasks:
+            parser.error(
+                "--recover-missing-webodm-project requires Task 4-only mode"
+            )
+        expected_missing_confirmation = (
+            "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+            f"{args.missing_webodm_project_id} FOR RUN {args.run_id}"
+        )
+        if (
+            args.missing_webodm_recovery_confirmation
+            != expected_missing_confirmation
+        ):
+            parser.error(
+                "--missing-webodm-recovery-confirmation must exactly match: "
+                f"{expected_missing_confirmation!r}"
+            )
+
+    missing_task_companions_present = bool(
+        args.webodm_task_recovery_project_id is not None
+        or args.webodm_task_recovery_confirmation
+    )
+    if missing_task_companions_present and not args.recover_missing_webodm_task:
+        parser.error(
+            "--webodm-task-recovery-project-id and "
+            "--webodm-task-recovery-confirmation require "
+            "--recover-missing-webodm-task"
+        )
+    if args.recover_missing_webodm_task:
+        if not args.resume:
+            parser.error("--recover-missing-webodm-task requires --resume")
+        if not args.both_tasks:
+            parser.error(
+                "--recover-missing-webodm-task task2 requires --both-tasks"
+            )
+        if "webodm_task2" not in set(args.force_stage or []):
+            parser.error(
+                "--recover-missing-webodm-task task2 requires "
+                "--force-stage webodm_task2"
+            )
+        if args.webodm_task_recovery_project_id is None:
+            parser.error(
+                "--webodm-task-recovery-project-id is required when using "
+                "--recover-missing-webodm-task"
+            )
+        if args.webodm_task_recovery_project_id <= 0:
+            parser.error("--webodm-task-recovery-project-id must be positive")
+        if (
+            args.recover_empty_webodm_project
+            or args.recover_missing_webodm_project
+        ):
+            parser.error(
+                "--recover-missing-webodm-task cannot be combined with another "
+                "WebODM creation recovery"
+            )
+        expected_missing_task_confirmation = (
+            "CREATE TASK2 IN WEBODM PROJECT "
+            f"{args.webodm_task_recovery_project_id} FOR RUN {args.run_id}"
+        )
+        if (
+            args.webodm_task_recovery_confirmation
+            != expected_missing_task_confirmation
+        ):
+            parser.error(
+                "--webodm-task-recovery-confirmation must exactly match: "
+                f"{expected_missing_task_confirmation!r}"
+            )
+
     config: dict[str, Any] = load_pipeline_config()
     base_dir = Path(".")
     database_path = db_path(base_dir)
@@ -560,6 +743,12 @@ def main() -> None:
             selected_run_id,
         )
 
+    if args.rebuild_qgis_tiles:
+        qgis_status = latest_stage_statuses.get('qgis')
+        if qgis_status == 'completed':
+            parser.error(
+                '--rebuild-qgis-tiles requires a failed or incomplete QGIS stage'
+            )
     if (
         args.recover_missing_raw
         and latest_stage_statuses.get("data_segregation") != "completed"
@@ -629,6 +818,11 @@ def main() -> None:
         else upload_cache_root / "qgis-staging"
     )
     storage_config = config.get("storage") or {}
+    if args.rebuild_qgis_tiles and not bool(
+        qgis_local_staging.get('enabled', True)
+    ):
+        parser.error('--rebuild-qgis-tiles requires QGIS local staging')
+
     storage_stage_needs = resolve_storage_stage_needs(
         resume=args.resume,
         latest_stage_statuses=latest_stage_statuses,
@@ -684,6 +878,16 @@ def main() -> None:
             "Source rebind: "
             f"{run_record['source_dir']} -> {source_dir} ({action})"
         )
+    if args.rebuild_qgis_tiles:
+        action = (
+            'PLAN ONLY - no files moved'
+            if args.storage_preflight_only
+            else 'AUTHORIZED - applies immediately before tiling'
+        )
+        print(
+            'QGIS tile rebuild: '
+            f'{args.rebuild_qgis_tiles} ({action})'
+        )
     if args.recover_missing_raw:
         action = (
             "PLAN ONLY - no files copied"
@@ -691,6 +895,26 @@ def main() -> None:
             else "AUTHORIZED - runs before cross_run_filter"
         )
         print(f"Raw-input recovery: {action}")
+    if args.recover_missing_webodm_project:
+        action = (
+            "PLAN ONLY - WebODM and database unchanged"
+            if args.storage_preflight_only
+            else "AUTHORIZED - verifies absence before replacement"
+        )
+        print(
+            "Missing WebODM project recovery: "
+            f"task4 project {args.missing_webodm_project_id} ({action})"
+        )
+    if args.recover_missing_webodm_task:
+        action = (
+            "PLAN ONLY - WebODM and database unchanged"
+            if args.storage_preflight_only
+            else "AUTHORIZED - verifies Task 4 and project tasks before upload"
+        )
+        print(
+            "Missing WebODM task recovery: "
+            f"task2 project {args.webodm_task_recovery_project_id} ({action})"
+        )
     if args.storage_preflight_only:
         return
 
@@ -756,6 +980,34 @@ def main() -> None:
                     "confirmation": args.webodm_recovery_confirmation,
                 }
                 if args.recover_empty_webodm_project
+                else None
+            ),
+            missing_webodm_project_recovery=(
+                {
+                    "operation": args.recover_missing_webodm_project,
+                    "project_id": args.missing_webodm_project_id,
+                    "confirmation": (
+                        args.missing_webodm_recovery_confirmation
+                    ),
+                }
+                if args.recover_missing_webodm_project
+                else None
+            ),
+            missing_webodm_task_recovery=(
+                {
+                    "operation": args.recover_missing_webodm_task,
+                    "project_id": args.webodm_task_recovery_project_id,
+                    "confirmation": args.webodm_task_recovery_confirmation,
+                }
+                if args.recover_missing_webodm_task
+                else None
+            ),
+            qgis_tile_rebuild=(
+                {
+                    'task_key': args.rebuild_qgis_tiles,
+                    'confirmation': args.qgis_tile_rebuild_confirmation,
+                }
+                if args.rebuild_qgis_tiles
                 else None
             ),
             raw_input_recovery=(

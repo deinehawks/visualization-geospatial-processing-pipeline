@@ -78,6 +78,90 @@ path then stages imagery, creates one task, and persists its UUID. If task
 creation returns ambiguously, do not repeat ordinary creation or delete the
 project; inspect WebODM and repair the exact UUID if a task appeared.
 
+## Recover a persisted project that was deleted
+
+This is different from empty-project recovery. Use it only when the exact
+persisted Task 4 project returns an authenticated WebODM `404`, the binding has
+no Task 4 UUID, and no other operation has a durable task UUID.
+
+Start with a local storage/authorization plan. It does not contact WebODM,
+create a project, upload images, or update the database:
+
+```powershell
+python main.py ... `
+  --resume `
+  --run-id <run-id> `
+  --force-stage webodm_task4 `
+  --recover-missing-webodm-project task4 `
+  --missing-webodm-project-id <missing-project-id> `
+  --missing-webodm-recovery-confirmation "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT <missing-project-id> FOR RUN <run-id>" `
+  --storage-preflight-only
+```
+
+After reviewing the plan, remove `--storage-preflight-only` to execute. The
+pipeline authenticates with WebODM and fetches the exact old project first. It
+creates one replacement only for a confirmed `404`. An existing project,
+authentication/permission failure, timeout, connection failure, server error,
+malformed response, conflicting local identity, existing Task 4 UUID, or
+durable Task 1/2 UUID stops before project creation.
+
+Before the non-idempotent WebODM create call, the pipeline atomically writes
+`webodm_project_recovery_<run-id>.json` in the checkpoint directory. After a
+successful response it records the returned project ID in that receipt, then
+appends replacement bindings and audit evidence without deleting the old
+binding history. Project-only legacy Task 1/2 placeholders are rebound to keep
+future resume identity consistent; they never authorize Task 1/2 creation.
+
+If the process stops after receiving the new project ID but before the binding
+is durable, repeat the same command. It reuses the receipt only after the exact
+replacement project exists, has the expected name, and contains zero tasks. If
+creation returns ambiguously, the receipt is marked `creation_ambiguous` and
+automatic retries are blocked. Inspect WebODM and the receipt before any
+further recovery; never delete a possible replacement or retry project
+creation blindly.
+
+After the replacement binding is durable, Task 4 follows the normal guarded
+creation path and persists its UUID immediately. Ordinary resume behavior is
+unchanged when the missing-project recovery flags are absent. Empty-project
+and missing-project recovery flags are mutually exclusive.
+
+## Recover Task 2 when Task 4 already exists
+
+Use this only for a combined run where Task 4 is durably bound and completed,
+but the process stopped before Task 2 was created. Start with a plan-only
+command:
+
+```powershell
+python main.py ... `
+  --both-tasks `
+  --resume `
+  --run-id <run-id> `
+  --force-stage webodm_task2 `
+  --recover-missing-webodm-task task2 `
+  --webodm-task-recovery-project-id <project-id> `
+  --webodm-task-recovery-confirmation "CREATE TASK2 IN WEBODM PROJECT <project-id> FOR RUN <run-id>" `
+  --storage-preflight-only
+```
+
+The plan does not contact WebODM, upload imagery, create a task, or change the
+database. After reviewing it, remove `--storage-preflight-only` to execute.
+
+Immediately before upload, the pipeline verifies the exact persisted project
+and lists its complete task set. Recovery proceeds only when that set contains
+exactly one well-formed task: the same Task 4 UUID and name already bound to
+the run, with both local and remote Task 4 status completed. An extra task,
+missing Task 4, identity mismatch, non-completed status, malformed response,
+or lookup/authentication/network failure stops before upload. The explicit
+authorization is appended to binding history before the ordinary Task 2
+creation path runs, and the new Task 2 UUID is persisted immediately after a
+successful create response. Task 4 is not restarted or replaced.
+
+If task creation returns ambiguously, do not repeat the creation command. Check
+the exact WebODM project. If Task 2 exists, use
+`tools/repair_webodm_binding.py --operation task2` with its exact UUID; dry-run
+is the default. If no Task 2 exists, preserve the failure evidence and diagnose
+the create failure before attempting another explicitly authorized recovery.
+
 ## Download the complete Task 4 ODM ZIP
 
 Task 4 honors the same export controls as Task 2:

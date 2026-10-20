@@ -11,6 +11,18 @@ from typing import Optional
 from shared.logging import log_event, log_ok, log_section, log_step, log_warn
 
 
+class QGISTileResumeCorruptionError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        existing_tile_count: int,
+        matched_signature: str,
+    ) -> None:
+        super().__init__(message)
+        self.existing_tile_count = int(existing_tile_count)
+        self.matched_signature = matched_signature
+
+
 class QGISTools:
     """
     Headless QGIS-like processing using GDAL CLIs:
@@ -487,6 +499,23 @@ class QGISTools:
             raise RuntimeError(f"gdal2tiles not found: {self.gdal2tiles_path}")
 
         except subprocess.CalledProcessError as e:
+            stderr = e.stderr or ''
+            corruption_signatures = (
+                'not recognized as being in a supported file format',
+                'not a unicode string, bytes, bytearray or memoryview',
+            )
+            matched = next(
+                (item for item in corruption_signatures
+                 if item.lower() in stderr.lower()),
+                None,
+            )
+            if resume and existing_tile_count and matched:
+                raise QGISTileResumeCorruptionError(
+                    'Existing QGIS tiles are unreadable during resume. '
+                    'Use the guarded QGIS tile-rebuild workflow.',
+                    existing_tile_count,
+                    matched,
+                ) from e
             raise RuntimeError(
                 f"gdal2tiles failed.\n"
                 f"STDERR:\n{(e.stderr or '')[:4000]}\n"

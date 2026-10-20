@@ -5,7 +5,10 @@ import subprocess
 import pytest
 
 from modules.qgis import qgis_tools as qgis_module
-from modules.qgis.qgis_tools import QGISTools
+from modules.qgis.qgis_tools import (
+    QGISTileResumeCorruptionError,
+    QGISTools,
+)
 from shared.logging import get_logger
 
 
@@ -64,6 +67,37 @@ def test_qgis_tools_emits_command_started_and_completed_events(monkeypatch, tmp_
         assert "returncode=0" in content
     finally:
         cleanup_logger(logger)
+
+
+def test_resume_corruption_raises_typed_non_transient_error(
+    monkeypatch, tmp_path
+):
+    input_tif = tmp_path / 'input.tif'
+    output_dir = tmp_path / 'tiles'
+    input_tif.write_bytes(b'fake tif')
+    output_dir.mkdir()
+    (output_dir / 'partial.png').write_bytes(b'partial')
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.CalledProcessError(
+            1,
+            cmd,
+            output='progress',
+            stderr='RuntimeError: not a unicode string, bytes, bytearray or memoryview',
+        )
+
+    monkeypatch.setattr(qgis_module.subprocess, 'run', fake_run)
+    tools = QGISTools(
+        get_logger('tests.qgis.corruption', tmp_path / 'qgis.log'),
+        gdal2tiles_path='gdal2tiles',
+    )
+    with pytest.raises(QGISTileResumeCorruptionError) as exc_info:
+        tools.generate_tiles(
+            input_tif=input_tif,
+            output_dir=output_dir,
+            resume=True,
+        )
+    assert exc_info.value.existing_tile_count == 1
 
 
 def test_qgis_tools_emits_command_failed_event_without_full_paths(monkeypatch, tmp_path):

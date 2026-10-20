@@ -34,15 +34,32 @@ from shared.publication_lock import PublicationLockedError
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
 from modules.webodm.webodm_processor import (
     WebODMProcessor,
+    WebODMProjectLookupError,
+    WebODMProjectNotFound,
     WebODMTaskLookupError,
     WebODMTaskNotFound,
 )
 from modules.cross_run_image_filter.cross_run_image_filter import run_filter
 from modules.data_segregation.data_segregation import run_data_segregation
-from modules.qgis.qgis_tools import QGISTools
+from modules.qgis.qgis_tools import (
+    QGISTileResumeCorruptionError,
+    QGISTools,
+)
+from shared.qgis_tile_recovery import (
+    QGISTileRecoveryError,
+    quarantine_qgis_tile_directory,
+    qgis_tile_rebuild_confirmation,
+    validate_qgis_tile_rebuild_request,
+)
 from shared.raw_input_recovery import (
     recover_missing_raw_inputs,
     validate_raw_input_recovery_request,
+)
+from shared.raster_metadata import (
+    build_raster_manifest_record,
+    inspect_raster_metadata,
+    update_raster_manifest,
+    validate_raster_manifest,
 )
 
 from pipelines.rgb_helpers import (
@@ -106,6 +123,7 @@ class RGBPipeline(
         workspace_root: Optional[Path] = None,
         workspace_layout: Optional[RunWorkspaceLayout] = None,
         published_layout: Optional[PublishedSurveyLayout] = None,
+        raster_metadata_reader: Optional[Any] = None,
     ):
         if not isinstance(config, Mapping):
             raise TypeError("config must be a mapping")
@@ -159,6 +177,9 @@ class RGBPipeline(
             else self.logs_dir
         )
         self.webodm_processor = webodm_processor
+        self.raster_metadata_reader = (
+            raster_metadata_reader or inspect_raster_metadata
+        )
 
         self.survey_id_override = survey_id_override
         self.task_name_overrides = task_name_overrides or {}
@@ -258,8 +279,11 @@ class RGBPipeline(
 
         self.rgb_path: Optional[Path] = None
         self._webodm_projects_created_this_process: set[int] = set()
+        self._webodm_projects_authorized_for_task_creation: set[int] = set()
         self._resume_had_webodm_history = False
         self._empty_webodm_recovery: Optional[dict[str, Any]] = None
+        self._missing_webodm_project_recovery: Optional[dict[str, Any]] = None
+        self._missing_webodm_task_recovery: Optional[dict[str, Any]] = None
 
     # Helpers
     def _set_survey_artifact_context(self, survey_id: str, rgb_path: Path) -> None:
@@ -291,6 +315,103 @@ class RGBPipeline(
             raise RuntimeError(
                 "rgb_path is not set yet. Run data_segregation first.")
         return self.rgb_path
+
+    def _configured_gdalinfo_path(self) -> str:
+        qgis_tools = ((self.config.get("qgis") or {}).get("tools") or {})
+        exports_tools = ((self.config.get("exports") or {}).get("tools") or {})
+        return str(
+            qgis_tools.get("gdalinfo_path")
+            or exports_tools.get("gdalinfo_path")
+            or "gdalinfo"
+        )
+
+    def _prepare_raster_manifest_entry(
+        self,
+        *,
+        tif_path: Path,
+        published_path: Path,
+        role: str,
+        task_key: str,
+    ) -> tuple[str, Dict[str, Any]]:
+        survey_id = self._require_survey_id()
+        if self.published_layout is None:
+            raise RuntimeError("Published survey layout is not initialized.")
+
+        raster_key = f"{role}_{task_key}"
+        try:
+            metadata = self.raster_metadata_reader(
+                Path(tif_path),
+                gdalinfo_path=self._configured_gdalinfo_path(),
+            )
+            validate_raster_manifest(
+                self.published_layout.manifest,
+                survey_id=survey_id,
+            )
+            record = build_raster_manifest_record(
+                metadata,
+                published_path=published_path,
+                manifest_root=self.published_layout.root,
+                role=role,
+                task_key=task_key,
+                run_id=self.run_id,
+            )
+        except Exception as exc:
+            raise StageFailedWithOutput(
+                f"Raster metadata validation failed for {Path(tif_path).name}: {exc}",
+                output={
+                    "failure_type": "raster_metadata_validation",
+                    "raster_key": raster_key,
+                    "filename": Path(tif_path).name,
+                },
+            ) from exc
+        return raster_key, record
+
+    def _commit_raster_manifest_entry(
+        self,
+        *,
+        raster_key: str,
+        raster_record: Dict[str, Any],
+        published_mutated: bool,
+        logger: logging.Logger,
+    ) -> None:
+        survey_id = self._require_survey_id()
+        if self.published_layout is None:
+            raise RuntimeError("Published survey layout is not initialized.")
+
+        try:
+            update_raster_manifest(
+                self.published_layout.manifest,
+                survey_id=survey_id,
+                raster_key=raster_key,
+                raster_record=raster_record,
+            )
+        except Exception as exc:
+            error_type = (
+                StageRequiresRecovery if published_mutated else StageFailedWithOutput
+            )
+            action = (
+                "published but its metadata could not be committed"
+                if published_mutated
+                else "could not be recorded"
+            )
+            raise error_type(
+                f"Raster was {action} in the survey manifest: {exc}",
+                output={
+                    "failure_type": "raster_manifest_commit",
+                    "raster_key": raster_key,
+                    "published_mutated": published_mutated,
+                },
+            ) from exc
+
+        log_event(
+            logger,
+            "raster_metadata_recorded",
+            raster_key=raster_key,
+            filename=raster_record["filename"],
+            width_pixels=raster_record["width_pixels"],
+            height_pixels=raster_record["height_pixels"],
+            compression=raster_record["compression"],
+        )
 
     def _hydrate_from_state(self) -> None:
         state = self.state
@@ -1035,6 +1156,7 @@ class RGBPipeline(
         binding_source: str = 'pipeline',
         audit: Optional[Dict[str, Any]] = None,
         append_history: bool = False,
+        allow_rebind: bool = False,
     ) -> dict:
         operation_attempt = self.repo.get_latest_stage(
             self.run_id,
@@ -1062,6 +1184,7 @@ class RGBPipeline(
                 stage_attempt_id=stage_attempt_id,
                 audit=audit,
                 append_history=append_history,
+                allow_rebind=allow_rebind,
             )
         except WebODMBindingConflictError as exc:
             raise StageRequiresRecovery(
@@ -1076,7 +1199,11 @@ class RGBPipeline(
 
         web = self.state.setdefault('webodm', {})
         existing_project = web.get('project_id')
-        if existing_project and int(existing_project) != int(project_id):
+        if (
+            existing_project
+            and int(existing_project) != int(project_id)
+            and not allow_rebind
+        ):
             raise StageRequiresRecovery(
                 f'Conflicting WebODM project identities for run {self.run_id}: '
                 f'state={existing_project}, binding={project_id}',
@@ -1219,6 +1346,492 @@ class RGBPipeline(
         )
         return True
 
+    def _authorize_missing_webodm_task_recovery(
+        self,
+        *,
+        processor: Any,
+        task_key: str,
+        project_id: int,
+        task_name: str,
+        binding: Optional[Mapping[str, Any]],
+    ) -> bool:
+        recovery = self._missing_webodm_task_recovery
+        if recovery is None:
+            return False
+
+        expected_confirmation = (
+            f'CREATE TASK2 IN WEBODM PROJECT {project_id} FOR RUN {self.run_id}'
+        )
+        if task_key != 'task2' or recovery.get('operation') != 'task2':
+            raise StageRequiresRecovery(
+                'Missing-task recovery supports Task 2 only.'
+            )
+        if int(recovery.get('project_id') or 0) != int(project_id):
+            raise StageRequiresRecovery(
+                'Missing-task recovery project does not match persisted '
+                f'project {project_id}.'
+            )
+        if recovery.get('confirmation') != expected_confirmation:
+            raise StageRequiresRecovery(
+                'Missing-task recovery confirmation does not exactly match '
+                f'{expected_confirmation!r}.'
+            )
+        if binding and binding.get('task_id'):
+            raise StageRequiresRecovery(
+                f'Task 2 is already bound to {binding["task_id"]}; use normal '
+                'resume instead of missing-task recovery.'
+            )
+        if binding and int(binding.get('project_id') or 0) != int(project_id):
+            raise StageRequiresRecovery(
+                'Task 2 placeholder binding does not match persisted project '
+                f'{project_id}.'
+            )
+
+        task4_binding = self.repo.get_webodm_binding(self.run_id, 'task4')
+        if not task4_binding or not task4_binding.get('task_id'):
+            raise StageRequiresRecovery(
+                'Missing Task 2 recovery requires a durable Task 4 UUID.'
+            )
+        if int(task4_binding.get('project_id') or 0) != int(project_id):
+            raise StageRequiresRecovery(
+                'Task 4 binding does not match the persisted recovery project.'
+            )
+        task4_name = str(task4_binding.get('task_name') or '')
+        if not task4_name:
+            raise StageRequiresRecovery(
+                'Missing Task 2 recovery requires the persisted Task 4 name.'
+            )
+        latest_task4 = self.repo.get_latest_stage(self.run_id, 'webodm_task4')
+        if not latest_task4 or latest_task4.get('status') != 'completed':
+            raise StageRequiresRecovery(
+                'Missing Task 2 recovery requires a completed webodm_task4 '
+                'stage for the same run.'
+            )
+
+        try:
+            project_tasks = processor.list_project_tasks(int(project_id))
+        except WebODMTaskLookupError as exc:
+            raise StageRequiresRecovery(
+                f'Could not verify WebODM project {project_id} tasks; refusing '
+                'Task 2 creation.',
+                output={
+                    'status': 'requires_recovery',
+                    'operation_key': task_key,
+                    'project_id': project_id,
+                },
+            ) from exc
+
+        task_summaries = [
+            {
+                'id': task.get('id'),
+                'name': task.get('name'),
+                'status': task.get('status'),
+            }
+            for task in project_tasks
+            if isinstance(task, Mapping)
+        ]
+        if len(task_summaries) != len(project_tasks) or len(task_summaries) != 1:
+            raise StageRequiresRecovery(
+                f'WebODM project {project_id} must contain exactly the bound '
+                'Task 4 before Task 2 recovery; found '
+                f'{len(project_tasks)} task(s).',
+                output={
+                    'status': 'requires_recovery',
+                    'operation_key': task_key,
+                    'project_id': project_id,
+                    'remote_tasks': task_summaries,
+                },
+            )
+
+        [remote_task4] = project_tasks
+        remote_task4_id = str(remote_task4.get('id') or '')
+        remote_task4_name = str(remote_task4.get('name') or '')
+        task4_status, _terminal = WebODMProcessor._normalize_status(
+            remote_task4.get('status')
+        )
+        if (
+            remote_task4_id != str(task4_binding['task_id'])
+            or remote_task4_name != task4_name
+            or task4_status != 'completed'
+        ):
+            raise StageRequiresRecovery(
+                'WebODM project contents do not match the exact completed '
+                'Task 4 binding; refusing Task 2 creation.',
+                output={
+                    'status': 'requires_recovery',
+                    'operation_key': task_key,
+                    'project_id': project_id,
+                    'task4_binding': {
+                        'id': task4_binding.get('task_id'),
+                        'name': task4_name,
+                    },
+                    'remote_tasks': task_summaries,
+                },
+            )
+
+        authorized_at = datetime.now(timezone.utc).isoformat()
+        self._persist_webodm_binding(
+            task_key='task2',
+            project_id=int(project_id),
+            task_name=task_name,
+            local_status='missing_task_recovery_authorized',
+            binding_source='operator_missing_task_recovery',
+            audit={
+                'event': 'missing_webodm_task_recovery_authorized',
+                'authorized_at': authorized_at,
+                'operation_key': 'task2',
+                'project_id': int(project_id),
+                'verified_task4_id': remote_task4_id,
+                'verified_remote_task_count': 1,
+                'confirmation': expected_confirmation,
+            },
+            append_history=True,
+        )
+        log_event(
+            self.loggers['webodm'],
+            'missing_webodm_task_recovery_authorized',
+            run_id=self.run_id,
+            operation_key='task2',
+            project_id=project_id,
+            verified_task4_id=remote_task4_id,
+            verified_remote_task_count=1,
+        )
+        return True
+
+    def _webodm_project_recovery_receipt_path(self) -> Path:
+        return (
+            self.checkpoint_dir
+            / f"webodm_project_recovery_{self.run_id}.json"
+        )
+
+    def _load_webodm_project_recovery_receipt(
+        self,
+    ) -> Optional[dict[str, Any]]:
+        import json
+
+        path = self._webodm_project_recovery_receipt_path()
+        if not path.is_file():
+            return None
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise StageRequiresRecovery(
+                f"Could not read WebODM project recovery receipt: {path}"
+            ) from exc
+        if not isinstance(payload, dict):
+            raise StageRequiresRecovery(
+                f"WebODM project recovery receipt is malformed: {path}"
+            )
+        return payload
+
+    def _save_webodm_project_recovery_receipt(
+        self,
+        payload: Mapping[str, Any],
+    ) -> Path:
+        import json
+
+        path = self._webodm_project_recovery_receipt_path()
+        temp_path = path.with_name(
+            f".{path.name}.{uuid.uuid4().hex}.tmp"
+        )
+        value = dict(payload)
+        value["updated_at"] = datetime.now(timezone.utc).isoformat()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temp_path.write_text(
+                json.dumps(value, indent=2, sort_keys=True),
+                encoding="utf-8",
+            )
+            os.replace(temp_path, path)
+        except Exception as exc:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+            raise StageRequiresRecovery(
+                f"Could not atomically save WebODM project recovery receipt: "
+                f"{path}"
+            ) from exc
+        return path
+
+    def _persist_missing_project_replacement(
+        self,
+        *,
+        old_project_id: int,
+        new_project_id: int,
+        task_name: str,
+        project_name: str,
+        attempt_id: str,
+        confirmation: str,
+        receipt: Mapping[str, Any],
+        recovered_from_receipt: bool,
+    ) -> int:
+        web = self.state.setdefault("webodm", {})
+        web["project_name"] = project_name
+        web["task4"] = {}
+        web.setdefault("downloads", {}).setdefault("task4", {})
+        self._persist_webodm_binding(
+            task_key="task4",
+            project_id=int(new_project_id),
+            task_name=task_name,
+            local_status="missing_project_replaced",
+            binding_source="operator_missing_project_recovery",
+            allow_rebind=True,
+            append_history=True,
+            audit={
+                "event": "missing_webodm_project_replaced",
+                "old_project_id": int(old_project_id),
+                "new_project_id": int(new_project_id),
+                "verified_old_project_missing": True,
+                "recovered_from_receipt": bool(recovered_from_receipt),
+                "confirmation": confirmation,
+                "attempt_id": attempt_id,
+            },
+        )
+        for other_operation in ("task1", "task2"):
+            other_binding = self.repo.get_webodm_binding(
+                self.run_id,
+                other_operation,
+            )
+            if other_binding is None:
+                continue
+            self._persist_webodm_binding(
+                task_key=other_operation,
+                project_id=int(new_project_id),
+                task_name=other_binding.get("task_name"),
+                local_status="missing_project_placeholder_rebound",
+                binding_source="operator_missing_project_recovery",
+                allow_rebind=True,
+                append_history=True,
+                audit={
+                    "event": "missing_webodm_project_placeholder_rebound",
+                    "old_project_id": int(old_project_id),
+                    "new_project_id": int(new_project_id),
+                    "operation_key": other_operation,
+                    "attempt_id": attempt_id,
+                },
+            )
+        completed_receipt = {
+            **dict(receipt),
+            "status": "binding_persisted",
+            "new_project_id": int(new_project_id),
+        }
+        self._save_webodm_project_recovery_receipt(completed_receipt)
+        log_event(
+            self.loggers["webodm"],
+            "missing_webodm_project_replaced",
+            run_id=self.run_id,
+            operation_key="task4",
+            old_project_id=old_project_id,
+            new_project_id=new_project_id,
+            recovered_from_receipt=recovered_from_receipt,
+        )
+        return int(new_project_id)
+
+    def _replace_confirmed_missing_webodm_project(
+        self,
+        *,
+        processor: Any,
+        old_project_id: int,
+        project_name: str,
+        task_name: str,
+    ) -> int:
+        recovery = self._missing_webodm_project_recovery
+        if recovery is None:
+            raise StageRequiresRecovery(
+                "Missing-project recovery authorization is unavailable."
+            )
+        confirmation = str(recovery.get("confirmation") or "")
+        expected_confirmation = (
+            "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+            f"{old_project_id} FOR RUN {self.run_id}"
+        )
+        if recovery.get("operation") != "task4":
+            raise StageRequiresRecovery(
+                "Missing-project recovery supports Task 4 only."
+            )
+        if int(recovery.get("project_id") or 0) != int(old_project_id):
+            raise StageRequiresRecovery(
+                "Missing-project recovery project does not match persisted "
+                f"project {old_project_id}."
+            )
+        if confirmation != expected_confirmation:
+            raise StageRequiresRecovery(
+                "Missing-project recovery confirmation does not exactly match "
+                f"{expected_confirmation!r}."
+            )
+
+        binding = self.repo.get_webodm_binding(self.run_id, "task4")
+        if binding is None:
+            raise StageRequiresRecovery(
+                "Missing-project recovery requires a persisted Task 4 binding."
+            )
+        if int(binding["project_id"]) != int(old_project_id):
+            raise StageRequiresRecovery(
+                "Missing-project recovery project does not match canonical "
+                f"Task 4 project {binding['project_id']}."
+            )
+        if binding.get("task_id"):
+            raise StageRequiresRecovery(
+                "Missing-project recovery cannot replace project "
+                f"{old_project_id} while Task 4 is bound to "
+                f"{binding['task_id']}."
+            )
+        for other_operation in ("task1", "task2"):
+            other_binding = self.repo.get_webodm_binding(
+                self.run_id,
+                other_operation,
+            )
+            if other_binding and other_binding.get("task_id"):
+                raise StageRequiresRecovery(
+                    "Missing-project recovery requires no durable tasks in "
+                    f"other operations; {other_operation} is bound to "
+                    f"{other_binding['task_id']}."
+                )
+
+        receipt = self._load_webodm_project_recovery_receipt()
+        if receipt is not None:
+            if (
+                receipt.get("run_id") != self.run_id
+                or receipt.get("operation") != "task4"
+                or int(receipt.get("old_project_id") or 0)
+                != int(old_project_id)
+            ):
+                raise StageRequiresRecovery(
+                    "Existing WebODM project recovery receipt conflicts with "
+                    "this request."
+                )
+            receipt_status = receipt.get("status")
+            if receipt_status != "project_created":
+                raise StageRequiresRecovery(
+                    "A previous WebODM replacement attempt requires manual "
+                    f"review before retrying (status={receipt_status!r})."
+                )
+            new_project_id = int(receipt.get("new_project_id") or 0)
+            if new_project_id <= 0:
+                raise StageRequiresRecovery(
+                    "WebODM project recovery receipt has no replacement "
+                    "project ID."
+                )
+            try:
+                replacement = processor.get_project(new_project_id)
+                replacement_tasks = processor.list_project_tasks(
+                    new_project_id
+                )
+            except (
+                WebODMProjectNotFound,
+                WebODMProjectLookupError,
+                WebODMTaskLookupError,
+            ) as exc:
+                raise StageRequiresRecovery(
+                    "Could not validate the replacement project recorded in "
+                    f"the recovery receipt: project_id={new_project_id}."
+                ) from exc
+            if replacement.get("name") != project_name:
+                raise StageRequiresRecovery(
+                    "Replacement project name does not match the expected "
+                    f"name {project_name!r}."
+                )
+            if replacement_tasks:
+                raise StageRequiresRecovery(
+                    f"Replacement project {new_project_id} already contains "
+                    "tasks; repair the exact Task 4 UUID instead."
+                )
+            rebound_project_id = self._persist_missing_project_replacement(
+                old_project_id=old_project_id,
+                new_project_id=new_project_id,
+                task_name=task_name,
+                project_name=project_name,
+                attempt_id=str(receipt.get("attempt_id") or ""),
+                confirmation=confirmation,
+                receipt=receipt,
+                recovered_from_receipt=True,
+            )
+            self._webodm_projects_authorized_for_task_creation.add(
+                rebound_project_id
+            )
+            return rebound_project_id
+
+        try:
+            processor.get_project(old_project_id)
+        except WebODMProjectNotFound:
+            pass
+        except WebODMProjectLookupError as exc:
+            raise StageRequiresRecovery(
+                f"Could not confirm that WebODM project {old_project_id} is "
+                "missing; refusing replacement."
+            ) from exc
+        else:
+            raise StageRequiresRecovery(
+                f"WebODM project {old_project_id} still exists; refusing "
+                "missing-project recovery."
+            )
+
+        attempt_id = str(uuid.uuid4())
+        receipt = {
+            "run_id": self.run_id,
+            "operation": "task4",
+            "old_project_id": int(old_project_id),
+            "project_name": project_name,
+            "attempt_id": attempt_id,
+            "confirmation": confirmation,
+            "status": "authorized",
+        }
+        self._save_webodm_project_recovery_receipt(receipt)
+        try:
+            new_project_id = int(
+                processor.create_project(
+                    name=project_name,
+                    description=(
+                        "RGB automated processing; replacement for missing "
+                        f"project {old_project_id}; run {self.run_id}"
+                    ),
+                )
+            )
+        except Exception as exc:
+            self._save_webodm_project_recovery_receipt(
+                {
+                    **receipt,
+                    "status": "creation_ambiguous",
+                    "error_type": type(exc).__name__,
+                }
+            )
+            raise StageRequiresRecovery(
+                "Replacement WebODM project creation returned ambiguously; "
+                "inspect WebODM and the recovery receipt before any retry."
+            ) from exc
+        if new_project_id <= 0 or new_project_id == int(old_project_id):
+            self._save_webodm_project_recovery_receipt(
+                {
+                    **receipt,
+                    "status": "creation_ambiguous",
+                    "new_project_id": new_project_id,
+                    "error_type": "InvalidReplacementProjectId",
+                }
+            )
+            raise StageRequiresRecovery(
+                "WebODM returned an invalid replacement project ID."
+            )
+
+        created_receipt = {
+            **receipt,
+            "status": "project_created",
+            "new_project_id": new_project_id,
+        }
+        self._save_webodm_project_recovery_receipt(created_receipt)
+        rebound_project_id = self._persist_missing_project_replacement(
+            old_project_id=old_project_id,
+            new_project_id=new_project_id,
+            task_name=task_name,
+            project_name=project_name,
+            attempt_id=attempt_id,
+            confirmation=confirmation,
+            receipt=created_receipt,
+            recovered_from_receipt=False,
+        )
+        self._webodm_projects_created_this_process.add(rebound_project_id)
+        return rebound_project_id
+
     def _restore_webodm_identity(self) -> None:
         legacy_web = self.state.get('webodm')
         if not isinstance(legacy_web, Mapping) or not legacy_web:
@@ -1325,7 +1938,14 @@ class RGBPipeline(
             web = self.state.setdefault('webodm', {})
             web['project_id'] = project_id
             if binding.get('task_id'):
-                task_state = web.setdefault(task_key, {})
+                task_state = web.get(task_key)
+                if not isinstance(task_state, dict):
+                    task_state = (
+                        dict(task_state)
+                        if isinstance(task_state, Mapping)
+                        else {}
+                    )
+                    web[task_key] = task_state
                 task_state['id'] = str(binding['task_id'])
                 if binding.get('task_name'):
                     task_state['name'] = binding['task_name']
@@ -1662,9 +2282,21 @@ class RGBPipeline(
 
         workspace_path = self._require_workspace_owned_path(Path(workspace_path))
         published_path = Path(published_dir) / workspace_path.name
+        raster_key, raster_record = self._prepare_raster_manifest_entry(
+            tif_path=workspace_path,
+            published_path=published_path,
+            role="webodm_orthomosaic",
+            task_key=task_key,
+        )
         self._replace_legacy_file_after_success(
             source_file=workspace_path,
             target_file=published_path,
+        )
+        self._commit_raster_manifest_entry(
+            raster_key=raster_key,
+            raster_record=raster_record,
+            published_mutated=True,
+            logger=self.loggers["webodm"],
         )
         return workspace_path, published_path
 
@@ -2385,6 +3017,20 @@ class RGBPipeline(
         if skip_task1 and task1_bounded:
             logger.warning("task1_bounded is set but Task 1 is skipped; ignoring task1_bounded.")
 
+        task4_name: Optional[str] = None
+        if not skip_task4:
+            task4_flag = self._webodm_task_flag(
+                "task4",
+                default_boundary_mode="b",
+            )
+            task4_name = self.task_name_overrides.get("task4")
+            if not task4_name:
+                task4_name = self._webodm_task_name(
+                    survey_id=survey_id,
+                    flag=task4_flag,
+                    task_key="task4",
+                )
+
         production_mode = not bool(self.config.get("experiment", {}).get("enabled", False))
 
         if production_mode:
@@ -2475,7 +3121,23 @@ class RGBPipeline(
             prev_task1 = prev_web.get("task1") or {}
             prev_task2 = prev_web.get("task2") or {}
 
-            if prev_project_id:
+            if self._missing_webodm_project_recovery is not None:
+                if not prev_project_id or not task4_name:
+                    raise StageRequiresRecovery(
+                        "Missing-project recovery requires the persisted "
+                        "Task 4 project and expected task name."
+                    )
+                project_id = self._replace_confirmed_missing_webodm_project(
+                    processor=processor,
+                    old_project_id=int(prev_project_id),
+                    project_name=project_name,
+                    task_name=task4_name,
+                )
+                logger.info(
+                    "Resuming with replacement WebODM project "
+                    f"(old={prev_project_id}, new={project_id})"
+                )
+            elif prev_project_id:
                 project_id = prev_project_id
                 logger.info(f"Resuming: reattaching to existing project (ID={project_id})")
             else:
@@ -2524,17 +3186,7 @@ class RGBPipeline(
             if not skip_task2:
                 project_bindings.append(('task2', task2_name))
             if not skip_task4:
-                task4_flag = self._webodm_task_flag(
-                    'task4',
-                    default_boundary_mode='b',
-                )
-                task4_name = self.task_name_overrides.get('task4')
-                if not task4_name:
-                    task4_name = self._webodm_task_name(
-                        survey_id=survey_id,
-                        flag=task4_flag,
-                        task_key='task4',
-                    )
+                assert task4_name is not None
                 project_bindings.append(('task4', task4_name))
 
             for operation_key, operation_name in project_bindings:
@@ -2888,6 +3540,17 @@ class RGBPipeline(
                             else None
                         )
                     )
+                    recovery_authorized = False
+                    if self._missing_webodm_task_recovery is not None:
+                        recovery_authorized = (
+                            self._authorize_missing_webodm_task_recovery(
+                                processor=processor,
+                                task_key='task2',
+                                project_id=int(project_id),
+                                task_name=task2_name,
+                                binding=task2_binding,
+                            )
+                        )
                     if existing_task2_id:
                         try:
                             task2_info = processor.get_task(
@@ -2966,6 +3629,7 @@ class RGBPipeline(
                             self._resume_had_webodm_history
                             and int(project_id)
                             not in self._webodm_projects_created_this_process
+                            and not recovery_authorized
                         ):
                             raise StageRequiresRecovery(
                                 'Resumed Task 2 has no durable task UUID. '
@@ -3491,6 +4155,21 @@ class RGBPipeline(
                 f"boundary_used={boundary_used} | tile_mode={tile_mode}"
             )
 
+            source_raster_key, source_raster_record = (
+                self._prepare_raster_manifest_entry(
+                    tif_path=source_path,
+                    published_path=source_path,
+                    role="webodm_orthomosaic",
+                    task_key=task_key,
+                )
+            )
+            self._commit_raster_manifest_entry(
+                raster_key=source_raster_key,
+                raster_record=source_raster_record,
+                published_mutated=False,
+                logger=logger,
+            )
+
             current_mask_geojson: Path | None = None
             if boundary_used:
                 if boundary_geojson is None or not boundary_geojson.exists():
@@ -3559,9 +4238,23 @@ class RGBPipeline(
                         local_staging_dir=clip_staging_dir,
                     )
 
+                clipped_raster_key, clipped_raster_record = (
+                    self._prepare_raster_manifest_entry(
+                        tif_path=workspace_clipped_path,
+                        published_path=published_clipped_path,
+                        role="qgis_clipped",
+                        task_key=task_key,
+                    )
+                )
                 self._replace_legacy_file_after_success(
                     source_file=workspace_clipped_path,
                     target_file=published_clipped_path,
+                )
+                self._commit_raster_manifest_entry(
+                    raster_key=clipped_raster_key,
+                    raster_record=clipped_raster_record,
+                    published_mutated=True,
+                    logger=logger,
                 )
                 clipped_path = published_clipped_path
             elif boundary_used and not clip_enabled:
@@ -3596,6 +4289,7 @@ class RGBPipeline(
             legacy_tiles_dir = published_tiles_root
 
             _staging_root: Optional[Path] = None
+            tile_rebuild_record: Optional[Dict[str, Any]] = None
             if tiles_enabled:
                 tile_resume = bool(resume)
                 tile_clean = not tile_resume
@@ -3641,16 +4335,80 @@ class RGBPipeline(
                     f"{tiling_input_path.name} -> {tiling_output_dir}"
                 )
 
-                tools.generate_tiles(
-                    input_tif=tiling_input_path,
-                    output_dir=tiling_output_dir,
-                    zoom=zoom,
-                    profile=profile,
-                    webviewer=webviewer,
-                    copyright_text=copyright_text,
-                    clean=tile_clean,
-                    resume=tile_resume,
-                )
+                if rebuild_request and rebuild_request['task_key'] == task_key:
+                    if not _local_tile_staging_active:
+                        raise StageFailedWithOutput(
+                            'Guarded QGIS tile rebuild requires local staging.',
+                            output={
+                                'failure_type': 'qgis_tile_rebuild_validation',
+                                'task_key': task_key,
+                                'tile_mode': tile_mode,
+                            },
+                        )
+                    try:
+                        tile_rebuild_record = quarantine_qgis_tile_directory(
+                            local_staging_root.parent.parent,
+                            tiling_output_dir,
+                            self.run_id,
+                            task_key,
+                            tile_mode,
+                            rebuild_request['confirmation'],
+                        )
+                    except QGISTileRecoveryError as exc:
+                        raise StageFailedWithOutput(
+                            str(exc),
+                            output={
+                                'failure_type': 'qgis_tile_rebuild_validation',
+                                'task_key': task_key,
+                                'tile_mode': tile_mode,
+                            },
+                        ) from exc
+                    selected['tile_rebuild'] = tile_rebuild_record
+                    tile_resume = False
+                    tile_clean = False
+                    log_event(
+                        logger,
+                        'qgis_tile_rebuild_quarantined',
+                        task_key=task_key,
+                        tile_mode=tile_mode,
+                        file_count=tile_rebuild_record['file_count'],
+                        total_bytes=tile_rebuild_record['total_bytes'],
+                    )
+
+                try:
+                    tools.generate_tiles(
+                        input_tif=tiling_input_path,
+                        output_dir=tiling_output_dir,
+                        zoom=zoom,
+                        profile=profile,
+                        webviewer=webviewer,
+                        copyright_text=copyright_text,
+                        clean=tile_clean,
+                        resume=tile_resume,
+                    )
+                except QGISTileResumeCorruptionError as exc:
+                    confirmation = qgis_tile_rebuild_confirmation(
+                        self.run_id, task_key
+                    )
+                    raise StageFailedWithOutput(
+                        str(exc),
+                        output={
+                            'failure_type': 'qgis_tile_resume_corruption',
+                            'task_key': task_key,
+                            'tile_mode': tile_mode,
+                            'existing_tile_count': exc.existing_tile_count,
+                            'matched_signature': exc.matched_signature,
+                            'required_confirmation': confirmation,
+                        },
+                    ) from exc
+                except Exception as exc:
+                    if tile_rebuild_record is None:
+                        raise
+                    raise StageFailedWithOutput(
+                        'Fresh QGIS tiling failed after quarantine; '
+                        'recovery evidence was preserved.',
+                        output={'tile_rebuild': tile_rebuild_record},
+                    ) from exc
 
                 if _local_tile_staging_active:
                     logger.info(
@@ -3767,6 +4525,30 @@ class RGBPipeline(
         multi_operation_mode = (
             len(successful_task_keys) > 1 and selected_task_key in successful_task_keys
         )
+
+        rebuild_request = getattr(self, '_qgis_tile_rebuild', None)
+        operation_task_keys = (
+            successful_task_keys if multi_operation_mode else [selected_task_key]
+        )
+        if rebuild_request:
+            requested_task = rebuild_request['task_key']
+            if requested_task not in operation_task_keys:
+                raise StageFailedWithOutput(
+                    'Requested QGIS tile task is not selected for this run: '
+                    f'{requested_task}',
+                    output={
+                        'failure_type': 'qgis_tile_rebuild_validation',
+                        'task_key': requested_task,
+                    },
+                )
+            if not tiles_enabled or local_staging_root is None:
+                raise StageFailedWithOutput(
+                    'QGIS tile rebuild requires enabled local tile staging.',
+                    output={
+                        'failure_type': 'qgis_tile_rebuild_validation',
+                        'task_key': requested_task,
+                    },
+                )
 
         if not multi_operation_mode:
             result = _run_qgis_operation(
@@ -3916,10 +4698,20 @@ class RGBPipeline(
                 task_name=task_name,
                 binding=binding,
             )
+        elif self._missing_webodm_task_recovery is not None:
+            recovery_authorized = self._authorize_missing_webodm_task_recovery(
+                processor=processor,
+                task_key=task_key,
+                project_id=int(project_id),
+                task_name=task_name,
+                binding=binding,
+            )
         elif (
             not existing_task_id
             and self._resume_had_webodm_history
             and int(project_id) not in self._webodm_projects_created_this_process
+            and int(project_id)
+            not in self._webodm_projects_authorized_for_task_creation
         ):
             raise StageRequiresRecovery(
                 f'Resumed {task_key} has project {project_id} but no durable '
@@ -4546,6 +5338,11 @@ class RGBPipeline(
         publication_confirmation: Optional[str] = None,
         keep_workspace: bool = False,
         empty_webodm_recovery: Optional[Mapping[str, Any]] = None,
+        missing_webodm_project_recovery: Optional[
+            Mapping[str, Any]
+        ] = None,
+        missing_webodm_task_recovery: Optional[Mapping[str, Any]] = None,
+        qgis_tile_rebuild: Optional[Mapping[str, Any]] = None,
         raw_input_recovery: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         force_stages = force_stages or set()
@@ -4574,6 +5371,20 @@ class RGBPipeline(
             )
         else:
             self._raw_input_recovery = None
+        if qgis_tile_rebuild is not None:
+            if not resume:
+                raise ValueError('QGIS tile rebuild requires resume=True')
+            latest_qgis = self.repo.get_latest_stage(self.run_id, 'qgis')
+            if latest_qgis and latest_qgis.get('status') == 'completed':
+                raise ValueError(
+                    'QGIS tile rebuild requires a failed or incomplete QGIS stage'
+                )
+            self._qgis_tile_rebuild = validate_qgis_tile_rebuild_request(
+                dict(qgis_tile_rebuild),
+                self.run_id,
+            )
+        else:
+            self._qgis_tile_rebuild = None
         if empty_webodm_recovery is not None:
             recovery = dict(empty_webodm_recovery)
             if not resume:
@@ -4602,6 +5413,97 @@ class RGBPipeline(
             self._empty_webodm_recovery = recovery
         else:
             self._empty_webodm_recovery = None
+        if (
+            missing_webodm_project_recovery is not None
+            and empty_webodm_recovery is not None
+        ):
+            raise ValueError(
+                "missing WebODM project recovery cannot be combined with "
+                "empty WebODM project recovery"
+            )
+        if missing_webodm_project_recovery is not None:
+            recovery = dict(missing_webodm_project_recovery)
+            if not resume:
+                raise ValueError(
+                    "missing WebODM project recovery requires resume=True"
+                )
+            if recovery.get("operation") != "task4":
+                raise ValueError(
+                    "missing WebODM project recovery supports task4 only"
+                )
+            if "webodm_task4" not in force_stages:
+                raise ValueError(
+                    "missing WebODM project recovery requires force stage "
+                    "webodm_task4"
+                )
+            if self.webodm_mode != "task4":
+                raise ValueError(
+                    "missing WebODM project recovery requires Task 4-only mode"
+                )
+            project_id = recovery.get("project_id")
+            if project_id is None or int(project_id) <= 0:
+                raise ValueError(
+                    "missing WebODM project recovery requires a positive "
+                    "project ID"
+                )
+            expected_confirmation = (
+                "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+                f"{int(project_id)} FOR RUN {self.run_id}"
+            )
+            if recovery.get("confirmation") != expected_confirmation:
+                raise ValueError(
+                    "missing WebODM project recovery requires exact "
+                    f"confirmation: {expected_confirmation!r}"
+                )
+            recovery["project_id"] = int(project_id)
+            self._missing_webodm_project_recovery = recovery
+        else:
+            self._missing_webodm_project_recovery = None
+        if missing_webodm_task_recovery is not None:
+            if (
+                empty_webodm_recovery is not None
+                or missing_webodm_project_recovery is not None
+            ):
+                raise ValueError(
+                    'missing WebODM task recovery cannot be combined with '
+                    'another WebODM creation recovery'
+                )
+            recovery = dict(missing_webodm_task_recovery)
+            if not resume:
+                raise ValueError(
+                    'missing WebODM task recovery requires resume=True'
+                )
+            if recovery.get('operation') != 'task2':
+                raise ValueError(
+                    'missing WebODM task recovery supports task2 only'
+                )
+            if 'webodm_task2' not in force_stages:
+                raise ValueError(
+                    'missing WebODM task recovery requires force stage '
+                    'webodm_task2'
+                )
+            if self.webodm_mode != 'both':
+                raise ValueError(
+                    'missing WebODM task recovery requires combined mode'
+                )
+            project_id = recovery.get('project_id')
+            if project_id is None or int(project_id) <= 0:
+                raise ValueError(
+                    'missing WebODM task recovery requires a positive project ID'
+                )
+            expected_confirmation = (
+                'CREATE TASK2 IN WEBODM PROJECT '
+                f'{int(project_id)} FOR RUN {self.run_id}'
+            )
+            if recovery.get('confirmation') != expected_confirmation:
+                raise ValueError(
+                    'missing WebODM task recovery requires exact confirmation: '
+                    f'{expected_confirmation!r}'
+                )
+            recovery['project_id'] = int(project_id)
+            self._missing_webodm_task_recovery = recovery
+        else:
+            self._missing_webodm_task_recovery = None
 
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
@@ -4706,7 +5608,10 @@ class RGBPipeline(
             )
 
         default_stage_names = {step["name"] for step in stage_steps}
-        supported_force_stages = default_stage_names | {'webodm_task4'}
+        supported_force_stages = default_stage_names | {
+            'webodm_task4',
+            'webodm_task2',
+        }
         unknown_force_stages = set(force_stages).difference(
             supported_force_stages
         )
@@ -4726,7 +5631,12 @@ class RGBPipeline(
                     + ", ".join(sorted(unknown_stages))
                 )
 
-        if 'webodm_task4' in force_stages:
+        forced_webodm_stages = {
+            stage_name
+            for stage_name in ('webodm_task4', 'webodm_task2')
+            if stage_name in force_stages
+        }
+        if forced_webodm_stages:
             stages_to_run.add('webodm')
 
         def _force(name: str) -> bool:
@@ -4736,7 +5646,7 @@ class RGBPipeline(
                     name == "raw_input_recovery"
                     and self._raw_input_recovery is not None
                 )
-                or (name == 'webodm' and 'webodm_task4' in force_stages)
+                or (name == 'webodm' and bool(forced_webodm_stages))
                 or not resume
             )
 
@@ -4776,11 +5686,11 @@ class RGBPipeline(
                     )
 
                 if stage_name == "webodm":
-                    if (
-                        'webodm_task4' in force_stages
-                        and 'webodm' not in force_stages
-                    ):
-                        self._force_webodm_operations = {'task4'}
+                    if forced_webodm_stages and 'webodm' not in force_stages:
+                        self._force_webodm_operations = {
+                            stage_name.removeprefix('webodm_')
+                            for stage_name in forced_webodm_stages
+                        }
                     elif _force(stage_name):
                         self._force_webodm_operations = {
                             key

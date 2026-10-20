@@ -272,7 +272,11 @@ def main() -> int:
         description='Validate and repair one WebODM run/task binding.'
     )
     parser.add_argument('--run-id', required=True)
-    parser.add_argument('--operation', choices=['task4'], default='task4')
+    parser.add_argument(
+        '--operation',
+        choices=['task2', 'task4'],
+        default='task4',
+    )
     parser.add_argument('--project-id', required=True, type=int)
     parser.add_argument('--task-id', required=True)
     parser.add_argument(

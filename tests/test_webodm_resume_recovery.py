@@ -9,6 +9,8 @@ import requests
 
 from modules.webodm.webodm_processor import (
     WebODMProcessor,
+    WebODMProjectLookupError,
+    WebODMProjectNotFound,
     WebODMTaskLookupError,
     WebODMTaskNotFound,
 )
@@ -95,6 +97,41 @@ def test_exact_task_lookup_failures_are_not_reported_as_absence(response):
 
     with pytest.raises(WebODMTaskLookupError):
         processor.get_task(417, 'bound-task', retries=1, backoff=0)
+
+
+def test_exact_project_lookup_returns_matching_project():
+    processor = _lookup_processor(
+        [_LookupResponse(200, {'id': 370, 'name': 'AH-026016'})]
+    )
+
+    assert processor.get_project(370, retries=1, backoff=0) == {
+        'id': 370,
+        'name': 'AH-026016',
+    }
+
+
+def test_exact_project_lookup_distinguishes_confirmed_404():
+    processor = _lookup_processor([_LookupResponse(404)])
+
+    with pytest.raises(WebODMProjectNotFound):
+        processor.get_project(370, retries=1, backoff=0)
+
+
+@pytest.mark.parametrize(
+    'response',
+    [
+        _LookupResponse(500),
+        requests.ConnectionError('controlled connection failure'),
+        _LookupResponse(401),
+        _LookupResponse(200, []),
+        _LookupResponse(200, {'id': 371}),
+    ],
+)
+def test_project_lookup_failures_are_not_reported_as_absence(response):
+    processor = _lookup_processor([response])
+
+    with pytest.raises(WebODMProjectLookupError):
+        processor.get_project(370, retries=1, backoff=0)
 
 
 def test_project_task_listing_reads_every_page():
@@ -416,25 +453,33 @@ def test_repair_tool_dry_run_reads_without_migrating_and_apply_is_audited(
     assert repeated_audit['previous_binding']['task_id'] == 'duplicate-task'
 
 
+@pytest.mark.parametrize(
+    ('operation', 'task_name'),
+    [
+        ('task4', 'AH-026042-RGB--xcb-t4'),
+        ('task2', 'AH-026042-RGB--xcb-t2'),
+    ],
+)
 def test_repair_plan_reports_and_preserves_history_for_missing_task_uuid(
     temporary_sqlite_db_path,
     temporary_checkpoint_dir,
+    operation,
+    task_name,
 ):
     task_id = '99263264-70e8-40c0-99bc-cd45abf6267d'
-    task_name = 'AH-026042-RGB--xcb-t4'
     repo = PipelineRepo(temporary_sqlite_db_path)
     repo.create_run('missing-uuid-run')
     repo.attach_survey_id('missing-uuid-run', 'AH-026042')
     incomplete = repo.record_webodm_binding(
         run_id='missing-uuid-run',
-        operation_key='task4',
+        operation_key=operation,
         project_id=394,
         task_name=task_name,
     )
     context = read_repair_context(
         temporary_sqlite_db_path,
         'missing-uuid-run',
-        'task4',
+        operation,
     )
     remote_task = {
         'id': task_id,
@@ -444,7 +489,7 @@ def test_repair_plan_reports_and_preserves_history_for_missing_task_uuid(
 
     missing_uuid_plan = build_repair_plan(
         run_id='missing-uuid-run',
-        operation='task4',
+        operation=operation,
         project_id=394,
         task_id=task_id,
         context=context,
@@ -476,16 +521,16 @@ def test_repair_plan_reports_and_preserves_history_for_missing_task_uuid(
     )
     checkpoint = json.loads(checkpoint_path.read_text(encoding='utf-8'))
     assert checkpoint['project_id'] == 394
-    assert checkpoint['task4']['id'] == task_id
+    assert checkpoint[operation]['id'] == task_id
 
     exact_context = read_repair_context(
         temporary_sqlite_db_path,
         'missing-uuid-run',
-        'task4',
+        operation,
     )
     exact_binding_plan = build_repair_plan(
         run_id='missing-uuid-run',
-        operation='task4',
+        operation=operation,
         project_id=394,
         task_id=task_id,
         context=exact_context,

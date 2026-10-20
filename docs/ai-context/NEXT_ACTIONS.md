@@ -2,30 +2,33 @@
 
 ## Highest Priority
 
-1. Resume run `1cd78d5e-331a-4ee5-b05d-047ca8f658e5` normally and verify that
-   it reattaches to its exact existing Task 4 UUID without creating another
-   remote task.
+1. Run storage-preflight-only for the guarded Task 4 tile rebuild on BCO-102
+   run `47cd8922-630c-4a22-90d0-8494669ecb80`, review D: free capacity, then
+   run the same exact-confirmation command without report-only mode.
 
-Why this is first: the deleted filtered-image directory has been reconstructed
-and independently verified at 1,153 kept images plus 229 preserved exclusions.
-SQLite and WebODM identity were intentionally left unchanged, so the normal
-resume path is the smallest validation of the repaired artifact state.
+Why this is first: ordinary `gdal2tiles --resume` deterministically reuses the
+same unreadable partial tile and previously spent hours across retries. The
+guarded flow preserves the damaged tree as rollback evidence, starts the tile
+target empty, and reuses the verified clipped orthomosaic.
 
 ## Recommended Pipeline Sequence
 
-1. Run the ordinary resume command without forcing segregation or filtering;
-   confirm storage preflight passes and the exact persisted Task 4 UUID is
-   reused.
+1. Run the guarded BCO-102 command with `--storage-preflight-only`; confirm the
+   requested task is Task 4 and sufficient D: space remains for quarantine plus
+   a clean rebuild.
 
-2. Verify Task 4 artifact delivery, including the optional full ODM ZIP, and
-   the remaining quality-gate/QGIS stages before considering the run complete.
+2. Remove report-only mode and run the exact same authorization. Preserve the
+   quarantine until regenerated tiles are validated and the run completes.
 
-3. Design a reusable fail-closed recovery tool that binds restoration to the
+3. Reconcile AH-026044 WebODM state and optional Task 4 ZIP delivery without
+   creating another remote task.
+
+4. Design a reusable fail-closed recovery tool that binds restoration to the
    persisted run/survey identity and saved image classifications. Cover missing
    source, identity mismatch, existing outputs, interrupted copying, and atomic
    activation with temporary paths and databases.
 
-4. Perform the pending controlled M3M `--uav`/`--rgb` validation and keep
+5. Perform the pending controlled M3M `--uav`/`--rgb` validation and keep
    multispectral processing deferred.
 
 ## Recommended Web/API/UI Sequence

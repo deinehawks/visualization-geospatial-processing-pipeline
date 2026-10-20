@@ -455,21 +455,502 @@ def test_cli_rejects_invalid_empty_webodm_project_recovery(
     assert FakeRGBPipeline.instances == []
 
 
+def test_cli_passes_exact_missing_webodm_project_recovery(
+    monkeypatch,
+    tmp_path,
+):
+    run_id = "run-missing-project"
+    confirmation = (
+        "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+        f"370 FOR RUN {run_id}"
+    )
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey", "AH_026_source",
+            "--resume", "--run-id", run_id,
+            "--force-stage", "webodm_task4",
+            "--recover-missing-webodm-project", "task4",
+            "--missing-webodm-project-id", "370",
+            "--missing-webodm-recovery-confirmation", confirmation,
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda _database, _run_id: {
+            "run_id": run_id,
+            "source_dir": str(tmp_path / "source"),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda _database, _run_id: {"webodm": "requires_recovery"},
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.run_kwargs["missing_webodm_project_recovery"] == {
+        "operation": "task4",
+        "project_id": 370,
+        "confirmation": confirmation,
+    }
+
+
+def test_cli_passes_exact_missing_task2_recovery(monkeypatch, tmp_path):
+    run_id = 'run-missing-task2'
+    confirmation = f'CREATE TASK2 IN WEBODM PROJECT 540 FOR RUN {run_id}'
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            '--survey', 'AH_026_source',
+            '--resume', '--run-id', run_id,
+            '--both-tasks',
+            '--force-stage', 'webodm_task2',
+            '--recover-missing-webodm-task', 'task2',
+            '--webodm-task-recovery-project-id', '540',
+            '--webodm-task-recovery-confirmation', confirmation,
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_run_state_read_only',
+        lambda _database, _run_id: {
+            'run_id': run_id,
+            'source_dir': str(tmp_path / 'source'),
+            'workspace_root': str(tmp_path / 'workspaces'),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_latest_stage_statuses_read_only',
+        lambda _database, _run_id: {
+            'webodm': 'requires_recovery',
+            'webodm_task4': 'completed',
+            'webodm_task2': 'requires_recovery',
+        },
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.init_kwargs['webodm_mode'] == 'both'
+    assert pipeline.run_kwargs['force_stages'] == {'webodm_task2'}
+    assert pipeline.run_kwargs['missing_webodm_task_recovery'] == {
+        'operation': 'task2',
+        'project_id': 540,
+        'confirmation': confirmation,
+    }
+
+
+def test_missing_task2_recovery_preflight_is_plan_only(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    run_id = 'run-missing-task2-plan'
+    confirmation = f'CREATE TASK2 IN WEBODM PROJECT 540 FOR RUN {run_id}'
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            '--survey', 'AH_026_source',
+            '--resume', '--run-id', run_id,
+            '--both-tasks',
+            '--force-stage', 'webodm_task2',
+            '--recover-missing-webodm-task', 'task2',
+            '--webodm-task-recovery-project-id', '540',
+            '--webodm-task-recovery-confirmation', confirmation,
+            '--storage-preflight-only',
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_run_state_read_only',
+        lambda _database, _run_id: {
+            'run_id': run_id,
+            'source_dir': str(tmp_path / 'source'),
+            'workspace_root': str(tmp_path / 'workspaces'),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_latest_stage_statuses_read_only',
+        lambda _database, _run_id: {
+            'webodm': 'requires_recovery',
+            'webodm_task4': 'completed',
+            'webodm_task2': 'requires_recovery',
+        },
+    )
+
+    rgb_main.main()
+
+    assert FakeRGBPipeline.instances == []
+    output = capsys.readouterr().out
+    assert 'Missing WebODM task recovery: task2 project 540' in output
+    assert 'PLAN ONLY - WebODM and database unchanged' in output
+
+
 @pytest.mark.parametrize(
-    "argv, expected_message",
+    'extra_args, expected_message',
     [
         (
-            ["--survey", "AH_026_source", "--activate-publication"],
-            "--publication-confirmation is required when using --activate-publication",
+            ['--recover-missing-webodm-task', 'task2'],
+            '--recover-missing-webodm-task requires --resume',
         ),
         (
             [
-                "--survey",
-                "AH_026_source",
-                "--publication-confirmation",
-                "PUBLISH AH-026019 run-cli-publication",
+                '--resume', '--run-id', 'recovery-run',
+                '--recover-missing-webodm-task', 'task2',
             ],
-            "--publication-confirmation requires --activate-publication",
+            'requires --both-tasks',
+        ),
+        (
+            [
+                '--resume', '--run-id', 'recovery-run', '--both-tasks',
+                '--recover-missing-webodm-task', 'task2',
+            ],
+            '--force-stage webodm_task2',
+        ),
+        (
+            [
+                '--resume', '--run-id', 'recovery-run', '--both-tasks',
+                '--force-stage', 'webodm_task2',
+                '--recover-missing-webodm-task', 'task2',
+                '--webodm-task-recovery-project-id', '540',
+                '--webodm-task-recovery-confirmation', 'wrong',
+            ],
+            '--webodm-task-recovery-confirmation must exactly match',
+        ),
+    ],
+)
+def test_cli_rejects_invalid_missing_task2_recovery(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    extra_args,
+    expected_message,
+):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ['--survey', 'AH_026_source', *extra_args],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert expected_message in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
+
+
+def test_missing_webodm_project_preflight_is_plan_only(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    run_id = "run-missing-project-plan"
+    confirmation = (
+        "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+        f"370 FOR RUN {run_id}"
+    )
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey", "AH_026_source",
+            "--resume", "--run-id", run_id,
+            "--force-stage", "webodm_task4",
+            "--recover-missing-webodm-project", "task4",
+            "--missing-webodm-project-id", "370",
+            "--missing-webodm-recovery-confirmation", confirmation,
+            "--storage-preflight-only",
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_run_state_read_only",
+        lambda _database, _run_id: {
+            "run_id": run_id,
+            "source_dir": str(tmp_path / "source"),
+            "workspace_root": str(tmp_path / "workspaces"),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        "read_latest_stage_statuses_read_only",
+        lambda _database, _run_id: {"webodm": "requires_recovery"},
+    )
+
+    rgb_main.main()
+
+    assert FakeRGBPipeline.instances == []
+    output = capsys.readouterr().out
+    assert "Missing WebODM project recovery" in output
+    assert "PLAN ONLY - WebODM and database unchanged" in output
+
+
+@pytest.mark.parametrize(
+    "extra_args, expected_message",
+    [
+        (
+            ["--recover-missing-webodm-project", "task4"],
+            "--recover-missing-webodm-project requires --resume",
+        ),
+        (
+            [
+                "--resume", "--run-id", "recovery-run",
+                "--recover-missing-webodm-project", "task4",
+            ],
+            "--missing-webodm-project-id is required",
+        ),
+        (
+            [
+                "--resume", "--run-id", "recovery-run",
+                "--recover-missing-webodm-project", "task4",
+                "--missing-webodm-project-id", "370",
+            ],
+            "--force-stage webodm_task4",
+        ),
+        (
+            [
+                "--resume", "--run-id", "recovery-run",
+                "--force-stage", "webodm_task4",
+                "--recover-missing-webodm-project", "task4",
+                "--missing-webodm-project-id", "370",
+                "--missing-webodm-recovery-confirmation", "wrong",
+            ],
+            "--missing-webodm-recovery-confirmation must exactly match",
+        ),
+        (
+            ["--missing-webodm-project-id", "370"],
+            "require --recover-missing-webodm-project",
+        ),
+        (
+            [
+                "--resume", "--run-id", "recovery-run",
+                "--task2",
+                "--force-stage", "webodm_task4",
+                "--recover-missing-webodm-project", "task4",
+                "--missing-webodm-project-id", "370",
+                "--missing-webodm-recovery-confirmation",
+                (
+                    "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+                    "370 FOR RUN recovery-run"
+                ),
+            ],
+            "requires Task 4-only mode",
+        ),
+    ],
+)
+def test_cli_rejects_invalid_missing_webodm_project_recovery(
+    monkeypatch,
+    tmp_path,
+    capsys,
+    extra_args,
+    expected_message,
+):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ["--survey", "AH_026_source", *extra_args],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert expected_message in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
+
+
+def test_cli_rejects_combined_empty_and_missing_project_recovery(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    run_id = "combined-recovery-run"
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            "--survey", "AH_026_source",
+            "--resume", "--run-id", run_id,
+            "--force-stage", "webodm_task4",
+            "--recover-empty-webodm-project", "task4",
+            "--webodm-recovery-project-id", "370",
+            "--webodm-recovery-confirmation",
+            f"CREATE TASK4 IN EMPTY WEBODM PROJECT 370 FOR RUN {run_id}",
+            "--recover-missing-webodm-project", "task4",
+            "--missing-webodm-project-id", "370",
+            "--missing-webodm-recovery-confirmation",
+            (
+                "CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT "
+                f"370 FOR RUN {run_id}"
+            ),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+
+    assert exc_info.value.code == 2
+    assert "cannot be combined" in capsys.readouterr().err
+    assert FakeRGBPipeline.instances == []
+
+
+def test_cli_passes_guarded_qgis_tile_rebuild(monkeypatch, tmp_path):
+    run_id = 'qgis-rebuild-run'
+    phrase = f'REBUILD QGIS TILES task4 FOR RUN {run_id}'
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            '--survey', 'AH_026_source',
+            '--resume', '--run-id', run_id,
+            '--rebuild-qgis-tiles', 'task4',
+            '--qgis-tile-rebuild-confirmation', phrase,
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_run_state_read_only',
+        lambda *_args: {
+            'run_id': run_id,
+            'source_dir': str(tmp_path / 'source'),
+            'workspace_root': str(tmp_path / 'workspaces'),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_latest_stage_statuses_read_only',
+        lambda *_args: {'qgis': 'failed'},
+    )
+
+    rgb_main.main()
+
+    [pipeline] = FakeRGBPipeline.instances
+    assert pipeline.run_kwargs['qgis_tile_rebuild'] == {
+        'task_key': 'task4',
+        'confirmation': phrase,
+    }
+
+
+def test_qgis_rebuild_preflight_reports_without_pipeline(
+    monkeypatch, tmp_path, capsys
+):
+    run_id = 'qgis-rebuild-plan'
+    phrase = f'REBUILD QGIS TILES task4 FOR RUN {run_id}'
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            '--survey', 'AH_026_source',
+            '--resume', '--run-id', run_id,
+            '--rebuild-qgis-tiles', 'task4',
+            '--qgis-tile-rebuild-confirmation', phrase,
+            '--storage-preflight-only',
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_run_state_read_only',
+        lambda *_args: {
+            'source_dir': str(tmp_path / 'source'),
+            'workspace_root': str(tmp_path / 'workspaces'),
+        },
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_latest_stage_statuses_read_only',
+        lambda *_args: {'qgis': 'failed'},
+    )
+
+    rgb_main.main()
+
+    assert FakeRGBPipeline.instances == []
+    assert 'PLAN ONLY - no files moved' in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    'extra_args, message',
+    [
+        (
+            ['--rebuild-qgis-tiles', 'task4'],
+            '--rebuild-qgis-tiles requires --resume',
+        ),
+        (
+            ['--qgis-tile-rebuild-confirmation', 'wrong'],
+            'requires --rebuild-qgis-tiles',
+        ),
+    ],
+)
+def test_cli_rejects_incomplete_qgis_rebuild_flags(
+    monkeypatch, tmp_path, capsys, extra_args, message
+):
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        ['--survey', 'AH_026_source', *extra_args],
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+    assert exc_info.value.code == 2
+    assert message in capsys.readouterr().err
+
+
+def test_cli_rejects_qgis_rebuild_for_completed_stage(
+    monkeypatch, tmp_path, capsys
+):
+    run_id = 'qgis-completed-run'
+    phrase = f'REBUILD QGIS TILES task4 FOR RUN {run_id}'
+    _prepare_cli(
+        monkeypatch,
+        tmp_path,
+        [
+            '--survey', 'AH_026_source',
+            '--resume', '--run-id', run_id,
+            '--rebuild-qgis-tiles', 'task4',
+            '--qgis-tile-rebuild-confirmation', phrase,
+        ],
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_run_state_read_only',
+        lambda *_args: {'source_dir': str(tmp_path / 'source')},
+    )
+    monkeypatch.setattr(
+        rgb_main,
+        'read_latest_stage_statuses_read_only',
+        lambda *_args: {'qgis': 'completed'},
+    )
+    with pytest.raises(SystemExit) as exc_info:
+        rgb_main.main()
+    assert exc_info.value.code == 2
+    assert 'failed or incomplete QGIS stage' in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    'argv, expected_message',
+    [
+        (
+            ['--survey', 'AH_026_source', '--activate-publication'],
+            '--publication-confirmation is required when using --activate-publication',
+        ),
+        (
+            [
+                '--survey',
+                'AH_026_source',
+                '--publication-confirmation',
+                'PUBLISH AH-026019 run-cli-publication',
+            ],
+            '--publication-confirmation requires --activate-publication',
         ),
     ],
 )

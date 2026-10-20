@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from modules.webodm.webodm_processor import WebODMProjectNotFound
+
 
 class TransientWebODMError(RuntimeError):
     """Deterministic retryable failure used by tests."""
@@ -33,6 +35,7 @@ class FakeWebODM:
         self.transient_failures = dict(transient_failures or {})
         self.permanent_failures = set(permanent_failures or set())
         self.task_statuses: dict[str, str] = {}
+        self.projects: dict[int, dict[str, Any]] = {}
         self.project_tasks: dict[int, list[dict[str, Any]]] = {}
         self.authenticated = False
         self._next_project_id = 100
@@ -53,6 +56,19 @@ class FakeWebODM:
     def configure_task_status(self, task_id: str, status: str) -> None:
         self.task_statuses[str(task_id)] = status
 
+    def configure_project(
+        self,
+        project_id: int,
+        *,
+        name: str = "configured-project",
+        description: str = "",
+    ) -> None:
+        self.projects[int(project_id)] = {
+            "id": int(project_id),
+            "name": name,
+            "description": description,
+        }
+
     def configure_project_tasks(
         self,
         project_id: int,
@@ -72,7 +88,22 @@ class FakeWebODM:
         self._record("create_project", name, description=description)
         project_id = self._next_project_id
         self._next_project_id += 1
+        self.projects[project_id] = {
+            "id": project_id,
+            "name": name,
+            "description": description,
+        }
         return project_id
+
+    def get_project(self, project_id: int, **kwargs: Any) -> dict[str, Any]:
+        project_id = int(project_id)
+        self._record("get_project", project_id, **kwargs)
+        project = self.projects.get(project_id)
+        if project is None:
+            raise WebODMProjectNotFound(
+                f"WebODM project not found: project_id={project_id}"
+            )
+        return dict(project)
 
     def create_task_with_images(
         self,

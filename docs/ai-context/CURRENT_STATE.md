@@ -2,7 +2,7 @@
 
 ## Snapshot
 
-- Snapshot date: 2026-09-07
+- Snapshot date: 2026-09-11
 - Repository state: pipeline refactor in progress; shared API/UI contracts have been added for coordinated pipeline and web-app workstreams.
 - Current pipeline phase: Phase 3, run-scoped workspace ownership and publication activation preparation.
 - Current implementation posture: guarded publication activation is wired through `RGBPipeline.run()` and an explicit CLI confirmation surface; default runs still do not activate publication.
@@ -41,6 +41,10 @@
 - DJI M3M ingestion supports independent `--uav <folder>` candidate filtering
   and strict `--rgb` `*_D.JPG` selection across arbitrary nested capture
   splits, with one selector shared by preflight and segregation.
+- Guarded QGIS tile recovery recognizes observed unreadable resumed-tile
+  failures as non-transient. An exact run/task-confirmed command quarantines
+  the whole run-owned local tile tree with recovery metadata and rebuilds from
+  an empty active directory; ordinary resumes remain unchanged.
 
 ## Known Gaps
 
@@ -49,7 +53,7 @@
 - `partially_completed` is mapped for the run, survey, and compatibility WebODM coordinator when Task 4 succeeds and Task 2 fails; dedicated API/UI operation projection remains deferred.
 - WebODM/QGIS stages still mirror outputs into legacy paths during stage execution; pipeline is not workspace-only-until-publish.
 - Older workspaces without `.run-workspace.json` ownership evidence remain resumable but are retained rather than automatically deleted.
-- Default collection and the full hermetic suite are healthy: 342 tests collect
+- Default collection and the full hermetic suite are healthy: 377 tests collect
   and pass without exclusions.
 - Empty-project recovery was exercised once for the explicitly authorized
   production run/project and returned a durable Task 4 UUID before normal
@@ -68,6 +72,10 @@
   implemented. Current `--force-stage data_segregation` wiring does not safely
   restore the persisted survey ID or enable existing-folder recovery, so it
   must not be used as a substitute for that future repair path.
+- BCO-102 run `47cd8922-630c-4a22-90d0-8494669ecb80` remains operationally
+  blocked on its corrupt resumed Task 4 tile set until the operator runs the
+  new guarded quarantine/rebuild command. Automated validation does not touch
+  that production path.
 
 ## Working Tree Notes
 

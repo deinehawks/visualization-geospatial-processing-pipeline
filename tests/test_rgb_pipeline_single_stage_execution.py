@@ -24,6 +24,7 @@ if "exifread" not in sys.modules and importlib.util.find_spec("exifread") is Non
 from pipelines import rgb_pipeline as rgb_module
 from pipelines.rgb_pipeline import RGBPipeline
 from modules.webodm.webodm_processor import (
+    WebODMProjectLookupError,
     WebODMTaskLookupError,
     WebODMTaskNotFound,
 )
@@ -37,6 +38,7 @@ from shared.artifacts import (
 )
 from shared.publication_lock import acquire_publication_lock, PublicationLockedError
 from shared.storage_preflight import StorageCapacityError
+from shared.qgis_tile_recovery import qgis_tile_rebuild_confirmation
 from tests.fakes import FakeWebODM
 
 
@@ -416,6 +418,44 @@ def all_stage_names(database_path, run_id=RUN_ID):
     return [row[0] for row in rows]
 
 
+def fake_raster_metadata_reader(tif_path, *, gdalinfo_path):
+    tif_path = Path(tif_path)
+    if not tif_path.is_file():
+        raise FileNotFoundError(tif_path)
+    return {
+        "driver": "GTiff",
+        "program_name": "ODM 3.5.6",
+        "dimensions": "32628 x 23486",
+        "width_pixels": 32628,
+        "height_pixels": 23486,
+        "band_count": 4,
+        "bits_per_channel": 8,
+        "bits_per_pixel": 32,
+        "compression": "LZW",
+        "pixel_size_x": 0.0000001827337,
+        "pixel_size_y": -0.0000001827337,
+        "pixel_size_unit": "degree",
+        "crs": "EPSG:4326",
+        "bands": [],
+        "file_size_bytes": tif_path.stat().st_size,
+    }
+
+
+def write_test_survey_manifest(survey_path, survey_id):
+    manifest_path = Path(survey_path) / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "survey_id": survey_id,
+                "image_count": 1,
+                "test_sentinel": "preserve",
+            }
+        ),
+        encoding="utf-8",
+    )
+    return manifest_path
+
+
 def build_pipeline(
     temporary_path_layout,
     sample_dataset_dir,
@@ -424,6 +464,7 @@ def build_pipeline(
     pipeline_log_path=None,
     webodm_log_path=None,
     rgb_only=False,
+    raster_metadata_reader=fake_raster_metadata_reader,
 ):
     return RGBPipeline(
         temporary_path_layout.application_root,
@@ -442,6 +483,7 @@ def build_pipeline(
         checkpoint_dir=temporary_path_layout.checkpoint_dir,
         webodm_processor=fake_webodm,
         rgb_only=rgb_only,
+        raster_metadata_reader=raster_metadata_reader,
     )
 
 
@@ -585,6 +627,7 @@ def prepare_webodm_ortho_context(pipeline, temporary_path_layout, survey_id="TES
     boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
     boundary_path.parent.mkdir(parents=True)
     boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    write_test_survey_manifest(survey_path, survey_id)
 
     pipeline._set_survey_artifact_context(survey_id, survey_path)
     pipeline.state.update(
@@ -622,6 +665,7 @@ def prepare_qgis_context(
     boundary_path = survey_path / "boundary" / f"{survey_id}.geojson"
     boundary_path.parent.mkdir(parents=True)
     boundary_path.write_text('{"type":"FeatureCollection","features":[]}', encoding="utf-8")
+    write_test_survey_manifest(survey_path, survey_id)
 
     tile_mode = "round-corners" if boundary_used else "soft-corners"
 
@@ -1822,6 +1866,14 @@ def test_webodm_task2_orthomosaic_exports_workspace_then_legacy(
     assert result["published"]["webodm_ortho"]["task2"] == str(legacy_ortho)
     assert result["selected_orthomosaic"]["source_path"] == str(legacy_ortho)
     assert pipeline.state["selected_orthomosaic"]["source_path"] == str(legacy_ortho)
+    manifest = json.loads((survey_path / "manifest.json").read_text(encoding="utf-8"))
+    raster = manifest["raster_outputs"]["webodm_orthomosaic_task2"]
+    assert manifest["test_sentinel"] == "preserve"
+    assert raster["filename"] == "task2-output.tif"
+    assert raster["relative_path"] == "ortho/task2-output.tif"
+    assert raster["dimensions"] == "32628 x 23486"
+    assert raster["bits_per_pixel"] == 32
+    assert raster["compression"] == "LZW"
 
     for path_to_check in (
         workspace_ortho,
@@ -2206,6 +2258,104 @@ def test_webodm_pointcloud_failure_leaves_legacy_outputs_untouched(
     assert workspace_pcd.read_text(encoding="utf-8") == "workspace pcd"
     assert legacy_laz.read_text(encoding="utf-8") == "old laz"
     assert legacy_pcd.read_text(encoding="utf-8") == "old pcd"
+def test_qgis_guarded_rebuild_quarantines_then_generates_fresh(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+    )
+    prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+        task_key='task4',
+        task_label='t4',
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    staging = temporary_path_layout.upload_cache_dir / 'qgis-staging'
+    pipeline.config['qgis']['local_staging'] = {
+        'enabled': True,
+        'dir': str(staging),
+    }
+    active = (
+        staging / 'tiles' / pipeline.run_id / 'task4'
+        / 'tiles' / 'round-corners'
+    )
+    old_tile = active / '24' / '10' / '20.png'
+    old_tile.parent.mkdir(parents=True)
+    old_tile.write_bytes(b'partial')
+    phrase = qgis_tile_rebuild_confirmation(pipeline.run_id, 'task4')
+    pipeline._qgis_tile_rebuild = {
+        'task_key': 'task4',
+        'confirmation': phrase,
+    }
+    FakeQGISTools.instances = []
+    monkeypatch.setattr(rgb_module, 'QGISTools', FakeQGISTools)
+
+    result = pipeline.stage_qgis(resume=True)
+
+    generate = [
+        call for call in FakeQGISTools.instances[-1].calls
+        if call['method'] == 'generate_tiles'
+    ][0]
+    assert generate['resume'] is False
+    assert generate['clean'] is False
+    recovery = result['selected_orthomosaic']['tile_rebuild']
+    quarantined = Path(recovery['quarantine_path'])
+    assert (quarantined / '24' / '10' / '20.png').read_bytes() == b'partial'
+    assert Path(recovery['manifest_path']).is_file()
+
+
+def test_qgis_resume_corruption_becomes_non_retryable_failure(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        PipelineRepo(temporary_path_layout.database_path),
+        FakeWebODM(),
+    )
+    prepare_qgis_context(pipeline, temporary_path_layout)
+    configure_qgis_for_fake_tools(pipeline)
+
+    attempts = 0
+
+    def fail_corrupt_tiles(self, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise rgb_module.QGISTileResumeCorruptionError(
+            'corrupt resumed tile',
+            151185,
+            'not a unicode string, bytes, bytearray or memoryview',
+        )
+
+    monkeypatch.setattr(
+        FakeQGISTools,
+        'generate_tiles',
+        fail_corrupt_tiles,
+    )
+    monkeypatch.setattr(rgb_module, 'QGISTools', FakeQGISTools)
+
+    with pytest.raises(StageFailedWithOutput) as exc_info:
+        pipeline.runner.run(
+            'qgis_corruption_probe',
+            lambda: pipeline.stage_qgis(resume=True),
+            retry_attempts=3,
+            retry_delay_seconds=0,
+        )
+
+    assert attempts == 1
+    assert exc_info.value.output['failure_type'] == 'qgis_tile_resume_corruption'
+    assert exc_info.value.output['existing_tile_count'] == 151185
+
+
 def test_qgis_outputs_workspace_then_mirrors_legacy_paths(
     monkeypatch,
     temporary_path_layout,
@@ -2343,6 +2493,72 @@ def test_qgis_outputs_workspace_then_mirrors_legacy_paths_for_task4_selection(
     assert workspace_tile.read_text(encoding="utf-8") == "workspace tile"
     assert legacy_tile.read_text(encoding="utf-8") == "workspace tile"
     assert not legacy_stale_tile.exists()
+    manifest = json.loads((survey_path / "manifest.json").read_text(encoding="utf-8"))
+    source_raster = manifest["raster_outputs"]["webodm_orthomosaic_task4"]
+    clipped_raster = manifest["raster_outputs"]["qgis_clipped_task4"]
+    assert source_raster["relative_path"] == "ortho/orthomosaic--xcb-t4.tif"
+    assert clipped_raster["relative_path"] == (
+        "qgis/clipped/ortho/orthomosaic-clipped--xcb-t4.tif"
+    )
+    assert clipped_raster["program_name"] == "ODM 3.5.6"
+    assert clipped_raster["width_pixels"] == 32628
+    assert clipped_raster["height_pixels"] == 23486
+
+
+def test_qgis_metadata_validation_failure_does_not_replace_published_clip(
+    monkeypatch,
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    def reject_clipped_raster(tif_path, *, gdalinfo_path):
+        if Path(tif_path).name.startswith("orthomosaic-clipped"):
+            raise RuntimeError("required TIFF metadata is missing")
+        return fake_raster_metadata_reader(
+            tif_path,
+            gdalinfo_path=gdalinfo_path,
+        )
+
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        FakeWebODM(),
+        raster_metadata_reader=reject_clipped_raster,
+    )
+    survey_path, _source_ortho, _boundary_path = prepare_qgis_context(
+        pipeline,
+        temporary_path_layout,
+        survey_id="TEST-SURVEY-QGIS-METADATA-FAILURE",
+        task_key="task4",
+        task_label="t4",
+    )
+    configure_qgis_for_fake_tools(pipeline)
+    FakeQGISTools.instances = []
+    FakeQGISTools.fail_clip = False
+    FakeQGISTools.fail_tiles = False
+    monkeypatch.setattr(rgb_module, "QGISTools", FakeQGISTools)
+
+    published_clip = (
+        survey_path
+        / "qgis"
+        / "clipped"
+        / "ortho"
+        / "orthomosaic-clipped--xcb-t4.tif"
+    )
+    published_clip.parent.mkdir(parents=True)
+    published_clip.write_text("old clipped", encoding="utf-8")
+
+    with pytest.raises(StageFailedWithOutput, match="metadata validation failed"):
+        pipeline.stage_qgis()
+
+    assert published_clip.read_text(encoding="utf-8") == "old clipped"
+    assert [
+        call["method"] for call in FakeQGISTools.instances[-1].calls
+    ] == ["clip_raster_by_mask"]
+    manifest = json.loads((survey_path / "manifest.json").read_text(encoding="utf-8"))
+    assert "webodm_orthomosaic_task4" in manifest["raster_outputs"]
+    assert "qgis_clipped_task4" not in manifest["raster_outputs"]
 
 
 def test_qgis_both_mode_runs_once_per_successful_webodm_operation(
@@ -4046,6 +4262,770 @@ def prepare_empty_project_recovery(
     }
 
 
+def prepare_missing_project_recovery(
+    pipeline,
+    repository,
+    temporary_path_layout,
+    *,
+    project_id=370,
+):
+    _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+        survey_id='AH-026074',
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = True
+    pipeline.skip_task4_webodm = False
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+    pipeline._preflight_stage = lambda stage_name: None
+    pipeline.control.start_hotkeys = lambda logger: None
+    task_name = pipeline._webodm_task_name(
+        survey_id=pipeline.survey_id,
+        flag=pipeline._webodm_task_flag(
+            'task4',
+            default_boundary_mode='b',
+        ),
+        task_key='task4',
+    )
+    repository.record_webodm_binding(
+        run_id=RUN_ID,
+        operation_key='task4',
+        project_id=project_id,
+        task_name=task_name,
+        local_status='project_bound',
+    )
+    pipeline.state['webodm'] = {
+        'project_id': project_id,
+        'project_name': pipeline.survey_id,
+        'task4': {},
+        'downloads': {'task4': {}},
+    }
+    failed_stage_id = repository.start_stage(RUN_ID, 'webodm')
+    repository.finish_stage(
+        failed_stage_id,
+        success=False,
+        runtime_seconds=0.1,
+        error_message='persisted project was deleted',
+    )
+    return {
+        'operation': 'task4',
+        'project_id': project_id,
+        'confirmation': (
+            'CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT '
+            f'{project_id} FOR RUN {RUN_ID}'
+        ),
+    }
+
+
+def prepare_missing_task2_recovery(
+    pipeline,
+    repository,
+    fake_webodm,
+    temporary_path_layout,
+    *,
+    project_id=540,
+):
+    _survey_path, image_path, _boundary_path = prepare_webodm_ortho_context(
+        pipeline,
+        temporary_path_layout,
+        survey_id='AH-026130',
+    )
+    enable_only_orthomosaic_export(pipeline)
+    pipeline.webodm_mode = 'both'
+    pipeline.skip_task1_webodm = True
+    pipeline.skip_task2_webodm = False
+    pipeline.skip_task4_webodm = False
+    pipeline._stage_upload_cache = lambda **kwargs: (image_path, 1)
+    pipeline._preflight_stage = lambda stage_name: None
+    pipeline._check_write_capacity = lambda **kwargs: {
+        'ok': True,
+        'volumes': [],
+    }
+    pipeline.control.start_hotkeys = lambda logger: None
+
+    task4_name = pipeline._webodm_task_name(
+        survey_id=pipeline.survey_id,
+        flag=pipeline._webodm_task_flag(
+            'task4',
+            default_boundary_mode='b',
+        ),
+        task_key='task4',
+    )
+    task4_id = 'existing-task4-uuid'
+    repository.record_webodm_binding(
+        run_id=RUN_ID,
+        operation_key='task4',
+        project_id=project_id,
+        task_id=task4_id,
+        task_name=task4_name,
+        survey_id=pipeline.survey_id,
+        remote_status='completed',
+        local_status='processing_completed',
+    )
+    webodm_state = {
+        'project_id': project_id,
+        'project_name': pipeline.survey_id,
+        'task4': {
+            'id': task4_id,
+            'name': task4_name,
+            'success': True,
+            'remote_status': 'completed',
+        },
+        'downloads': {'task4': {}, 'task2': {}},
+    }
+    pipeline.state['webodm'] = webodm_state
+    pipeline._save_webodm_checkpoint(webodm_state)
+    task4_stage_id = repository.start_stage(RUN_ID, 'webodm_task4')
+    repository.finish_stage(
+        task4_stage_id,
+        success=True,
+        runtime_seconds=1.0,
+        output={
+            'operation_key': 'task4',
+            'status': 'completed',
+            'success': True,
+            'webodm': webodm_state,
+        },
+    )
+    failed_webodm_id = repository.start_stage(RUN_ID, 'webodm')
+    repository.finish_stage(
+        failed_webodm_id,
+        success=False,
+        runtime_seconds=0.1,
+        error_message='Task 2 has no durable task UUID',
+        output={'webodm': webodm_state},
+    )
+    fake_webodm.configure_project_tasks(
+        project_id,
+        [
+            {
+                'id': task4_id,
+                'name': task4_name,
+                'status': 'completed',
+            }
+        ],
+    )
+    return {
+        'operation': 'task2',
+        'project_id': project_id,
+        'confirmation': (
+            f'CREATE TASK2 IN WEBODM PROJECT {project_id} FOR RUN {RUN_ID}'
+        ),
+    }
+
+
+def test_missing_task2_recovery_creates_one_task_after_exact_task4_verification(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_task2_recovery(
+        pipeline,
+        repository,
+        fake_webodm,
+        temporary_path_layout,
+    )
+
+    result = pipeline.run(
+        selected_stages={'webodm'},
+        force_stages={'webodm_task2'},
+        resume=True,
+        raise_on_error=True,
+        missing_webodm_task_recovery=recovery,
+    )
+
+    assert result['webodm']['task4']['id'] == 'existing-task4-uuid'
+    assert result['webodm']['task2']['id'] == 'task-0001'
+    assert len(fake_webodm.calls_for('list_project_tasks')) == 1
+    create_calls = fake_webodm.calls_for('create_task_with_images')
+    assert len(create_calls) == 1
+    assert create_calls[0].args[0] == 540
+    assert create_calls[0].args[1].endswith('-t2')
+    binding = repository.get_webodm_binding(RUN_ID, 'task2')
+    assert binding['project_id'] == 540
+    assert binding['task_id'] == 'task-0001'
+    authorization_rows = [
+        row
+        for row in repository.list_webodm_bindings(RUN_ID)
+        if row['operation_key'] == 'task2'
+        and row['audit_json']
+        and json.loads(row['audit_json']).get('event')
+        == 'missing_webodm_task_recovery_authorized'
+    ]
+    assert len(authorization_rows) == 1
+    audit = json.loads(authorization_rows[0]['audit_json'])
+    assert audit['event'] == 'missing_webodm_task_recovery_authorized'
+    assert audit['verified_task4_id'] == 'existing-task4-uuid'
+    assert audit['verified_remote_task_count'] == 1
+
+
+def test_missing_task2_recovery_refuses_project_with_another_remote_task(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_task2_recovery(
+        pipeline,
+        repository,
+        fake_webodm,
+        temporary_path_layout,
+    )
+    fake_webodm.project_tasks[540].append(
+        {'id': 'unbound-task', 'name': 'possible-task2', 'status': 'queued'}
+    )
+
+    with pytest.raises(StageRequiresRecovery, match='exactly the bound Task 4'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task2'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_task_recovery=recovery,
+        )
+
+    assert fake_webodm.calls_for('create_task_with_images') == []
+
+
+def test_missing_task2_recovery_refuses_incomplete_remote_task4(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_task2_recovery(
+        pipeline,
+        repository,
+        fake_webodm,
+        temporary_path_layout,
+    )
+    fake_webodm.project_tasks[540][0]['status'] = 'running'
+
+    with pytest.raises(StageRequiresRecovery, match='exact completed Task 4'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task2'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_task_recovery=recovery,
+        )
+
+    assert fake_webodm.calls_for('create_task_with_images') == []
+
+
+@pytest.mark.parametrize(
+    'recovery, resume, force_stages, mode, expected_message',
+    [
+        (
+            {
+                'operation': 'task2',
+                'project_id': 540,
+                'confirmation': (
+                    f'CREATE TASK2 IN WEBODM PROJECT 540 FOR RUN {RUN_ID}'
+                ),
+            },
+            False,
+            {'webodm_task2'},
+            'both',
+            'requires resume=True',
+        ),
+        (
+            {
+                'operation': 'task4',
+                'project_id': 540,
+                'confirmation': 'irrelevant',
+            },
+            True,
+            {'webodm_task2'},
+            'both',
+            'supports task2 only',
+        ),
+        (
+            {
+                'operation': 'task2',
+                'project_id': 540,
+                'confirmation': (
+                    f'CREATE TASK2 IN WEBODM PROJECT 540 FOR RUN {RUN_ID}'
+                ),
+            },
+            True,
+            set(),
+            'both',
+            'requires force stage webodm_task2',
+        ),
+        (
+            {
+                'operation': 'task2',
+                'project_id': 540,
+                'confirmation': (
+                    f'CREATE TASK2 IN WEBODM PROJECT 540 FOR RUN {RUN_ID}'
+                ),
+            },
+            True,
+            {'webodm_task2'},
+            'task2',
+            'requires combined mode',
+        ),
+        (
+            {
+                'operation': 'task2',
+                'project_id': 540,
+                'confirmation': 'wrong',
+            },
+            True,
+            {'webodm_task2'},
+            'both',
+            'requires exact confirmation',
+        ),
+    ],
+)
+def test_programmatic_missing_task2_recovery_rejects_invalid_authorization(
+    temporary_path_layout,
+    sample_dataset_dir,
+    recovery,
+    resume,
+    force_stages,
+    mode,
+    expected_message,
+):
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        PipelineRepo(temporary_path_layout.database_path),
+        fake_webodm,
+    )
+    pipeline.webodm_mode = mode
+
+    with pytest.raises(ValueError, match=expected_message):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages=force_stages,
+            resume=resume,
+            raise_on_error=True,
+            missing_webodm_task_recovery=recovery,
+        )
+
+    assert fake_webodm.calls == []
+
+
+def test_confirmed_missing_project_recovery_rebinds_and_creates_one_task(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_project_recovery(
+        pipeline,
+        repository,
+        temporary_path_layout,
+    )
+
+    result = pipeline.run(
+        selected_stages={'webodm'},
+        force_stages={'webodm_task4'},
+        resume=True,
+        raise_on_error=True,
+        missing_webodm_project_recovery=recovery,
+    )
+
+    assert result['webodm']['project_id'] == 100
+    assert result['webodm']['task4']['id'] == 'task-0001'
+    assert len(fake_webodm.calls_for('get_project')) == 1
+    assert len(fake_webodm.calls_for('create_project')) == 1
+    assert len(fake_webodm.calls_for('create_task_with_images')) == 1
+    history = [
+        row
+        for row in repository.list_webodm_bindings(RUN_ID)
+        if row['operation_key'] == 'task4'
+    ]
+    assert [(row['project_id'], row['task_id']) for row in history] == [
+        (370, None),
+        (100, 'task-0001'),
+    ]
+    audit = json.loads(history[-1]['audit_json'])
+    assert audit['event'] == 'missing_webodm_project_replaced'
+    assert audit['old_project_id'] == 370
+    assert audit['new_project_id'] == 100
+    assert audit['previous_binding']['id'] == history[0]['id']
+    receipt = json.loads(
+        pipeline._webodm_project_recovery_receipt_path().read_text(
+            encoding='utf-8'
+        )
+    )
+    assert receipt['status'] == 'binding_persisted'
+    assert receipt['new_project_id'] == 100
+    checkpoint = json.loads(
+        pipeline._webodm_checkpoint_path().read_text(encoding='utf-8')
+    )
+    assert checkpoint['project_id'] == 100
+    for operation in ('task1', 'task2'):
+        placeholder = repository.get_webodm_binding(RUN_ID, operation)
+        assert placeholder['project_id'] == 100
+        assert placeholder['task_id'] is None
+    pipeline._restore_webodm_identity()
+    assert pipeline.state['webodm']['project_id'] == 100
+
+
+def test_missing_project_recovery_refuses_project_that_still_exists(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    fake_webodm.configure_project(370, name='AH-026074')
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_project_recovery(
+        pipeline,
+        repository,
+        temporary_path_layout,
+    )
+
+    with pytest.raises(StageRequiresRecovery, match='still exists'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task4'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+
+    assert fake_webodm.calls_for('create_project') == []
+    assert fake_webodm.calls_for('create_task_with_images') == []
+    assert not pipeline._webodm_project_recovery_receipt_path().exists()
+
+
+def test_missing_project_lookup_failure_refuses_replacement(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    class LookupFailureWebODM(OrthomosaicExportFakeWebODM):
+        def get_project(self, project_id, **kwargs):
+            self._record('get_project', int(project_id), **kwargs)
+            raise WebODMProjectLookupError('controlled lookup failure')
+
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = LookupFailureWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_project_recovery(
+        pipeline,
+        repository,
+        temporary_path_layout,
+    )
+
+    with pytest.raises(StageRequiresRecovery, match='Could not confirm'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task4'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+
+    assert fake_webodm.calls_for('create_project') == []
+    assert fake_webodm.calls_for('create_task_with_images') == []
+
+
+def test_ambiguous_replacement_creation_receipt_blocks_duplicate(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    fake_webodm.permanent_failures.add('create_project')
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_project_recovery(
+        pipeline,
+        repository,
+        temporary_path_layout,
+    )
+
+    with pytest.raises(StageRequiresRecovery, match='returned ambiguously'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task4'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+    fake_webodm.permanent_failures.clear()
+    with pytest.raises(StageRequiresRecovery, match='manual review'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task4'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+
+    assert len(fake_webodm.calls_for('create_project')) == 1
+    assert fake_webodm.calls_for('create_task_with_images') == []
+    receipt = json.loads(
+        pipeline._webodm_project_recovery_receipt_path().read_text(
+            encoding='utf-8'
+        )
+    )
+    assert receipt['status'] == 'creation_ambiguous'
+
+
+def test_created_replacement_receipt_is_reconciled_without_duplicate_project(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_project_recovery(
+        pipeline,
+        repository,
+        temporary_path_layout,
+    )
+    fake_webodm.configure_project(777, name='AH-026074')
+    pipeline._save_webodm_project_recovery_receipt(
+        {
+            'run_id': RUN_ID,
+            'operation': 'task4',
+            'old_project_id': 370,
+            'project_name': 'AH-026074',
+            'attempt_id': 'attempt-one',
+            'confirmation': recovery['confirmation'],
+            'status': 'project_created',
+            'new_project_id': 777,
+        }
+    )
+
+    result = pipeline.run(
+        selected_stages={'webodm'},
+        force_stages={'webodm_task4'},
+        resume=True,
+        raise_on_error=True,
+        missing_webodm_project_recovery=recovery,
+    )
+
+    assert result['webodm']['project_id'] == 777
+    assert fake_webodm.calls_for('create_project') == []
+    assert len(fake_webodm.calls_for('create_task_with_images')) == 1
+    latest = repository.get_webodm_binding(RUN_ID, 'task4')
+    assert latest['project_id'] == 777
+    audit = json.loads(latest['audit_json'])
+    assert audit['recovered_from_receipt'] is True
+
+
+@pytest.mark.parametrize(
+    'recovery, resume, force_stages, message',
+    [
+        (
+            {
+                'operation': 'task4',
+                'project_id': 370,
+                'confirmation': (
+                    'CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT '
+                    f'370 FOR RUN {RUN_ID}'
+                ),
+            },
+            False,
+            {'webodm_task4'},
+            'requires resume=True',
+        ),
+        (
+            {
+                'operation': 'task2',
+                'project_id': 370,
+                'confirmation': 'irrelevant',
+            },
+            True,
+            {'webodm_task4'},
+            'supports task4 only',
+        ),
+        (
+            {
+                'operation': 'task4',
+                'project_id': 370,
+                'confirmation': (
+                    'CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT '
+                    f'370 FOR RUN {RUN_ID}'
+                ),
+            },
+            True,
+            set(),
+            'requires force stage webodm_task4',
+        ),
+        (
+            {
+                'operation': 'task4',
+                'project_id': 370,
+                'confirmation': 'wrong',
+            },
+            True,
+            {'webodm_task4'},
+            'requires exact confirmation',
+        ),
+    ],
+)
+def test_programmatic_missing_project_recovery_rejects_invalid_authorization(
+    temporary_path_layout,
+    sample_dataset_dir,
+    recovery,
+    resume,
+    force_stages,
+    message,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages=force_stages,
+            resume=resume,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+
+    assert fake_webodm.calls == []
+
+
+def test_programmatic_missing_project_recovery_rejects_non_task4_mode(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        PipelineRepo(temporary_path_layout.database_path),
+        OrthomosaicExportFakeWebODM(),
+    )
+    pipeline.webodm_mode = 'both'
+    recovery = {
+        'operation': 'task4',
+        'project_id': 370,
+        'confirmation': (
+            'CREATE REPLACEMENT WEBODM PROJECT FOR MISSING PROJECT '
+            f'370 FOR RUN {RUN_ID}'
+        ),
+    }
+
+    with pytest.raises(ValueError, match='Task 4-only mode'):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task4'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+
+
+@pytest.mark.parametrize(
+    'mutation, expected_message',
+    [
+        ('existing_uuid', 'while Task 4 is bound'),
+        ('other_operation', 'requires no durable tasks'),
+    ],
+)
+def test_missing_project_recovery_refuses_local_identity_conflicts(
+    temporary_path_layout,
+    sample_dataset_dir,
+    mutation,
+    expected_message,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    recovery = prepare_missing_project_recovery(
+        pipeline,
+        repository,
+        temporary_path_layout,
+    )
+    if mutation == 'existing_uuid':
+        current = repository.get_webodm_binding(RUN_ID, 'task4')
+        repository.record_webodm_binding(
+            run_id=RUN_ID,
+            operation_key='task4',
+            project_id=370,
+            task_id='existing-task',
+            task_name=current['task_name'],
+        )
+    else:
+        repository.record_webodm_binding(
+            run_id=RUN_ID,
+            operation_key='task2',
+            project_id=370,
+            task_id='existing-task2',
+            task_name='AH-026074-RGB--pc-t2',
+        )
+
+    with pytest.raises(StageRequiresRecovery, match=expected_message):
+        pipeline.run(
+            selected_stages={'webodm'},
+            force_stages={'webodm_task4'},
+            resume=True,
+            raise_on_error=True,
+            missing_webodm_project_recovery=recovery,
+        )
+
+    assert fake_webodm.calls_for('get_project') == []
+    assert fake_webodm.calls_for('create_project') == []
+    assert fake_webodm.calls_for('create_task_with_images') == []
+
+
 def test_confirmed_empty_project_recovery_creates_one_task_and_preserves_audit(
     temporary_path_layout,
     sample_dataset_dir,
@@ -4437,6 +5417,43 @@ def test_restore_rejects_conflicting_legacy_and_canonical_task_ids(
         RUN_ID,
         'task4',
     )['task_id'] == 'canonical-task'
+    assert fake_webodm.calls == []
+
+
+def test_restore_rehydrates_none_task_state_from_canonical_binding(
+    temporary_path_layout,
+    sample_dataset_dir,
+):
+    repository = PipelineRepo(temporary_path_layout.database_path)
+    fake_webodm = OrthomosaicExportFakeWebODM()
+    pipeline = build_pipeline(
+        temporary_path_layout,
+        sample_dataset_dir,
+        repository,
+        fake_webodm,
+    )
+    repository.record_webodm_binding(
+        run_id=RUN_ID,
+        operation_key='task4',
+        project_id=537,
+        task_id='existing-task4',
+        task_name='AH-TEST-RGB--xcb-t4',
+    )
+    pipeline.state['webodm'] = {
+        'project_id': 537,
+        'task1': None,
+        'task2': {'id': 'cancelled-task2'},
+        'task4': None,
+        'downloads': {},
+    }
+
+    pipeline._restore_webodm_identity()
+
+    assert pipeline.state['webodm']['task4'] == {
+        'id': 'existing-task4',
+        'name': 'AH-TEST-RGB--xcb-t4',
+    }
+    assert pipeline.state['webodm']['task2']['id'] == 'cancelled-task2'
     assert fake_webodm.calls == []
 
 

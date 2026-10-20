@@ -32,6 +32,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 | CW-ADR-009 | Implemented and verified | Explicit Task 4 recovery may create only in a verified empty persisted WebODM project |
 | CW-ADR-010 | Implemented and verified | Keep UAV location and spectral selection independent |
 | CW-ADR-011 | Implemented and verified | Apply the all-assets ZIP export contract to Task 4 |
+| CW-ADR-012 | Implemented and verified | Explicitly replace a confirmed-deleted Task 4 project |
 
 ## CW-ADR-001 - Shared Contracts Reference Refactor Roadmap
 
@@ -148,4 +149,25 @@ The pipeline workstream has implemented the guarded `activate_publication` Stage
   must not overwrite an existing published ZIP.
 - **UI/API impact:** Future artifact projections may expose the Task 4
   all-assets ZIP using the documented additive metadata fields.
+
+## CW-ADR-012 - Explicit Recovery for a Confirmed-Deleted Task 4 Project
+
+- **Status:** Implemented and verified
+- **Context:** A persisted Task 4 project may be deleted outside the pipeline,
+  leaving a resumable local run with no remote project and no task UUID.
+- **Decision:** A CLI-only recovery requires resume, forced Task 4, the exact
+  missing project ID, and a run-bound confirmation. The pipeline creates one
+  replacement only after an authenticated exact-project lookup returns
+  `404`. An atomic receipt protects the non-idempotent create boundary, and
+  binding history retains both the missing and replacement project IDs.
+- **Compatibility requirement:** Normal resume and empty-project recovery
+  remain unchanged. Existing projects, durable task UUIDs, identity conflicts,
+  indeterminate lookups, and ambiguous prior creation attempts fail closed.
+  Task 2 and combined mode are not supported by this recovery.
+- **UI/API impact:** This is an explicit CLI recovery only. API/UI mutation
+  controls remain deferred; read projections may expose receipt and binding
+  audit status.
+- **Recovery:** A receipt containing a returned replacement ID can be
+  reconciled only after exact project-name and zero-task verification.
+  Ambiguous creation blocks automatic retry and requires operator inspection.
 

@@ -23,6 +23,14 @@ class WebODMTaskLookupError(RuntimeError):
     pass
 
 
+class WebODMProjectNotFound(RuntimeError):
+    pass
+
+
+class WebODMProjectLookupError(RuntimeError):
+    pass
+
+
 class WebODMProcessor:
     def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
         self.base_url = url.rstrip("/")
@@ -72,6 +80,76 @@ class WebODMProcessor:
         project_id = resp.json()["id"]
         self.logger.info(f"Project created (ID={project_id})")
         return int(project_id)
+
+    def get_project(
+        self,
+        project_id: int,
+        *,
+        retries: int = 5,
+        backoff: float = 2.0,
+    ) -> dict:
+        """Fetch one exact project and distinguish a confirmed 404."""
+        project_id = int(project_id)
+        url = f"{self.base_url}/api/projects/{project_id}/"
+        last_err: Optional[Exception] = None
+
+        for attempt in range(1, retries + 1):
+            try:
+                resp = self.session.get(url, headers=self.headers, timeout=60)
+                if resp.status_code in (401, 403):
+                    last_err = WebODMProjectLookupError(
+                        "WebODM project lookup authentication failed with "
+                        f"status {resp.status_code}"
+                    )
+                    self.logger.warning(
+                        "get_project auth error "
+                        f"(status={resp.status_code}). Re-authenticating..."
+                    )
+                    self._reset_session(reauth=True)
+                    continue
+                if resp.status_code == 404:
+                    raise WebODMProjectNotFound(
+                        f"WebODM project not found: project_id={project_id}"
+                    )
+
+                resp.raise_for_status()
+                payload = resp.json()
+                if not isinstance(payload, dict):
+                    raise ValueError("project response is not an object")
+                response_id = payload.get("id")
+                if response_id is None or int(response_id) != project_id:
+                    raise ValueError(
+                        "project response ID does not match requested project"
+                    )
+                return dict(payload)
+
+            except (
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError,
+                requests.exceptions.ChunkedEncodingError,
+            ) as exc:
+                last_err = exc
+                self.logger.warning(
+                    "get_project transient network error "
+                    f"(attempt {attempt}/{retries}): {exc}. "
+                    "Resetting session and retrying..."
+                )
+                self._reset_session(reauth=False)
+                time.sleep(backoff * attempt)
+                continue
+            except WebODMProjectNotFound:
+                raise
+            except WebODMProjectLookupError:
+                raise
+            except Exception as exc:
+                raise WebODMProjectLookupError(
+                    "WebODM project lookup failed: "
+                    f"project_id={project_id}: {exc}"
+                ) from exc
+
+        raise WebODMProjectLookupError(
+            f"get_project failed after {retries} retries: {last_err}"
+        ) from last_err
 
     def get_task(self, project_id: int, task_id: str, *, retries: int = 5, backoff: float = 2.0) -> dict:
         """
