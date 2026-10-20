@@ -10,17 +10,44 @@ REM ============================================================
 REM Project Settings
 REM ============================================================
 
-set SURVEY=Y:\Visualization\field-data\2026\sorted\20260421\Dagaang\DNG-001_36.4Ha_M3C_100m_85f75s_8mps
+set SURVEY=Z:\field-data-2026\sorted\20260616-18\AMS_002_60Ha_M3C_100m_85f75s_8mps, Z:\field-data-2026\sorted\20260616-18\AMS_001_85Ha_M3C_100m_85f75s_8mps
 
-set MAP_NAME=dagaang-overall-map
+set MAP_NAME=amskarbemco-map-full-a3
 
-set TITLE=Whole World Agri-Tourism Farm and Resort
+set TITLE=AMSKARBEMCO Orthomosaic Map
 
-set LOCATION=Del Pilar, New Corella
+set LOCATION=Kapalong, Davao del Norte
 
 set REGION=Davao del Norte
 
-set MAP_SCALE=15000
+REM Main map automatically fits the orthomosaic TIFF.
+REM Increase for more surroundings; decrease for a tighter crop.
+set MAP_EXPORT_MAIN_BUFFER=0.08
+
+REM Add surrounding context, then round outward to a standard map scale.
+set MAP_EXPORT_AUTO_SCALE_MULTIPLIER=2.0
+
+REM Boundary inset padding: 0.35 keeps context without making the site tiny.
+set MAP_EXPORT_BOUNDARY_INSET_BUFFER=0.35
+
+REM Upper-right inset: optional fixed area; leave BOTH blank to auto-fit the boundary.
+REM Bounds order: min_lon,min_lat,max_lon,max_lat (WGS 84 / EPSG:4326).
+REM Fixed bounds override MAP_EXPORT_BOUNDARY_INSET_BUFFER.
+set MAP_EXPORT_BOUNDARY_INSET_LABEL=
+set MAP_EXPORT_BOUNDARY_INSET_BOUNDS=
+
+REM Independent inset zoom-out: 1.0 keeps the view; 1.5 shows 50%% more width/height.
+REM Applies after bounds/automatic fitting. Use values >= 1.0.
+set MAP_EXPORT_BOUNDARY_INSET_ZOOM_OUT=1.0
+set MAP_EXPORT_OVERVIEW_ZOOM_OUT=1.0
+
+REM Print paper size: A4 or A3. The layout remains landscape.
+set MAP_EXPORT_PAPER_SIZE=A3
+
+REM Lower-right overview inset. Set both values together.
+REM Bounds order: min_lon,min_lat,max_lon,max_lat (WGS 84 / EPSG:4326).
+set MAP_EXPORT_OVERVIEW_LABEL=Kapalong, Davao del Norte
+set MAP_EXPORT_OVERVIEW_BOUNDS=125.305271,7.564435,125.736933,8.000306
 
 set LAYOUT=assets/qgis_layouts/client_boundary_map-v6.qpt
 
@@ -75,7 +102,6 @@ echo Running map export...
   --location "%LOCATION%" ^
   --region "%REGION%" ^
   --disclaimer "%DISCLAIMER%" ^
-  --map-scale %MAP_SCALE% ^
   --layout-template "%LAYOUT%" ^
   --include-orthomosaic ^
   --export-print ^

@@ -21,6 +21,62 @@ class MapPackageResult:
     style_json: Path
 
 
+def _normalize_survey_roots(
+    survey_root: Path | None,
+    survey_roots: list[Path] | None,
+) -> list[Path]:
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    for value in ([survey_root] if survey_root is not None else []) + list(
+        survey_roots or []
+    ):
+        path = Path(value)
+        key = str(path).rstrip("\\/").casefold()
+        if key not in seen:
+            roots.append(path)
+            seen.add(key)
+
+    return roots
+
+
+def _collect_from_survey_roots(
+    *,
+    survey_roots: list[Path],
+    db_path: Path | None,
+    survey_names: list[str],
+    collector: Any,
+    artifact_label: str,
+) -> list[Any]:
+    selected: list[Any] = []
+
+    for survey_name in survey_names:
+        last_missing_error: FileNotFoundError | None = None
+
+        for survey_root in survey_roots:
+            try:
+                matches = collector(
+                    surveys_root=survey_root,
+                    db_path=db_path,
+                    survey_names=[survey_name],
+                )
+            except FileNotFoundError as exc:
+                last_missing_error = exc
+                continue
+
+            if matches:
+                selected.extend(matches)
+                break
+        else:
+            roots_text = "\n".join(f"- {root}" for root in survey_roots)
+            raise FileNotFoundError(
+                f"No {artifact_label} found for survey {survey_name!r} in "
+                f"the configured survey roots:\n{roots_text}"
+            ) from last_missing_error
+
+    return selected
+
+
 def export_map_package(
     *,
     survey_names: list[str],
@@ -28,6 +84,7 @@ def export_map_package(
     output_root: Path,
     map_name: str,
     survey_root: Path | None = None,
+    survey_roots: list[Path] | None = None,
     title: str | None = None,
     location: str | None = None,
     map_scale: int | None = None,
@@ -35,6 +92,13 @@ def export_map_package(
     disclaimer: str | None = None,
     include_orthomosaic: bool = False,
 ) -> MapPackageResult:
+    configured_survey_roots = _normalize_survey_roots(
+        survey_root,
+        survey_roots,
+    )
+    if not configured_survey_roots:
+        raise ValueError("At least one survey root is required")
+
     map_slug = _slugify(map_name)
     output_dir = output_root / map_slug
 
@@ -56,13 +120,12 @@ def export_map_package(
             exist_ok=True,
         )
     
-    if survey_root is None:
-     raise ValueError("survey_root is required for boundary lookup")\
-
-    boundary_files = collect_boundary_files_by_survey_id(
-        surveys_root=survey_root,
+    boundary_files = _collect_from_survey_roots(
+        survey_roots=configured_survey_roots,
         db_path=db_path,
         survey_names=survey_names,
+        collector=collect_boundary_files_by_survey_id,
+        artifact_label="boundary file",
     )
 
     all_features: list[dict[str, Any]] = []
@@ -71,15 +134,12 @@ def export_map_package(
 
     if include_orthomosaic:
 
-        if survey_root is None:
-            raise ValueError(
-                "survey_root required when include_orthomosaic=True"
-            )
-
-        orthomosaic_files = collect_orthomosaic_files(
-            surveys_root=survey_root,
+        orthomosaic_files = _collect_from_survey_roots(
+            survey_roots=configured_survey_roots,
             db_path=db_path,
             survey_names=survey_names,
+            collector=collect_orthomosaic_files,
+            artifact_label="clipped orthomosaic",
         )
 
         for ortho_path in orthomosaic_files:
@@ -184,7 +244,8 @@ def export_map_package(
         "title": title or map_name,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "source_root": str(source_root),
-        "survey_root": str(survey_root) if survey_root else None,
+        "survey_root": str(configured_survey_roots[0]),
+        "survey_roots": [str(root) for root in configured_survey_roots],
         "output_dir": str(output_dir),
         "survey_count": len(survey_names),
         "polygon_count": len(all_features),

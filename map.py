@@ -38,6 +38,29 @@ def load_env_file(path: Path = Path(".env")) -> None:
         if key and key not in os.environ:
             os.environ[key] = value
 
+
+def parse_survey_roots(
+    cli_values: list[str] | None,
+    env_value: str | None,
+) -> list[Path]:
+    """Return ordered, de-duplicated survey roots without accessing them."""
+    raw_values = cli_values or ([env_value] if env_value else [])
+    roots: list[Path] = []
+    seen: set[str] = set()
+
+    for raw_value in raw_values:
+        for item in str(raw_value).split(os.pathsep):
+            value = item.strip()
+            if not value:
+                continue
+            path = Path(value)
+            key = str(path).rstrip("\\/").casefold()
+            if key not in seen:
+                roots.append(path)
+                seen.add(key)
+
+    return roots
+
 def main() -> None:
     load_env_file()
 
@@ -123,9 +146,14 @@ def main() -> None:
     parser.add_argument(
         "--survey-root",
         "--orthomosaic-root",
-        dest="survey_root",
+        dest="survey_roots",
+        action="append",
         default=None,
-        help="Root folder where processed survey outputs are located. Defaults to SURVEYS_ROOT.",
+        help=(
+            "Root folder where processed survey outputs are located. Repeat "
+            "the option to search multiple roots in order. Defaults to "
+            "SURVEYS_ROOT."
+        ),
     )
 
     args = parser.parse_args()
@@ -142,14 +170,15 @@ def main() -> None:
             "Missing source root. Set FIELD_DATA_ROOT in .env or pass --source-root."
         )
     
-    survey_root = Path(
-        args.survey_root
-        or os.getenv("SURVEYS_ROOT", "")
+    survey_roots = parse_survey_roots(
+        args.survey_roots,
+        os.getenv("SURVEYS_ROOT", ""),
     )
 
-    if args.include_orthomosaic and not str(survey_root):
+    if not survey_roots:
         raise ValueError(
-            "Missing survey root. Set SURVEYS_ROOT in .env or pass --survey-root when using --include-orthomosaic."
+            "Missing survey root. Set SURVEYS_ROOT in .env or pass "
+            "--survey-root."
         )
 
     output_root = Path(
@@ -163,7 +192,9 @@ def main() -> None:
     print()
     print("===== MAP PACKAGE EXPORT =====")
     print(f"Source root : {source_root}")
-    print(f"Survey root : {survey_root if str(survey_root) else '[not set]'}")
+    print(f"Survey roots: {len(survey_roots)}")
+    for survey_root in survey_roots:
+        print(f"  - {survey_root}")
     print(f"Output root : {output_root}")
     print(f"Map name    : {map_name}")
     print(f"Title       : {title}")
@@ -176,7 +207,7 @@ def main() -> None:
     result = export_map_package(
         survey_names=survey_names,
         source_root=source_root,
-        survey_root=survey_root if str(survey_root) else None,
+        survey_roots=survey_roots,
         output_root=output_root,
         map_name=map_name,
         title=title,

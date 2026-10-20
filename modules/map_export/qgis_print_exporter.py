@@ -19,15 +19,25 @@ def _quiet_gdal_error_handler(err_class, err_num, err_msg):
 gdal.PushErrorHandler(_quiet_gdal_error_handler)
 
 
-# Fixed reference extent for the "Davao City" overview inset (map_inset_2).
-# This is intentionally static — it always shows the same city-wide context,
-# regardless of where the current survey sits within it. Adjust if the
-# framing needs to be tighter/looser.
+# Default reference extent for the overview inset (map_inset_2). Operators can
+# replace the label and extent using the paired MAP_EXPORT_OVERVIEW variables.
+DEFAULT_OVERVIEW_LABEL = "Davao City"
 DAVAO_CITY_BOUNDS_WGS84 = {
     "min_lon": 125.3063,
     "min_lat": 6.8710,
     "max_lon": 125.9308,
     "max_lat": 7.3282,
+}
+
+DEFAULT_AUTO_SCALE_MULTIPLIER = 2.5
+MIN_AUTO_MAP_SCALE = 500.0
+STANDARD_SCALE_MANTISSAS = (1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.5, 10.0)
+GRID_LINE_WIDTH_MM = 0.25
+GRID_LINE_COLOR_RGBA = (90, 90, 90, 153)
+DEFAULT_PAPER_SIZE = 'A4'
+PAPER_SIZES_MM = {
+    'A4': (297.0, 210.0),
+    'A3': (420.0, 297.0),
 }
 
 
@@ -66,9 +76,21 @@ class ExportContext:
     map_title: str
     map_location: str
     map_scale: Any
+    scale_mode: str
+    fitted_map_scale: float
+    auto_scale_multiplier: float | None
+    selected_map_scale: int | float
+    effective_map_scale: int | float
+    extent_source: str
+    grid_interval_degrees: float | None
     layout_template_path: Path | None
     map_disclaimer: str
     grid_label: str
+    paper_size: str
+    overview_label: str
+    overview_bounds_wgs84: dict[str, float]
+    boundary_inset_label: str
+    boundary_inset_bounds_wgs84: dict[str, float] | None
 
     # Set by _compute_target_crs
     center_lon: float
@@ -104,6 +126,7 @@ class ExportContext:
         dpi: int,
         qgis: SimpleNamespace,
         layout_variables: dict[str, str] | None = None,
+        render_options: dict[str, Any] | None = None,
     ) -> None:
         self.package_dir = package_dir
         self.title = title
@@ -111,6 +134,9 @@ class ExportContext:
         self.dpi = dpi
         self.qgis = qgis
         self.layout_variables = layout_variables or {}
+        self.render_options = render_options
+        self.map_states = {}
+        self.live_insets = False
 
 
 # QGIS import bootstrap
@@ -248,6 +274,12 @@ def _load_metadata_config(ctx: ExportContext) -> None:
         or "WGS 84 Geographic Coordinates (EPSG:4326)"
     )
 
+    overview_label, overview_bounds_wgs84 = _read_overview_inset_config()
+    boundary_inset_label, boundary_inset_bounds_wgs84 = _read_inset_config(
+        'MAP_EXPORT_BOUNDARY_INSET', map_location, None,
+    )
+    paper_size = _read_paper_size_env()
+
     ctx.metadata = metadata
     ctx.layout_cfg = layout_cfg
     ctx.orthomosaic_records = orthomosaic_records
@@ -258,6 +290,26 @@ def _load_metadata_config(ctx: ExportContext) -> None:
     ctx.layout_template_path = layout_template_path
     ctx.map_disclaimer = map_disclaimer
     ctx.grid_label = grid_label
+    ctx.paper_size = paper_size
+    ctx.overview_label = overview_label
+    ctx.overview_bounds_wgs84 = overview_bounds_wgs84
+    ctx.boundary_inset_label = boundary_inset_label
+    ctx.boundary_inset_bounds_wgs84 = boundary_inset_bounds_wgs84
+    if ctx.render_options is not None:
+        options = ctx.render_options
+        ctx.paper_size = options['paper_size']
+        ctx.map_scale = options['manual_scale']
+        ctx.boundary_inset_label = options['boundary_label'] or ctx.map_location
+        ctx.boundary_inset_bounds_wgs84 = options['boundary_bounds']
+        ctx.overview_label = options['overview_label']
+        ctx.overview_bounds_wgs84 = options['overview_bounds']
+    if not ctx.layout_template_path:
+        ctx.layout_template_path = Path(__file__).resolve().parents[2] / 'assets/qgis_layouts/client_boundary_map-v6.qpt'
+    elif not ctx.layout_template_path.is_absolute():
+        ctx.layout_template_path = Path(__file__).resolve().parents[2] / ctx.layout_template_path
+
+
+def _configure_layout_variables(ctx: ExportContext) -> None:
     ctx.layout_variables = {
         "map_title": ctx.map_title,
         "map_location": ctx.map_location,
@@ -272,8 +324,8 @@ def _load_metadata_config(ctx: ExportContext) -> None:
             f"Grid: {ctx.grid_label}",
 
         # inset labels
-        "label_inset": ctx.map_location,
-        "label_inset_2": "Davao City",
+        "label_inset": ctx.boundary_inset_label,
+        "label_inset_2": ctx.overview_label,
     }
 
 
@@ -301,8 +353,11 @@ def _compute_target_crs(ctx: ExportContext) -> None:
 
 def _prepare_project(ctx: ExportContext) -> None:
     """Reset the QGIS project instance and set its working CRS."""
-    project = ctx.qgis.QgsProject.instance()
-    project.clear()
+    if getattr(ctx, 'render_options', None) is not None:
+        project = ctx.qgis.QgsProject()
+    else:
+        project = ctx.qgis.QgsProject.instance()
+        project.clear()
     project.setCrs(ctx.target_crs)
 
     ctx.project = project
@@ -451,31 +506,178 @@ def _build_print_layout(ctx: ExportContext) -> None:
     layout.loadFromTemplate(doc, q.QgsReadWriteContext())
 
     ctx.layout = layout
+    _configure_layout_paper_size(ctx)
 
-    _apply_layout_variables(ctx)
+
+def _configure_layout_paper_size(ctx: ExportContext) -> None:
+    """Resize the template page and proportionally transform its items."""
+    q = ctx.qgis
+    page_collection = ctx.layout.pageCollection()
+    if page_collection.pageCount() < 1:
+        raise RuntimeError('QGIS layout template contains no pages')
+
+    page = page_collection.page(0)
+    current_size = page.pageSize()
+    current_width = float(current_size.width())
+    current_height = float(current_size.height())
+    target_width, target_height = PAPER_SIZES_MM[ctx.paper_size]
+
+    if current_width <= 0 or current_height <= 0:
+        raise RuntimeError(
+            'QGIS layout template returned an invalid page size: '
+            f'{current_width} x {current_height} mm'
+        )
+
+    scale_x = target_width / current_width
+    scale_y = target_height / current_height
+    unchanged = (
+        math.isclose(scale_x, 1.0, rel_tol=0.0, abs_tol=1e-9)
+        and math.isclose(scale_y, 1.0, rel_tol=0.0, abs_tol=1e-9)
+    )
+
+    if not unchanged:
+        page.setPageSize(
+            q.QgsLayoutSize(
+                target_width,
+                target_height,
+                q.QgsUnitTypes.LayoutMillimeters,
+            )
+        )
+
+        for item in ctx.layout.items():
+            if item is page or isinstance(item, q.QgsLayoutItemPage):
+                continue
+            if not all(
+                hasattr(item, name)
+                for name in (
+                    'positionWithUnits',
+                    'sizeWithUnits',
+                    'attemptMove',
+                    'attemptResize',
+                )
+            ):
+                continue
+
+            position = item.positionWithUnits()
+            size = item.sizeWithUnits()
+            item.attemptMove(
+                q.QgsLayoutPoint(
+                    position.x() * scale_x,
+                    position.y() * scale_y,
+                    position.units(),
+                )
+            )
+            item.attemptResize(
+                q.QgsLayoutSize(
+                    size.width() * scale_x,
+                    size.height() * scale_y,
+                    size.units(),
+                )
+            )
+
+        ctx.layout.refresh()
+
+    print(
+        f'Layout paper size: {ctx.paper_size} landscape '
+        f'({target_width:g} x {target_height:g} mm)',
+        flush=True,
+    )
 
 
 def _configure_main_map(ctx: ExportContext) -> Any:
-    """Fit the main map frame's extent to the boundary and assign its layers."""
+    """Fit the main map to orthomosaic extents and adapt its map furniture."""
     q = ctx.qgis
 
     map_item = _get_layout_item(ctx.layout, "map_frame", q.QgsLayoutItemMap)
 
+    fit_layers = ctx.orthomosaic_layers or [ctx.merged_layer]
+    default_buffer = 0.08 if ctx.orthomosaic_layers else 0.12
+
     map_extent = _prepare_fitted_extent(
         project=ctx.project,
-        layers=[ctx.merged_layer],
+        layers=fit_layers,
         target_crs=ctx.target_crs,
         frame_rect=map_item.rect(),
-        buffer_factor=0.12,
+        buffer_factor=_render_option(ctx, 'main_buffer', lambda: _read_nonnegative_float_env(
+            'MAP_EXPORT_MAIN_BUFFER',
+            default_buffer,
+        )),
     )
 
+    map_item.setCrs(ctx.target_crs)
     map_item.setExtent(map_extent)
     map_item.setLayers(ctx.main_map_layers)
     map_item.setKeepLayerSet(True)
+    map_item.refresh()
 
-    if ctx.map_scale:
-        map_item.setScale(float(ctx.map_scale))
+    fitted_scale = float(map_item.scale())
+    if not math.isfinite(fitted_scale) or fitted_scale <= 0:
+        raise RuntimeError(
+            f'QGIS returned an invalid fitted main-map scale: {fitted_scale!r}'
+        )
 
+    multiplier = DEFAULT_AUTO_SCALE_MULTIPLIER
+    if ctx.map_scale is None:
+        multiplier = _render_option(ctx, 'auto_scale_multiplier', lambda: _read_float_env_at_least(
+            'MAP_EXPORT_AUTO_SCALE_MULTIPLIER',
+            DEFAULT_AUTO_SCALE_MULTIPLIER,
+            minimum=1.0,
+        ))
+    scale_decision = _select_main_map_scale(
+        fitted_scale=fitted_scale,
+        manual_scale=ctx.map_scale,
+        auto_multiplier=multiplier,
+    )
+
+    map_item.setScale(scale_decision['selected_scale'])
+    saved_extent = _saved_map_extent(ctx, 'map_frame')
+    if saved_extent is not None:
+        map_item.setExtent(saved_extent)
+        scale_decision.update(scale_mode='manual', auto_scale_multiplier=None,
+                              selected_scale=float(map_item.scale()))
+    map_item.refresh()
+
+    effective_scale = float(map_item.scale())
+    if not math.isfinite(effective_scale) or effective_scale <= 0:
+        raise RuntimeError(
+            f'QGIS returned an invalid final main-map scale: {effective_scale!r}'
+        )
+
+    ctx.scale_mode = scale_decision['scale_mode']
+    ctx.fitted_map_scale = scale_decision['fitted_scale']
+    ctx.auto_scale_multiplier = scale_decision['auto_scale_multiplier']
+    ctx.selected_map_scale = scale_decision['selected_scale']
+    ctx.effective_map_scale = _clean_scale_value(effective_scale)
+    ctx.map_scale = ctx.effective_map_scale
+    ctx.extent_source = (
+        'orthomosaic'
+        if ctx.orthomosaic_layers
+        else 'boundary'
+    )
+
+    displayed_extent = map_item.extent()
+    grid_crs = q.QgsCoordinateReferenceSystem('EPSG:4326')
+    to_grid_crs = q.QgsCoordinateTransform(
+        ctx.target_crs,
+        grid_crs,
+        ctx.project,
+    )
+    geographic_extent = to_grid_crs.transformBoundingBox(displayed_extent)
+
+    ctx.grid_interval_degrees = _add_coordinate_grid(
+        map_item=map_item,
+        extent=geographic_extent,
+        grid_crs=grid_crs,
+        QgsLayoutItemMapGrid=q.QgsLayoutItemMapGrid,
+        QColor=q.QColor,
+        QFont=q.QFont,
+        annotation_font_size=_render_option(ctx, 'grid_font_size', lambda: 6.0),
+    )
+    _configure_scale_bar(
+        ctx=ctx,
+        map_item=map_item,
+        extent=displayed_extent,
+    )
     map_item.refresh()
 
     return map_item
@@ -485,47 +687,90 @@ def _configure_insets(ctx: ExportContext) -> None:
     """Configure the location and extent inset maps on the layout."""
     q = ctx.qgis
 
-    # Inset 1: zoomed to the survey boundary itself. Label reflects the
-    # barangay/district passed in via --location.
+    # Inset 1: automatically fit the survey boundary unless fixed bounds
+    # and a matching label have been configured by the operator.
     _configure_inset_map(
         layout=ctx.layout,
         project=ctx.project,
-        package_dir=ctx.package_dir,
+        package_dir=getattr(ctx, 'output_dir', ctx.package_dir),
         basemap_layer=ctx.basemap_layer,
         boundary_layer=ctx.merged_layer,
         target_crs=ctx.target_crs,
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
         QgsCoordinateReferenceSystem=q.QgsCoordinateReferenceSystem,
         map_item_id="map_inset",
+        fixed_extent_wgs84=ctx.boundary_inset_bounds_wgs84,
+        zoom_out_factor=_render_option(ctx, 'boundary_zoom', lambda: _read_float_env_at_least(
+            'MAP_EXPORT_BOUNDARY_INSET_ZOOM_OUT', 1.0, minimum=1.0,
+        )),
+        overlay_mode=_render_option(ctx, 'boundary_overlay', lambda: _read_inset_overlay_mode(
+            'MAP_EXPORT_BOUNDARY_INSET_OVERLAY',
+        )),
+        live=getattr(ctx, 'live_insets', False),
+        extent_override=_saved_map_extent(ctx, 'map_inset'),
+        buffer_factor=_render_option(ctx, 'boundary_buffer', lambda: _read_nonnegative_float_env('MAP_EXPORT_BOUNDARY_INSET_BUFFER', 4.0)),
+        inset_dpi=_render_option(ctx, 'inset_dpi', lambda: _read_int_env('MAP_EXPORT_INSET_DPI', 800)),
     )
 
-    # Inset 2: always a fixed Davao City overview, regardless of survey
-    # location. The survey boundary is still overlaid so users can see
-    # where within the city it sits.
+    # Inset 2: fixed configurable overview, with a boundary or locator pin.
+    overview_crs_name = _render_option(ctx, 'overview_crs', _read_overview_crs)
+    overview_crs = (ctx.target_crs if overview_crs_name == 'project'
+                    else q.QgsCoordinateReferenceSystem(overview_crs_name))
     _configure_inset_map(
         layout=ctx.layout,
         project=ctx.project,
-        package_dir=ctx.package_dir,
+        package_dir=getattr(ctx, 'output_dir', ctx.package_dir),
         basemap_layer=ctx.basemap_layer,
         boundary_layer=ctx.merged_layer,
-        target_crs=ctx.target_crs,
+        target_crs=overview_crs,
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
         QgsCoordinateReferenceSystem=q.QgsCoordinateReferenceSystem,
         map_item_id="map_inset_2",
-        fixed_extent_wgs84=DAVAO_CITY_BOUNDS_WGS84,
+        overlay_mode=_render_option(ctx, 'overview_overlay', _read_overview_overlay_mode),
+        fixed_extent_wgs84=ctx.overview_bounds_wgs84,
+        zoom_out_factor=_render_option(ctx, 'overview_zoom', lambda: _read_float_env_at_least(
+            'MAP_EXPORT_OVERVIEW_ZOOM_OUT', 1.0, minimum=1.0,
+        )),
+        live=getattr(ctx, 'live_insets', False),
+        extent_override=_saved_map_extent(ctx, 'map_inset_2', target_crs=overview_crs),
+        inset_dpi=_render_option(ctx, 'inset_dpi', lambda: _read_int_env('MAP_EXPORT_INSET_DPI', 800)),
     )
 
 
 # Pipeline stage 4: export
 
+def _build_print_layout_metadata(
+    ctx: ExportContext,
+    *,
+    exported_at: str,
+) -> dict[str, Any]:
+    return {
+        'exported_at': exported_at,
+        'crs': f'EPSG:{ctx.target_epsg}',
+        'scale': ctx.effective_map_scale,
+        'scale_mode': ctx.scale_mode,
+        'fitted_scale': ctx.fitted_map_scale,
+        'auto_scale_multiplier': ctx.auto_scale_multiplier,
+        'selected_scale': ctx.selected_map_scale,
+        'extent_source': ctx.extent_source,
+        'grid_interval_degrees': ctx.grid_interval_degrees,
+        'paper_size': ctx.paper_size,
+        'orientation': 'landscape',
+        'dpi': ctx.dpi,
+        'logo': str(ctx.logo_path) if ctx.logo_path else None,
+        'render_options': _resolved_render_options(ctx),
+    }
+
+
 def _export_print_outputs(ctx: ExportContext) -> dict[str, str]:
     """Export the PNG preview and PDF, then write the updated package metadata."""
     q = ctx.qgis
 
-    pdf_path = ctx.package_dir / "print_map.pdf"
-    png_path = ctx.package_dir / "preview.png"
-    pdf_temp_path = ctx.package_dir / "print_map_tmp.pdf"
-    png_temp_path = ctx.package_dir / "preview_tmp.png"
+    output_dir = getattr(ctx, 'output_dir', ctx.package_dir)
+    pdf_path = output_dir / "print_map.pdf"
+    png_path = output_dir / "preview.png"
+    pdf_temp_path = output_dir / "print_map_tmp.pdf"
+    png_temp_path = output_dir / "preview_tmp.png"
 
     for path in (pdf_path, png_path, pdf_temp_path, png_temp_path):
         path.unlink(missing_ok=True)
@@ -545,8 +790,8 @@ def _export_print_outputs(ctx: ExportContext) -> dict[str, str]:
 
     exporter = q.QgsLayoutExporter(ctx.layout)
 
-    preview_dpi = _read_int_env("MAP_EXPORT_PREVIEW_DPI", 120)
-    pdf_dpi = _read_int_env("MAP_EXPORT_PDF_DPI", 300)
+    preview_dpi = _render_option(ctx, 'preview_dpi', lambda: _read_int_env("MAP_EXPORT_PREVIEW_DPI", 120))
+    pdf_dpi = _render_option(ctx, 'pdf_dpi', lambda: _read_int_env("MAP_EXPORT_PDF_DPI", 300))
 
     # Export preview first so we can verify layout before PDF.
     image_settings = q.QgsLayoutExporter.ImageExportSettings()
@@ -581,14 +826,12 @@ def _export_print_outputs(ctx: ExportContext) -> dict[str, str]:
 
     ctx.metadata.setdefault("outputs", {})
     ctx.metadata["outputs"]["print_map_pdf"] = "print_map.pdf"
-    ctx.metadata["print_layout"] = {
-        "exported_at": created_at,
-        "crs": f"EPSG:{ctx.target_epsg}",
-        "paper_size": "A4",
-        "orientation": "landscape",
-        "dpi": ctx.dpi,
-        "logo": str(ctx.logo_path) if ctx.logo_path else None,
-    }
+    ctx.metadata["print_layout"] = _build_print_layout_metadata(
+        ctx,
+        exported_at=created_at,
+    )
+    if getattr(ctx, 'editor_state', None) is not None:
+        ctx.metadata['print_layout']['editor_state'] = ctx.editor_state
 
     ctx.metadata_path.write_text(
         json.dumps(ctx.metadata, indent=2, ensure_ascii=False),
@@ -613,8 +856,22 @@ def export_qgis_print_layout(
     dpi: int = 400,
     layout_variables: dict[str, str] | None = None,
 ) -> dict[str, str]:
+    ctx = build_qgis_print_layout(
+        package_dir=package_dir, title=title, logo_path=logo_path,
+        dpi=dpi, layout_variables=layout_variables,
+    )
+    return _export_print_outputs(ctx)
+
+
+def build_qgis_print_layout(
+    *, package_dir: Path, title: str | None = None, logo_path: Path | None = None,
+    dpi: int = 400, layout_variables: dict[str, str] | None = None,
+    render_options: dict[str, Any] | None = None, live_insets: bool = False,
+    map_states: dict[str, Any] | None = None, text_values: dict[str, str] | None = None,
+    text_styles: dict[str, Any] | None = None, output_dir: Path | None = None,
+) -> ExportContext:
     """
-    Export a print-ready PDF and PNG preview from a Phase 1 map package.
+    Build a shared layout; live insets do not write images or final outputs.
 
     Requires QGIS Python environment.
     Input package must contain:
@@ -622,8 +879,13 @@ def export_qgis_print_layout(
     - merged_boundary.geojson
     - map_metadata.json
     """
+    if render_options is not None:
+        from .editor_model import validate_options
+        render_options = validate_options(render_options)
     qgis_classes = _load_qgis_classes()
     _init_qgis_application(qgis_classes.QgsApplication)
+    if render_options is not None and not live_insets:
+        _require_export_fonts()
 
     ctx = ExportContext(
         package_dir=Path(package_dir),
@@ -632,10 +894,18 @@ def export_qgis_print_layout(
         dpi=dpi,
         qgis=qgis_classes,
         layout_variables=layout_variables,
+        render_options=render_options,
     )
+    ctx.map_states = map_states or {}
+    ctx.live_insets = live_insets
+    if output_dir is not None:
+        ctx.output_dir = Path(output_dir)
 
     _validate_package_paths(ctx)
     _load_metadata_config(ctx)
+    if logo_path is None and render_options is not None:
+        value = (ctx.metadata.get('print_layout') or {}).get('logo')
+        ctx.logo_path = Path(value) if value else Path(__file__).resolve().parents[2] / 'assets/logo.png'
     _compute_target_crs(ctx)
     _prepare_project(ctx)
     _load_boundary_layers(ctx)
@@ -643,9 +913,110 @@ def export_qgis_print_layout(
     _assemble_map_layers(ctx)
     _build_print_layout(ctx)
     _configure_main_map(ctx)
+    _configure_layout_variables(ctx)
+    _apply_layout_variables(ctx)
     _configure_insets(ctx)
+    apply_editor_text(ctx, text_values or {}, text_styles or {})
+    return ctx
 
-    return _export_print_outputs(ctx)
+
+def _render_option(ctx, name, legacy_default):
+    options = getattr(ctx, 'render_options', None)
+    return options[name] if options is not None else legacy_default()
+
+
+def _require_export_fonts():
+    from qgis.PyQt.QtGui import QFontDatabase
+    if not QFontDatabase().families():
+        raise RuntimeError(
+            'Qt export font database is empty; export stopped to avoid unreadable text. '
+            'Restart the editor using run_map_editor.bat. Windows exports must use '
+            'QT_QPA_PLATFORM=windows, not offscreen.'
+        )
+
+
+def _saved_map_extent(ctx, item_id, *, target_crs=None, state=None):
+    """Preserve saved framing; only the overview supports changing map CRS."""
+    state = state if state is not None else getattr(ctx, 'map_states', {}).get(item_id)
+    if not state:
+        return None
+    target_crs = target_crs if target_crs is not None else ctx.target_crs
+    if state['crs'] != target_crs.authid() and item_id != 'map_inset_2':
+        raise ValueError(f'Saved extent CRS does not match package CRS: {item_id}')
+    extent = ctx.qgis.QgsRectangle(*state['extent'])
+    if state['crs'] != target_crs.authid():
+        # Older editor designs stored every frame in the main map's CRS.
+        # Transform their overview bounds, never relabel projected coordinates.
+        source_crs = ctx.qgis.QgsCoordinateReferenceSystem(state['crs'])
+        transform = ctx.qgis.QgsCoordinateTransform(source_crs, target_crs, ctx.project)
+        extent = transform.transformBoundingBox(extent)
+        frame = ctx.layout.itemById(item_id).rect()
+        extent = _fit_extent_to_frame(extent, frame_width=frame.width(), frame_height=frame.height())
+    return extent
+
+
+def _resolved_render_options(ctx):
+    if getattr(ctx, 'render_options', None) is not None:
+        return dict(ctx.render_options)
+    return {
+        'paper_size': ctx.paper_size,
+        'grid_font_size': 6.0,
+        'preview_dpi': _read_int_env('MAP_EXPORT_PREVIEW_DPI', 120),
+        'pdf_dpi': _read_int_env('MAP_EXPORT_PDF_DPI', 300),
+        'inset_dpi': _read_int_env('MAP_EXPORT_INSET_DPI', 800),
+        'main_buffer': _read_nonnegative_float_env('MAP_EXPORT_MAIN_BUFFER', 0.08),
+        'auto_scale_multiplier': _read_float_env_at_least('MAP_EXPORT_AUTO_SCALE_MULTIPLIER', 2.5, minimum=1),
+        'manual_scale': ctx.selected_map_scale if ctx.scale_mode == 'manual' else None,
+        'boundary_buffer': _read_nonnegative_float_env('MAP_EXPORT_BOUNDARY_INSET_BUFFER', 4.0),
+        'boundary_label': getattr(ctx, 'boundary_inset_label', None),
+        'boundary_bounds': getattr(ctx, 'boundary_inset_bounds_wgs84', None),
+        'boundary_zoom': _read_float_env_at_least('MAP_EXPORT_BOUNDARY_INSET_ZOOM_OUT', 1, minimum=1),
+        'boundary_overlay': _read_inset_overlay_mode('MAP_EXPORT_BOUNDARY_INSET_OVERLAY'),
+        'overview_label': getattr(ctx, 'overview_label', DEFAULT_OVERVIEW_LABEL),
+        'overview_bounds': getattr(ctx, 'overview_bounds_wgs84', dict(DAVAO_CITY_BOUNDS_WGS84)),
+        'overview_zoom': _read_float_env_at_least('MAP_EXPORT_OVERVIEW_ZOOM_OUT', 1, minimum=1),
+        'overview_overlay': _read_overview_overlay_mode(),
+        'overview_crs': _read_overview_crs(),
+    }
+
+
+def apply_editor_text(ctx, values, styles):
+    for item_id in values.keys() | styles.keys():
+        item = ctx.layout.itemById(item_id)
+        if item is None or not isinstance(item, ctx.qgis.QgsLayoutItemLabel):
+            raise ValueError(f'Missing editable layout label: {item_id}')
+        if item_id in values:
+            item.setText(values[item_id])
+        if item_id in styles:
+            style = styles[item_id]
+            font = ctx.qgis.QFont(item.font())
+            font.setFamily(style['family'])
+            font.setPointSizeF(style['size'])
+            font.setBold(style['bold'])
+            item.setFont(font)
+            item.setFontColor(ctx.qgis.QColor(style['color']))
+        item.refresh()
+
+
+def refresh_main_map_furniture(ctx):
+    """Update furniture from the current extent without fitting or snapping scale."""
+    q = ctx.qgis
+    item = ctx.layout.itemById('map_frame')
+    ctx.map_scale = ctx.effective_map_scale = ctx.selected_map_scale = _clean_scale_value(float(item.scale()))
+    ctx.scale_mode, ctx.auto_scale_multiplier = 'manual', None
+    grid_crs = q.QgsCoordinateReferenceSystem('EPSG:4326')
+    geographic = q.QgsCoordinateTransform(ctx.target_crs, grid_crs, ctx.project).transformBoundingBox(item.extent())
+    ctx.grid_interval_degrees = _add_coordinate_grid(
+        map_item=item, extent=geographic, grid_crs=grid_crs,
+        QgsLayoutItemMapGrid=q.QgsLayoutItemMapGrid, QColor=q.QColor, QFont=q.QFont,
+        annotation_font_size=_render_option(ctx, 'grid_font_size', lambda: 6.0),
+    )
+    _configure_scale_bar(ctx=ctx, map_item=item, extent=item.extent())
+    info = ctx.layout.itemById('map_info')
+    if info is not None:
+        info.setText(f'Scale 1:{ctx.map_scale:,}\nProjection: {_utm_label_from_epsg(ctx.target_epsg)} '
+                     f'(EPSG:{ctx.target_epsg})\nGrid: {ctx.grid_label}')
+        info.refresh()
 
 
 _QGIS_APP = None
@@ -990,29 +1361,75 @@ def _add_coordinate_grid(
     *,
     map_item: Any,
     extent: Any,
+    grid_crs: Any,
     QgsLayoutItemMapGrid: Any,
     QColor: Any,
     QFont: Any,
-) -> None:
+    annotation_font_size: float = 6.0,
+) -> float | None:
     try:
         interval = _nice_grid_interval(extent)
 
         grid = map_item.grid()
         grid.setEnabled(True)
+        grid.setCrs(grid_crs)
         grid.setStyle(QgsLayoutItemMapGrid.Solid)
         grid.setIntervalX(interval)
         grid.setIntervalY(interval)
-        grid.setGridLineColor(QColor(120, 120, 120, 90))
-        grid.setGridLineWidth(0.15)
-        grid.setAnnotationEnabled(True)
-        grid.setAnnotationPrecision(0)
-        grid.setAnnotationFont(QFont("Arial", 6))
-        grid.setAnnotationFrameDistance(1)
 
-    except Exception:
+        line_symbol = grid.lineSymbol().clone()
+        line_symbol.setWidth(GRID_LINE_WIDTH_MM)
+        line_symbol.setColor(QColor(*GRID_LINE_COLOR_RGBA))
+        line_symbol.setOpacity(1.0)
+        grid.setLineSymbol(line_symbol)
+
+        grid.setAnnotationEnabled(True)
+        grid.setAnnotationPrecision(_grid_annotation_precision(interval))
+        font = QFont('Arial', 6)
+        font.setPointSizeF(annotation_font_size)
+        grid.setAnnotationFont(font)
+        grid.setAnnotationFrameDistance(1)
+        return interval
+
+    except Exception as exc:
         # Grid is a visual enhancement only.
         # Export should continue even if QGIS grid API differs by version.
-        return
+        print(
+            f'Warning: could not configure adaptive coordinate grid: {exc}',
+            flush=True,
+        )
+        return None
+
+
+def _configure_scale_bar(
+    *,
+    ctx: ExportContext,
+    map_item: Any,
+    extent: Any,
+) -> None:
+    try:
+        q = ctx.qgis
+        scale_bar = _get_layout_item(
+            ctx.layout,
+            'scale_bar',
+            q.QgsLayoutItemScaleBar,
+        )
+        segment_km = _nice_scale_segment(extent) / 1000.0
+
+        scale_bar.setLinkedMap(map_item)
+        scale_bar.setUnits(q.QgsUnitTypes.DistanceKilometers)
+        scale_bar.setUnitLabel('km')
+        scale_bar.setUnitsPerSegment(segment_km)
+        scale_bar.setNumberOfSegments(3)
+        scale_bar.setNumberOfSegmentsLeft(0)
+        scale_bar.update()
+    except Exception as exc:
+        # Retain the template value if a custom layout or QGIS version uses
+        # a different scale-bar API.
+        print(
+            f'Warning: could not configure adaptive scale bar: {exc}',
+            flush=True,
+        )
 
 
 def _utm_epsg_from_lonlat(lon: float, lat: float) -> int:
@@ -1031,9 +1448,90 @@ def _nice_grid_interval(extent: Any) -> float:
     return _nice_number(raw)
 
 
+def _round_up_standard_scale(
+    scale: float,
+    *,
+    minimum: float = MIN_AUTO_MAP_SCALE,
+) -> int:
+    scale = float(scale)
+    minimum = float(minimum)
+
+    if not math.isfinite(scale) or scale <= 0:
+        raise ValueError(f'Scale must be finite and positive: {scale!r}')
+    if not math.isfinite(minimum) or minimum <= 0:
+        raise ValueError(f'Minimum scale must be finite and positive: {minimum!r}')
+
+    target = max(scale, minimum)
+    exponent = 10 ** math.floor(math.log10(target))
+    tolerance = max(1e-9, target * 1e-12)
+
+    for mantissa in STANDARD_SCALE_MANTISSAS:
+        candidate = mantissa * exponent
+        if candidate + tolerance >= target:
+            return int(round(candidate))
+
+    return int(round(10 * exponent))
+
+
+def _select_main_map_scale(
+    *,
+    fitted_scale: float,
+    manual_scale: Any,
+    auto_multiplier: float,
+) -> dict[str, Any]:
+    fitted_scale = float(fitted_scale)
+    if not math.isfinite(fitted_scale) or fitted_scale <= 0:
+        raise ValueError(
+            f'Fitted scale must be finite and positive: {fitted_scale!r}'
+        )
+
+    fitted_value = round(fitted_scale, 3)
+
+    if manual_scale is not None:
+        selected_scale = float(manual_scale)
+        if not math.isfinite(selected_scale) or selected_scale <= 0:
+            raise ValueError(
+                f'Manual scale must be finite and positive: {manual_scale!r}'
+            )
+        return {
+            'scale_mode': 'manual',
+            'fitted_scale': fitted_value,
+            'auto_scale_multiplier': None,
+            'selected_scale': _clean_scale_value(selected_scale),
+        }
+
+    auto_multiplier = float(auto_multiplier)
+    if not math.isfinite(auto_multiplier) or auto_multiplier < 1.0:
+        auto_multiplier = DEFAULT_AUTO_SCALE_MULTIPLIER
+
+    selected_scale = _round_up_standard_scale(
+        fitted_scale * auto_multiplier,
+    )
+    return {
+        'scale_mode': 'automatic',
+        'fitted_scale': fitted_value,
+        'auto_scale_multiplier': auto_multiplier,
+        'selected_scale': selected_scale,
+    }
+
+
+def _clean_scale_value(scale: float) -> int | float:
+    rounded = round(float(scale), 3)
+    if rounded.is_integer():
+        return int(rounded)
+    return rounded
+
+
+def _grid_annotation_precision(interval: float) -> int:
+    if interval <= 0 or interval >= 1:
+        return 0
+
+    return min(8, max(0, math.ceil(-math.log10(interval))))
+
+
 def _nice_scale_segment(extent: Any) -> float:
     width = extent.width()
-    raw = width / 5
+    raw = width / 10
 
     return _nice_number(raw)
 
@@ -1238,6 +1736,60 @@ def _add_inset_basemap_picture(
     layout.addLayoutItem(picture)
 
 
+def _create_inset_locator_layer(boundary_layer: Any) -> Any:
+    """Create fixed-print-size survey pins in the boundary's CRS, in memory."""
+    from qgis.core import (
+        QgsFeature,
+        QgsMarkerSymbol,
+        QgsMarkerSymbolLayer,
+        QgsSingleSymbolRenderer,
+        QgsSvgMarkerSymbolLayer,
+        QgsUnitTypes,
+        QgsVectorLayer,
+    )
+
+    pin_path = Path(__file__).resolve().parents[2] / 'assets' / 'map_locator_pin.svg'
+    if not pin_path.is_file():
+        raise FileNotFoundError(f'Missing inset locator pin: {pin_path}')
+
+    layer = QgsVectorLayer('Point', 'Survey Location Pin', 'memory')
+    if not layer.isValid():
+        raise RuntimeError('Failed to create inset locator layer')
+    layer.setCrs(boundary_layer.crs())
+
+    points = []
+    for source_feature in boundary_layer.getFeatures():
+        if not source_feature.hasGeometry():
+            continue
+        geometry = source_feature.geometry()
+        if geometry.isEmpty():
+            continue
+        # Unlike a centroid, this stays inside concave/multipart boundaries.
+        location = geometry.pointOnSurface()
+        if location.isNull() or location.isEmpty():
+            raise RuntimeError('Unable to determine survey location for inset pin')
+        feature = QgsFeature()
+        feature.setGeometry(location)
+        points.append(feature)
+
+    if not points:
+        raise RuntimeError('No valid survey boundary geometry for inset pin')
+    added, _features = layer.dataProvider().addFeatures(points)
+    if not added:
+        raise RuntimeError('Failed to add survey location to inset locator layer')
+    layer.updateExtents()
+
+    pin = QgsSvgMarkerSymbolLayer(str(pin_path))
+    pin.setSize(4.0)
+    pin.setSizeUnit(QgsUnitTypes.RenderMillimeters)
+    pin.setHorizontalAnchorPoint(QgsMarkerSymbolLayer.HCenter)
+    pin.setVerticalAnchorPoint(QgsMarkerSymbolLayer.Bottom)
+    symbol = QgsMarkerSymbol.createSimple({'name': 'circle'})
+    symbol.changeSymbolLayer(0, pin)
+    layer.setRenderer(QgsSingleSymbolRenderer(symbol))
+    return layer
+
+
 def _configure_inset_boundary_overlay(
     *,
     project: Any,
@@ -1245,27 +1797,24 @@ def _configure_inset_boundary_overlay(
     boundary_layer: Any,
     target_crs: Any,
     extent: Any,
+    overlay_mode: str = 'boundary',
 ) -> None:
-    from qgis.core import (  # type: ignore[reportMissingImports]
-        QgsFillSymbol,
-        QgsSingleSymbolRenderer,
-    )
-
-    inset_boundary_layer = boundary_layer.clone()
-    inset_boundary_layer.setName("Inset Boundary Overlay")
-
-    source_renderer = boundary_layer.renderer()
-
-    if source_renderer is not None:
-        inset_boundary_layer.setRenderer(source_renderer.clone())
+    if overlay_mode == 'pin':
+        inset_boundary_layer = _create_inset_locator_layer(boundary_layer)
+    else:
+        inset_boundary_layer = boundary_layer.clone()
+        inset_boundary_layer.setName("Inset Boundary Overlay")
+        source_renderer = boundary_layer.renderer()
+        if source_renderer is not None:
+            inset_boundary_layer.setRenderer(source_renderer.clone())
 
     # Add silently to project so QGIS can render it, but do not show in layer tree.
     project.addMapLayer(inset_boundary_layer, False)
 
     inset_item.setCrs(target_crs)
-    inset_item.setExtent(extent)
+    inset_item.zoomToExtent(extent)
 
-    # Only boundary here. Basemap is handled by the picture underneath.
+    # Only the boundary or pin here. The basemap is the picture underneath.
     inset_item.setLayers([inset_boundary_layer])
     inset_item.setKeepLayerSet(True)
 
@@ -1273,6 +1822,7 @@ def _configure_inset_boundary_overlay(
     inset_item.setBackgroundEnabled(False)
 
     inset_item.refresh()
+    return inset_boundary_layer
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -1291,6 +1841,158 @@ def _read_int_env(name: str, default: int) -> int:
         return default
 
 
+def _read_nonnegative_float_env(name: str, default: float) -> float:
+    value = os.getenv(name, '').strip()
+
+    if not value:
+        return default
+
+    try:
+        parsed = float(value)
+    except ValueError:
+        parsed = -1.0
+
+    if not math.isfinite(parsed) or parsed < 0:
+        print(
+            f'Invalid {name} value: {value!r}. Using default: {default}',
+            flush=True,
+        )
+        return default
+
+    return parsed
+
+
+def _read_float_env_at_least(
+    name: str,
+    default: float,
+    *,
+    minimum: float,
+) -> float:
+    value = os.getenv(name, '').strip()
+
+    if not value:
+        return default
+
+    try:
+        parsed = float(value)
+    except ValueError:
+        parsed = float('-inf')
+
+    if not math.isfinite(parsed) or parsed < minimum:
+        print(
+            f'Invalid {name} value: {value!r}. Using default: {default}',
+            flush=True,
+        )
+        return default
+
+    return parsed
+
+
+def _read_overview_crs() -> str:
+    value = os.getenv('MAP_EXPORT_OVERVIEW_CRS', 'project').strip()
+    if value.lower() == 'project' or not value:
+        return 'project'
+    if value.upper() == 'EPSG:4326':
+        return 'EPSG:4326'
+    print(f'Invalid MAP_EXPORT_OVERVIEW_CRS: {value!r}. Using project CRS.', flush=True)
+    return 'project'
+
+
+def _read_overview_overlay_mode() -> str:
+    return _read_inset_overlay_mode('MAP_EXPORT_OVERVIEW_OVERLAY')
+
+
+def _read_inset_overlay_mode(env_name: str) -> str:
+    value = os.getenv(env_name, 'boundary').strip().lower()
+    if value in ('boundary', 'pin'):
+        return value
+    if value:
+        print(
+            f'Invalid {env_name}: {value!r}. '
+            'Expected boundary or pin. Using boundary.',
+            flush=True,
+        )
+    return 'boundary'
+
+
+def _read_overview_inset_config() -> tuple[str, dict[str, float]]:
+    """Read an atomic overview label/bounds pair, falling back safely."""
+    label, bounds = _read_inset_config(
+        'MAP_EXPORT_OVERVIEW', DEFAULT_OVERVIEW_LABEL, DAVAO_CITY_BOUNDS_WGS84,
+    )
+    assert bounds is not None
+    return label, bounds
+
+
+def _read_inset_config(
+    prefix: str,
+    default_label: str,
+    default_bounds: dict[str, float] | None,
+) -> tuple[str, dict[str, float] | None]:
+    """Read a paired label/extent; reject partial or invalid overrides together."""
+    label = os.getenv(f'{prefix}_LABEL', '').strip()
+    bounds_value = os.getenv(f'{prefix}_BOUNDS', '').strip()
+    fallback_bounds = dict(default_bounds) if default_bounds is not None else None
+
+    if not label and not bounds_value:
+        return default_label, fallback_bounds
+
+    if not label or not bounds_value:
+        print(
+            f'{prefix}_LABEL and {prefix}_BOUNDS must '
+            'be set together. Using the default inset label and extent.',
+            flush=True,
+        )
+        return default_label, fallback_bounds
+
+    parts = [part.strip() for part in bounds_value.split(',')]
+    try:
+        values = [float(part) for part in parts]
+    except ValueError:
+        values = []
+
+    if len(values) == 4:
+        min_lon, min_lat, max_lon, max_lat = values
+        is_valid = (
+            all(math.isfinite(value) for value in values)
+            and -180.0 <= min_lon < max_lon <= 180.0
+            and -90.0 <= min_lat < max_lat <= 90.0
+        )
+    else:
+        is_valid = False
+
+    if not is_valid:
+        print(
+            f'Invalid {prefix}_BOUNDS value: '
+            f'{bounds_value!r}. Expected '
+            'min_lon,min_lat,max_lon,max_lat. Using the default inset '
+            'label and extent.',
+            flush=True,
+        )
+        return default_label, fallback_bounds
+
+    return label, {
+        'min_lon': min_lon,
+        'min_lat': min_lat,
+        'max_lon': max_lon,
+        'max_lat': max_lat,
+    }
+
+
+def _read_paper_size_env() -> str:
+    value = os.getenv('MAP_EXPORT_PAPER_SIZE', DEFAULT_PAPER_SIZE).strip().upper()
+    if value in PAPER_SIZES_MM:
+        return value
+
+    print(
+        f'Invalid MAP_EXPORT_PAPER_SIZE value: {value!r}. '
+        f'Expected one of: {", ".join(PAPER_SIZES_MM)}. '
+        f'Using default: {DEFAULT_PAPER_SIZE}',
+        flush=True,
+    )
+    return DEFAULT_PAPER_SIZE
+
+
 def _configure_inset_map(
     *,
     layout: Any,
@@ -1303,13 +2005,19 @@ def _configure_inset_map(
     map_item_id: str,
     QgsCoordinateReferenceSystem: Any | None = None,
     fixed_extent_wgs84: dict[str, float] | None = None,
+    zoom_out_factor: float = 1.0,
+    overlay_mode: str = 'boundary',
+    live: bool = False,
+    extent_override: Any = None,
+    buffer_factor: float | None = None,
+    inset_dpi: int | None = None,
 ) -> None:
     """
     Configure one inset map.
 
     Creates:
         basemap picture
-        live boundary overlay
+        live boundary or fixed-size location pin overlay
         optional label
 
     By default the extent is fitted to `boundary_layer` (the current survey).
@@ -1317,6 +2025,8 @@ def _configure_inset_map(
     use a static WGS84 bounding box — e.g. a fixed city-wide overview inset
     that doesn't move based on the current survey's location. The boundary
     overlay is still drawn on top either way.
+    A zoom-out factor greater than 1 expands that extent around its center,
+    after automatic padding and frame-aspect adjustment.
     """
 
     inset_item = layout.itemById(map_item_id)
@@ -1345,12 +2055,34 @@ def _configure_inset_map(
             layers=[boundary_layer],
             target_crs=target_crs,
             frame_rect=frame_rect,
-            buffer_factor=4.0,
+            buffer_factor=buffer_factor if buffer_factor is not None else _read_nonnegative_float_env(
+                'MAP_EXPORT_BOUNDARY_INSET_BUFFER',
+                4.0,
+            ),
         )
+
+    if extent_override is not None:
+        inset_extent = extent_override
+    elif zoom_out_factor > 1.0:
+        inset_extent.scale(zoom_out_factor)
+        print(
+            f'Inset {map_item_id}: zoom-out factor={zoom_out_factor:g}',
+            flush=True,
+        )
+
+    if live:
+        overlay = _configure_inset_boundary_overlay(
+            project=project, inset_item=inset_item, boundary_layer=boundary_layer,
+            target_crs=target_crs, extent=inset_extent, overlay_mode=overlay_mode,
+        )
+        inset_item.setLayers([overlay] + ([basemap_layer] if basemap_layer is not None else []))
+        inset_item.setBackgroundEnabled(True)
+        inset_item.refresh()
+        return
 
     image_path = package_dir / f"{map_item_id}.png"
 
-    inset_dpi = _read_int_env(
+    inset_dpi = inset_dpi if inset_dpi is not None else _read_int_env(
         "MAP_EXPORT_INSET_DPI",
         800,
     )
@@ -1379,6 +2111,7 @@ def _configure_inset_map(
         boundary_layer=boundary_layer,
         target_crs=target_crs,
         extent=inset_extent,
+        overlay_mode=overlay_mode,
     )
 
     layout.refresh()
