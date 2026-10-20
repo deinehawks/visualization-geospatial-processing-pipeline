@@ -5,9 +5,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 import json
+import math
 import shutil
 
-from .boundary_finder import collect_boundary_files_by_survey_id
+from .boundary_finder import BoundaryFile, collect_boundary_files_by_survey_id
 from .kml_to_geojson import extract_kml_from_kmz, parse_kml_to_features
 from .orthomosaic_finder import collect_orthomosaic_files
 
@@ -19,6 +20,15 @@ class MapPackageResult:
     merged_boundary_geojson: Path
     metadata_json: Path
     style_json: Path
+
+
+@dataclass(frozen=True)
+class ResolvedMapSurvey:
+    """Explicit processed inputs; this path never invokes database lookup."""
+    survey_name: str
+    survey_dir: Path
+    boundary_path: Path
+    orthomosaic_path: Path | None = None
 
 
 def _normalize_survey_roots(
@@ -91,42 +101,72 @@ def export_map_package(
     layout_template: Path | None = None,
     disclaimer: str | None = None,
     include_orthomosaic: bool = False,
+    resolved_surveys: list[ResolvedMapSurvey] | None = None,
+    orthomosaic_storage: str = "copy",
+    exclusive_output: bool = False,
 ) -> MapPackageResult:
+    if orthomosaic_storage not in {"copy", "reference"}:
+        raise ValueError("Orthomosaic storage must be copy or reference")
+    if resolved_surveys is not None:
+        if not resolved_surveys or [s.survey_name for s in resolved_surveys] != survey_names:
+            raise ValueError("Resolved inputs must match all requested surveys in order")
+        if len(set(survey_names)) != len(survey_names):
+            raise ValueError("Duplicate resolved survey inputs")
+        for item in resolved_surveys:
+            if not item.boundary_path.resolve().is_relative_to(item.survey_dir.resolve()):
+                raise ValueError("Boundary must be inside its selected survey")
+            if item.orthomosaic_path is not None and not item.orthomosaic_path.resolve().is_relative_to(item.survey_dir.resolve()):
+                raise ValueError("Orthomosaic must be inside its selected survey")
+            if not item.boundary_path.is_file():
+                raise FileNotFoundError(item.boundary_path)
+            if include_orthomosaic and (item.orthomosaic_path is None or not item.orthomosaic_path.is_file()):
+                raise FileNotFoundError(f"Missing orthomosaic for {item.survey_name}")
     configured_survey_roots = _normalize_survey_roots(
         survey_root,
         survey_roots,
     )
+    if not configured_survey_roots and resolved_surveys is not None:
+        configured_survey_roots = list(dict.fromkeys(s.survey_dir.parent for s in resolved_surveys))
     if not configured_survey_roots:
         raise ValueError("At least one survey root is required")
 
     map_slug = _slugify(map_name)
     output_dir = output_root / map_slug
+    if resolved_surveys is not None:
+        destination = output_dir.resolve()
+        for item in resolved_surveys:
+            if destination.is_relative_to(item.survey_dir.resolve()):
+                raise ValueError("Package output must be outside selected survey folders")
 
     boundaries_dir = output_dir / "boundaries"
     source_boundary_dir = boundaries_dir / "source"
     extracted_kml_dir = boundaries_dir / "extracted_kml"
     orthomosaic_dir = output_dir / "orthomosaics"
 
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=not exclusive_output)
     boundaries_dir.mkdir(parents=True, exist_ok=True)
     source_boundary_dir.mkdir(parents=True, exist_ok=True)
     extracted_kml_dir.mkdir(parents=True, exist_ok=True)
 
     db_path = Path("data/pipeline.db")
 
-    if include_orthomosaic:
+    if include_orthomosaic and orthomosaic_storage == "copy":
         orthomosaic_dir.mkdir(
             parents=True,
             exist_ok=True,
         )
     
-    boundary_files = _collect_from_survey_roots(
-        survey_roots=configured_survey_roots,
-        db_path=db_path,
-        survey_names=survey_names,
-        collector=collect_boundary_files_by_survey_id,
-        artifact_label="boundary file",
-    )
+    if resolved_surveys is not None:
+        boundary_files = [BoundaryFile(s.survey_name, s.survey_dir, s.boundary_path)
+                          for s in resolved_surveys]
+    else:
+        boundary_files = _collect_from_survey_roots(
+            survey_roots=configured_survey_roots,
+            db_path=db_path,
+            survey_names=survey_names,
+            collector=collect_boundary_files_by_survey_id,
+            artifact_label="boundary file",
+        )
 
     all_features: list[dict[str, Any]] = []
     boundary_records: list[dict[str, Any]] = []
@@ -134,15 +174,25 @@ def export_map_package(
 
     if include_orthomosaic:
 
-        orthomosaic_files = _collect_from_survey_roots(
-            survey_roots=configured_survey_roots,
-            db_path=db_path,
-            survey_names=survey_names,
-            collector=collect_orthomosaic_files,
-            artifact_label="clipped orthomosaic",
-        )
+        if resolved_surveys is not None:
+            orthomosaic_files = [s.orthomosaic_path for s in resolved_surveys]
+        else:
+            orthomosaic_files = _collect_from_survey_roots(
+                survey_roots=configured_survey_roots,
+                db_path=db_path,
+                survey_names=survey_names,
+                collector=collect_orthomosaic_files,
+                artifact_label="clipped orthomosaic",
+            )
 
         for ortho_path in orthomosaic_files:
+
+            if orthomosaic_storage == "reference":
+                orthomosaic_records.append({
+                    "source_orthomosaic": str(ortho_path.resolve()),
+                    "storage_mode": "reference",
+                })
+                continue
 
             copied_orthomosaic = _unique_output_path(
                 orthomosaic_dir,
@@ -192,6 +242,12 @@ def export_map_package(
             survey_name=item.survey_name,
             source_boundary=item.boundary_path,
         )
+
+        if resolved_surveys is not None:
+            _validate_resolved_features(features, item.boundary_path)
+            bounds_check = _compute_feature_collection_bounds({"features": features})
+            if not features or not bounds_check or bounds_check["min_lon"] >= bounds_check["max_lon"] or bounds_check["min_lat"] >= bounds_check["max_lat"]:
+                raise ValueError(f"Boundary has no nonempty polygon geometry: {item.boundary_path}")
 
         all_features.extend(features)
 
@@ -264,7 +320,7 @@ def export_map_package(
             "boundaries": "boundaries",
             "source_boundaries": "boundaries/source",
             "extracted_kml": "boundaries/extracted_kml",
-            "orthomosaics": "orthomosaics" if include_orthomosaic else None,
+            "orthomosaics": "orthomosaics" if include_orthomosaic and orthomosaic_storage == "copy" else None,
         },
         "location": location,
         "layout": {
@@ -279,6 +335,7 @@ def export_map_package(
         },
         "map_type": "orthomosaic" if include_orthomosaic else "boundary",
         "include_orthomosaic": include_orthomosaic,
+        "orthomosaic_storage": orthomosaic_storage,
         "orthomosaics": orthomosaic_records,
     }
 
@@ -314,6 +371,25 @@ def export_map_package(
         metadata_json=metadata_json,
         style_json=style_json,
     )
+
+
+def _validate_resolved_features(features, source):
+    """Require finite, nonzero WGS84 polygon rings for explicit generator inputs."""
+    if not features:
+        raise ValueError(f'Empty boundary: {source}')
+    for feature in features:
+        rings = (feature.get('geometry') or {}).get('coordinates') or []
+        if not rings:
+            raise ValueError(f'Empty boundary geometry: {source}')
+        for ring in rings:
+            if len(ring) < 4 or ring[0][:2] != ring[-1][:2]:
+                raise ValueError(f'Invalid boundary ring: {source}')
+            if any(not math.isfinite(x) or not math.isfinite(y) or abs(x) > 180 or abs(y) > 90
+                   for x, y, *_ in ring):
+                raise ValueError(f'Invalid WGS84 boundary coordinates: {source}')
+            area = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(ring, ring[1:]))
+            if abs(area) <= 1e-15:
+                raise ValueError(f'Empty boundary area: {source}')
 
 
 def _build_merged_boundary_feature(

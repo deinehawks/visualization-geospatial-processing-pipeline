@@ -440,6 +440,33 @@ def test_only_lower_inset_receives_selected_crs(monkeypatch, live, configured):
     assert ctx.target_crs is target
 
 
+@pytest.mark.parametrize('live', (True, False))
+def test_v2_routes_independent_styles_and_geographic_crs_to_each_inset(monkeypatch, live):
+    from modules.map_export.editor_model import validate_options, validate_map_styles
+    exporter = _load_exporter_module(monkeypatch)
+    upper, lower = Mock(), Mock()
+    configure = Mock(side_effect=[upper, lower])
+    monkeypatch.setattr(exporter, '_configure_inset_map', configure)
+    make_crs = lambda name: SimpleNamespace(authid=lambda: name)
+    bases = {'map_inset': Mock(), 'map_inset_2': Mock()}
+    styles = validate_map_styles({'map_inset': {'pin_size_mm': 8}, 'map_inset_2': {'pin_color': '#112233'}})
+    ctx = SimpleNamespace(
+        qgis=SimpleNamespace(QgsLayoutItemPicture=object, QgsCoordinateReferenceSystem=make_crs),
+        layout=object(), project=object(), package_dir=Path('unused'),
+        basemap_layer=Mock(), frame_basemaps=bases, frame_overlays={}, merged_layer=Mock(),
+        target_crs=make_crs('EPSG:32651'), map_styles=styles,
+        overview_bounds_wgs84={}, boundary_inset_bounds_wgs84=None,
+        render_options=validate_options({'boundary_crs': 'EPSG:4326'}), live_insets=live,
+    )
+    exporter._configure_insets(ctx)
+    for call, key in zip(configure.call_args_list, ('map_inset', 'map_inset_2')):
+        assert call.kwargs['target_crs'].authid() == 'EPSG:4326'
+        assert call.kwargs['basemap_layer'] is bases[key]
+        assert call.kwargs['overlay_style'] == styles[key]
+        assert call.kwargs['live'] == live
+    assert ctx.frame_overlays == {'map_inset': upper, 'map_inset_2': lower}
+
+
 def _install_locator_fakes(monkeypatch):
     core = ModuleType('qgis.core')
     qgis = ModuleType('qgis')
@@ -497,6 +524,23 @@ def test_locator_pin_uses_survey_geometry_crs_and_fixed_print_size(monkeypatch):
     )
     assert Path(fake.core.QgsSvgMarkerSymbolLayer.call_args.args[0]).is_file()
     fake.boundary.clone.assert_not_called()
+
+
+def test_v2_locator_pin_applies_color_size_and_keeps_crs_and_tip(monkeypatch):
+    from modules.map_export.editor_model import validate_style
+    exporter = _load_exporter_module(monkeypatch)
+    fake = _install_locator_fakes(monkeypatch)
+    gui = ModuleType('qgis.PyQt.QtGui')
+    gui.QColor = Mock()
+    monkeypatch.setitem(sys.modules, 'qgis.PyQt.QtGui', gui)
+    style = validate_style({'pin_color': '#123abc', 'pin_size_mm': 9})
+    exporter._create_inset_locator_layer(fake.boundary, style=style)
+    fake.pin.setSize.assert_called_with(9)
+    gui.QColor.assert_called_once_with('#123abc')
+    fake.pin.setFillColor.assert_called_once_with(gui.QColor.return_value)
+    fake.layer.setCrs.assert_called_once_with(fake.boundary.crs())
+    fake.pin.setVerticalAnchorPoint.assert_called_once_with('bottom')
+    fake.pin.setSizeUnit.assert_called_once_with('mm')
 
 
 @pytest.mark.parametrize(

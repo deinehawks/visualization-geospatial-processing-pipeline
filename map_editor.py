@@ -11,7 +11,12 @@ def main(argv=None):
     inputs.add_argument('--package', type=Path, help='Existing exported map folder')
     inputs.add_argument('--design', type=Path, help='Saved .mapedit.json design')
     inputs.add_argument('--export-snapshot', type=Path, help=argparse.SUPPRESS)
+    inputs.add_argument('--generator-request', type=Path, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
+    if args.generator_request:
+        from modules.map_export.editor_generator import run_generator_request
+        run_generator_request(args.generator_request)
+        return 0
     if args.export_snapshot:
         from modules.map_export.editor_session import run_snapshot_export
         run_snapshot_export(args.export_snapshot)

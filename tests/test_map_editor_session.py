@@ -74,6 +74,8 @@ def session(tmp_path):
             items[key].setExtent(Rect(*state['extent']))
         overview_crs = kwargs['render_options']['overview_crs']
         items['map_inset_2'].auth_id = 'EPSG:32651' if overview_crs == 'project' else overview_crs
+        upper_crs = kwargs['render_options']['boundary_crs']
+        items['map_inset'].auth_id = 'EPSG:32651' if upper_crs == 'project' else upper_crs
         for key, text in kwargs['text_values'].items():
             items[key].setText(text)
         ctx = SimpleNamespace(
@@ -82,6 +84,7 @@ def session(tmp_path):
             qgis=SimpleNamespace(QgsRectangle=Rect, QgsCoordinateReferenceSystem=lambda value: value),
             render_options=copy.deepcopy(kwargs['render_options']), project=Mock(),
             basemap_layer=Mock(), merged_layer=Mock(), map_states=kwargs['map_states'],
+            map_styles=copy.deepcopy(kwargs.get('map_styles')), grid_style=copy.deepcopy(kwargs.get('grid_style')),
         )
         renderer.builds.append(ctx)
         return ctx
@@ -176,14 +179,17 @@ def test_inset_uses_same_crs_and_saved_extent_for_basemap_and_overlay(monkeypatc
     saved = Rect(10, 10, 110, 70)
     basemap = Mock()
     target_crs = SimpleNamespace(authid=lambda: 'EPSG:4326')
+    style = {'pin_color': '#112233', 'pin_size_mm': 8}
     renderer._configure_inset_map(
         layout=SimpleNamespace(itemById=lambda _: item, refresh=Mock()), project=Mock(), package_dir=tmp_path,
         basemap_layer=basemap, boundary_layer=Mock(), target_crs=target_crs,
         QgsLayoutItemPicture=Mock(), map_item_id='map_inset_2', live=live,
         fixed_extent_wgs84={}, extent_override=saved, zoom_out_factor=2,
+        overlay_style=style,
     )
     assert renderer._configure_inset_boundary_overlay.call_args.kwargs['extent'] is saved
     assert renderer._configure_inset_boundary_overlay.call_args.kwargs['target_crs'] is target_crs
+    assert renderer._configure_inset_boundary_overlay.call_args.kwargs['style'] is style
     if live:
         assert item.layers() == [overlay, basemap]
         render_image.assert_not_called()
@@ -231,7 +237,8 @@ def test_saved_extent_requires_matching_crs(monkeypatch):
     ('EPSG:32651', 'EPSG:4326'), ('EPSG:4326', 'EPSG:32651'),
     ('EPSG:4326', 'EPSG:4326'),
 ))
-def test_overview_saved_extent_transforms_only_when_crs_changes(monkeypatch, source, target):
+@pytest.mark.parametrize('item_id', ('map_inset', 'map_inset_2'))
+def test_overview_saved_extent_transforms_only_when_crs_changes(monkeypatch, source, target, item_id):
     renderer = load_renderer(monkeypatch)
     state = {'crs': source, 'extent': [1, 2, 101, 62]}
     original = copy.deepcopy(state)
@@ -242,10 +249,10 @@ def test_overview_saved_extent_transforms_only_when_crs_changes(monkeypatch, sou
     qgis = SimpleNamespace(QgsRectangle=Rect, QgsCoordinateReferenceSystem=Mock(return_value=source_crs),
                            QgsCoordinateTransform=transform)
     ctx = SimpleNamespace(qgis=qgis, target_crs=target_crs, project=Mock(),
-                          map_states={'map_inset_2': state}, layout=SimpleNamespace(itemById=lambda _: Map()))
+                          map_states={item_id: state}, layout=SimpleNamespace(itemById=lambda _: Map()))
     fit = Mock(return_value=fitted)
     monkeypatch.setattr(renderer, '_fit_extent_to_frame', fit)
-    result = renderer._saved_map_extent(ctx, 'map_inset_2', target_crs=target_crs)
+    result = renderer._saved_map_extent(ctx, item_id, target_crs=target_crs)
     if source == target:
         assert result.coordinates == state['extent']
         transform.assert_not_called()
@@ -379,3 +386,143 @@ def test_empty_fonts_stop_before_any_package_or_output_work(monkeypatch, tmp_pat
         renderer.build_qgis_print_layout(package_dir=tmp_path, render_options={}, live_insets=False)
     paths.assert_not_called()
     insets.assert_not_called()
+
+
+def test_v2_history_restores_navigation_incrementally_and_rebuilds_only_for_crs(session):
+    from modules.map_export.editor_workflow import DesignHistory
+    history = DesignHistory(session)
+    before = session.snapshot()
+    history.execute(lambda: session.zoom('map_frame', 0.8))
+    history.undo()
+    assert session.snapshot() == before
+    assert len(session.renderer.builds) == 1
+    history.redo()
+    assert session._map('map_frame').extent().width() == 80
+    history.execute(lambda: session.set_inset_crs('map_inset', 'EPSG:4326'))
+    assert session.snapshot().maps['map_inset']['crs'] == 'EPSG:4326'
+    assert len(session.renderer.builds) == 2
+    history.undo()
+    assert session.snapshot().maps['map_inset']['crs'] == 'EPSG:32651'
+
+
+def test_failed_rebuild_recovers_previous_design_and_does_not_enter_history(session):
+    from modules.map_export.editor_workflow import DesignHistory
+    history = DesignHistory(session)
+    before = session.snapshot()
+    original = session.renderer.build_qgis_print_layout.side_effect
+    calls = []
+    def fail_once(**kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise RuntimeError('Controlled layout failure')
+        return original(**kwargs)
+    session.renderer.build_qgis_print_layout.side_effect = fail_once
+    with pytest.raises(RuntimeError, match='Controlled layout failure'):
+        history.execute(lambda: session.set_paper('A4'))
+    assert session.snapshot() == before
+    assert not history.dirty and not history.undo_steps
+
+
+def test_v2_styles_and_location_preset_are_independent_and_undoable(session):
+    from modules.map_export.editor_workflow import DesignHistory, location_preset
+    history = DesignHistory(session)
+    before = session.snapshot()
+    history.execute(lambda: session.set_map_style('map_inset', {'pin_size_mm': 8, 'basemap_opacity': 0.3}))
+    assert session.snapshot().map_styles['map_inset']['pin_size_mm'] == 8
+    assert session.snapshot().map_styles['map_frame'] == before.map_styles['map_frame']
+    assert len(session.renderer.builds) == 1
+    history.execute(lambda: session.apply_preset(location_preset('Philippines', '116.8,4.4,127,21.3'), 'map_inset_2'))
+    assert session.snapshot().maps['map_frame'] == before.maps['map_frame']
+    assert session.snapshot().texts['label_inset_2'] == 'Philippines'
+    assert session.snapshot().options['overview_overlay'] == 'pin'
+    assert len(history.undo_steps) == 2
+    history.undo()
+    assert session.snapshot().texts['label_inset_2'] == before.texts['label_inset_2']
+    with pytest.raises(ValueError, match='Choose an inset'):
+        session.apply_preset(location_preset('City', '1,2,3,4'), 'map_frame')
+
+
+def test_v2_grid_and_map_styles_survive_paper_and_crs_rebuilds(session):
+    session.set_grid_style({'lines_visible': False, 'width_mm': 0.4})
+    session.set_map_style('map_inset_2', {'pin_color': '#112233', 'pin_size_mm': 7})
+    original = session.snapshot()
+    session.set_paper('A4')
+    session.set_inset_crs('map_inset', 'EPSG:4326')
+    after = session.snapshot()
+    assert after.map_styles == original.map_styles and after.grid_style == original.grid_style
+    assert session.ctx.grid_style['width_mm'] == 0.4
+
+
+def test_v2_style_preset_does_not_change_text_or_any_map_extent(session):
+    from modules.map_export.editor_workflow import style_preset
+    original = session.snapshot()
+    styled = copy.deepcopy(original)
+    styled.options['paper_size'] = 'A4'
+    styled.map_styles['map_inset']['pin_size_mm'] = 10
+    session.apply_preset(style_preset('Presentation', styled), 'map_frame')
+    after = session.snapshot()
+    assert after.maps == original.maps and after.texts == original.texts
+    assert after.options['paper_size'] == 'A4'
+    assert after.map_styles['map_inset']['pin_size_mm'] == 10
+
+
+def test_v2_assembly_clones_basemap_and_does_not_mutate_source_layer(monkeypatch):
+    from modules.map_export.editor_model import validate_map_styles
+    renderer = load_renderer(monkeypatch)
+    base = Mock()
+    clones = [Mock(), Mock(), Mock()]
+    base.clone.side_effect = clones
+    monkeypatch.setattr(renderer, '_create_preferred_basemap_layer', Mock(return_value=(base, 'Attribution')))
+    boundary_style = Mock()
+    monkeypatch.setattr(renderer, '_apply_boundary_style', boundary_style)
+    ctx = SimpleNamespace(qgis=SimpleNamespace(QgsRasterLayer=Mock()), project=Mock(),
+                          merged_layer=Mock(), orthomosaic_layers=[Mock()],
+                          map_styles=validate_map_styles({'map_inset': {'basemap_opacity': 0.2}}))
+    renderer._assemble_map_layers(ctx)
+    assert list(ctx.frame_basemaps.values()) == clones
+    clones[0].setOpacity.assert_called_once_with(1.0)
+    clones[1].setOpacity.assert_called_once_with(0.2)
+    clones[2].setOpacity.assert_called_once_with(1.0)
+    base.setOpacity.assert_not_called()
+    assert ctx.main_map_layers[-1] is clones[0]
+    assert ctx.frame_overlays == {'map_frame': ctx.merged_layer}
+
+
+def test_v2_style_edit_only_touches_selected_map_layers(monkeypatch):
+    from modules.map_export.editor_model import validate_map_styles, validate_style
+    renderer = load_renderer(monkeypatch)
+    base, overlay, item = Mock(), Mock(), Mock()
+    other_base, other_overlay = Mock(), Mock()
+    style_boundary = Mock()
+    monkeypatch.setattr(renderer, '_apply_boundary_style', style_boundary)
+    ctx = SimpleNamespace(frame_basemaps={'map_frame': other_base, 'map_inset': base},
+                          frame_overlays={'map_frame': other_overlay, 'map_inset': overlay},
+                          map_styles=validate_map_styles({}), render_options={'boundary_overlay': 'boundary'},
+                          layout=SimpleNamespace(itemById=lambda _: item))
+    style = validate_style({'basemap_opacity': 0.2, 'boundary_stroke': '#112233'})
+    renderer.apply_map_style(ctx, 'map_inset', style)
+    base.setOpacity.assert_called_once_with(0.2)
+    style_boundary.assert_called_once_with(overlay, style)
+    assert not other_base.mock_calls and not other_overlay.mock_calls
+    item.zoomToExtent.assert_not_called()
+    assert ctx.map_styles['map_frame']['basemap_opacity'] == 1
+
+
+def test_v2_grid_hides_lines_but_retains_adaptive_labels_and_one_grid(monkeypatch):
+    from modules.map_export.editor_model import validate_style
+    renderer = load_renderer(monkeypatch)
+    grid, item, color, font = Mock(), Mock(), Mock(), Mock()
+    item.grid.return_value = grid
+    style = validate_style({'lines_visible': False, 'labels_visible': True, 'width_mm': 0.7}, grid=True)
+    for _ in range(2):
+        interval = renderer._add_coordinate_grid(
+            map_item=item, extent=Rect(125, 7, 125.005, 7.003), grid_crs=Mock(),
+            QgsLayoutItemMapGrid=SimpleNamespace(Solid='solid', FrameAnnotationsOnly='labels'),
+            QColor=lambda *_: color, QFont=lambda *_: font, grid_style=style)
+        assert interval == 0.001
+    grid.setStyle.assert_called_with('labels')
+    grid.setAnnotationEnabled.assert_called_with(True)
+    grid.setAnnotationPrecision.assert_called_with(3)
+    color.setAlphaF.assert_called_with(0.6)
+    assert grid.setLineSymbol.call_count == 2 and item.grid.call_count == 2
+    grid.lineSymbol.return_value.clone.return_value.setWidth.assert_called_with(0.7)

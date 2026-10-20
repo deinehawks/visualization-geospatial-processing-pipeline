@@ -468,6 +468,18 @@ def _assemble_map_layers(ctx: ExportContext) -> None:
     ctx.basemap_layer = basemap_layer
     ctx.basemap_attribution = basemap_attribution
     ctx.main_map_layers = main_map_layers
+    if getattr(ctx, 'map_styles', None) is not None:
+        ctx.frame_basemaps = {}
+        ctx.frame_overlays = {'map_frame': ctx.merged_layer}
+        for key, style in ctx.map_styles.items():
+            layer = basemap_layer.clone() if basemap_layer is not None else None
+            if layer is not None:
+                layer.setOpacity(style['basemap_opacity'])
+                ctx.project.addMapLayer(layer, False)
+            ctx.frame_basemaps[key] = layer
+        ctx.main_map_layers = [ctx.merged_layer] + ctx.orthomosaic_layers + (
+            [ctx.frame_basemaps['map_frame']] if basemap_layer is not None else [])
+        _apply_boundary_style(ctx.merged_layer, ctx.map_styles['map_frame'])
 
 
 # Pipeline stage 3: layout configuration
@@ -605,7 +617,9 @@ def _configure_main_map(ctx: ExportContext) -> Any:
     )
 
     map_item.setCrs(ctx.target_crs)
-    map_item.setExtent(map_extent)
+    set_extent = (map_item.zoomToExtent if getattr(ctx, 'render_options', None) is not None
+                  else map_item.setExtent)
+    set_extent(map_extent)
     map_item.setLayers(ctx.main_map_layers)
     map_item.setKeepLayerSet(True)
     map_item.refresh()
@@ -632,7 +646,7 @@ def _configure_main_map(ctx: ExportContext) -> Any:
     map_item.setScale(scale_decision['selected_scale'])
     saved_extent = _saved_map_extent(ctx, 'map_frame')
     if saved_extent is not None:
-        map_item.setExtent(saved_extent)
+        set_extent(saved_extent)
         scale_decision.update(scale_mode='manual', auto_scale_multiplier=None,
                               selected_scale=float(map_item.scale()))
     map_item.refresh()
@@ -672,6 +686,7 @@ def _configure_main_map(ctx: ExportContext) -> Any:
         QColor=q.QColor,
         QFont=q.QFont,
         annotation_font_size=_render_option(ctx, 'grid_font_size', lambda: 6.0),
+        grid_style=getattr(ctx, 'grid_style', None),
     )
     _configure_scale_bar(
         ctx=ctx,
@@ -689,13 +704,15 @@ def _configure_insets(ctx: ExportContext) -> None:
 
     # Inset 1: automatically fit the survey boundary unless fixed bounds
     # and a matching label have been configured by the operator.
-    _configure_inset_map(
+    upper_crs_name = _render_option(ctx, 'boundary_crs', lambda: 'project')
+    upper_crs = ctx.target_crs if upper_crs_name == 'project' else q.QgsCoordinateReferenceSystem(upper_crs_name)
+    upper_overlay = _configure_inset_map(
         layout=ctx.layout,
         project=ctx.project,
         package_dir=getattr(ctx, 'output_dir', ctx.package_dir),
-        basemap_layer=ctx.basemap_layer,
+        basemap_layer=_frame_basemap(ctx, 'map_inset'),
         boundary_layer=ctx.merged_layer,
-        target_crs=ctx.target_crs,
+        target_crs=upper_crs,
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
         QgsCoordinateReferenceSystem=q.QgsCoordinateReferenceSystem,
         map_item_id="map_inset",
@@ -707,7 +724,8 @@ def _configure_insets(ctx: ExportContext) -> None:
             'MAP_EXPORT_BOUNDARY_INSET_OVERLAY',
         )),
         live=getattr(ctx, 'live_insets', False),
-        extent_override=_saved_map_extent(ctx, 'map_inset'),
+        extent_override=_saved_map_extent(ctx, 'map_inset', target_crs=upper_crs),
+        overlay_style=_frame_style(ctx, 'map_inset'),
         buffer_factor=_render_option(ctx, 'boundary_buffer', lambda: _read_nonnegative_float_env('MAP_EXPORT_BOUNDARY_INSET_BUFFER', 4.0)),
         inset_dpi=_render_option(ctx, 'inset_dpi', lambda: _read_int_env('MAP_EXPORT_INSET_DPI', 800)),
     )
@@ -716,11 +734,11 @@ def _configure_insets(ctx: ExportContext) -> None:
     overview_crs_name = _render_option(ctx, 'overview_crs', _read_overview_crs)
     overview_crs = (ctx.target_crs if overview_crs_name == 'project'
                     else q.QgsCoordinateReferenceSystem(overview_crs_name))
-    _configure_inset_map(
+    lower_overlay = _configure_inset_map(
         layout=ctx.layout,
         project=ctx.project,
         package_dir=getattr(ctx, 'output_dir', ctx.package_dir),
-        basemap_layer=ctx.basemap_layer,
+        basemap_layer=_frame_basemap(ctx, 'map_inset_2'),
         boundary_layer=ctx.merged_layer,
         target_crs=overview_crs,
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
@@ -733,8 +751,11 @@ def _configure_insets(ctx: ExportContext) -> None:
         )),
         live=getattr(ctx, 'live_insets', False),
         extent_override=_saved_map_extent(ctx, 'map_inset_2', target_crs=overview_crs),
+        overlay_style=_frame_style(ctx, 'map_inset_2'),
         inset_dpi=_render_option(ctx, 'inset_dpi', lambda: _read_int_env('MAP_EXPORT_INSET_DPI', 800)),
     )
+    if getattr(ctx, 'map_styles', None) is not None:
+        ctx.frame_overlays.update(map_inset=upper_overlay, map_inset_2=lower_overlay)
 
 
 # Pipeline stage 4: export
@@ -869,6 +890,7 @@ def build_qgis_print_layout(
     render_options: dict[str, Any] | None = None, live_insets: bool = False,
     map_states: dict[str, Any] | None = None, text_values: dict[str, str] | None = None,
     text_styles: dict[str, Any] | None = None, output_dir: Path | None = None,
+    map_styles: dict[str, Any] | None = None, grid_style: dict[str, Any] | None = None,
 ) -> ExportContext:
     """
     Build a shared layout; live insets do not write images or final outputs.
@@ -898,6 +920,11 @@ def build_qgis_print_layout(
     )
     ctx.map_states = map_states or {}
     ctx.live_insets = live_insets
+    ctx.map_styles, ctx.grid_style = None, None
+    if map_styles is not None or grid_style is not None:
+        from .editor_model import validate_map_styles, validate_style
+        ctx.map_styles = validate_map_styles(map_styles) if map_styles is not None else None
+        ctx.grid_style = validate_style(grid_style, grid=True) if grid_style is not None else None
     if output_dir is not None:
         ctx.output_dir = Path(output_dir)
 
@@ -936,12 +963,12 @@ def _require_export_fonts():
 
 
 def _saved_map_extent(ctx, item_id, *, target_crs=None, state=None):
-    """Preserve saved framing; only the overview supports changing map CRS."""
+    """Preserve saved framing; only inset frames support changing map CRS."""
     state = state if state is not None else getattr(ctx, 'map_states', {}).get(item_id)
     if not state:
         return None
     target_crs = target_crs if target_crs is not None else ctx.target_crs
-    if state['crs'] != target_crs.authid() and item_id != 'map_inset_2':
+    if state['crs'] != target_crs.authid() and item_id not in ('map_inset', 'map_inset_2'):
         raise ValueError(f'Saved extent CRS does not match package CRS: {item_id}')
     extent = ctx.qgis.QgsRectangle(*state['extent'])
     if state['crs'] != target_crs.authid():
@@ -977,6 +1004,7 @@ def _resolved_render_options(ctx):
         'overview_zoom': _read_float_env_at_least('MAP_EXPORT_OVERVIEW_ZOOM_OUT', 1, minimum=1),
         'overview_overlay': _read_overview_overlay_mode(),
         'overview_crs': _read_overview_crs(),
+        'boundary_crs': 'project',
     }
 
 
@@ -1010,6 +1038,7 @@ def refresh_main_map_furniture(ctx):
         map_item=item, extent=geographic, grid_crs=grid_crs,
         QgsLayoutItemMapGrid=q.QgsLayoutItemMapGrid, QColor=q.QColor, QFont=q.QFont,
         annotation_font_size=_render_option(ctx, 'grid_font_size', lambda: 6.0),
+        grid_style=getattr(ctx, 'grid_style', None),
     )
     _configure_scale_bar(ctx=ctx, map_item=item, extent=item.extent())
     info = ctx.layout.itemById('map_info')
@@ -1366,6 +1395,7 @@ def _add_coordinate_grid(
     QColor: Any,
     QFont: Any,
     annotation_font_size: float = 6.0,
+    grid_style: dict[str, Any] | None = None,
 ) -> float | None:
     try:
         interval = _nice_grid_interval(extent)
@@ -1373,17 +1403,22 @@ def _add_coordinate_grid(
         grid = map_item.grid()
         grid.setEnabled(True)
         grid.setCrs(grid_crs)
-        grid.setStyle(QgsLayoutItemMapGrid.Solid)
+        style = grid_style
+        grid.setStyle(QgsLayoutItemMapGrid.FrameAnnotationsOnly if style and not style['lines_visible']
+                      else QgsLayoutItemMapGrid.Solid)
         grid.setIntervalX(interval)
         grid.setIntervalY(interval)
 
         line_symbol = grid.lineSymbol().clone()
-        line_symbol.setWidth(GRID_LINE_WIDTH_MM)
-        line_symbol.setColor(QColor(*GRID_LINE_COLOR_RGBA))
+        line_symbol.setWidth(style['width_mm'] if style else GRID_LINE_WIDTH_MM)
+        color = QColor(style['color']) if style else QColor(*GRID_LINE_COLOR_RGBA)
+        if style:
+            color.setAlphaF(style['opacity'])
+        line_symbol.setColor(color)
         line_symbol.setOpacity(1.0)
         grid.setLineSymbol(line_symbol)
 
-        grid.setAnnotationEnabled(True)
+        grid.setAnnotationEnabled(style['labels_visible'] if style else True)
         grid.setAnnotationPrecision(_grid_annotation_precision(interval))
         font = QFont('Arial', 6)
         font.setPointSizeF(annotation_font_size)
@@ -1687,7 +1722,7 @@ def _render_inset_basemap_image(
     )
 
     map_item.setCrs(target_crs)
-    map_item.setExtent(extent)
+    map_item.zoomToExtent(extent)
     map_item.setBackgroundEnabled(True)
 
     if basemap_layer is not None:
@@ -1736,7 +1771,7 @@ def _add_inset_basemap_picture(
     layout.addLayoutItem(picture)
 
 
-def _create_inset_locator_layer(boundary_layer: Any) -> Any:
+def _create_inset_locator_layer(boundary_layer: Any, style=None) -> Any:
     """Create fixed-print-size survey pins in the boundary's CRS, in memory."""
     from qgis.core import (
         QgsFeature,
@@ -1781,6 +1816,10 @@ def _create_inset_locator_layer(boundary_layer: Any) -> Any:
 
     pin = QgsSvgMarkerSymbolLayer(str(pin_path))
     pin.setSize(4.0)
+    if style is not None:
+        from qgis.PyQt.QtGui import QColor
+        pin.setSize(style['pin_size_mm'])
+        pin.setFillColor(QColor(style['pin_color']))
     pin.setSizeUnit(QgsUnitTypes.RenderMillimeters)
     pin.setHorizontalAnchorPoint(QgsMarkerSymbolLayer.HCenter)
     pin.setVerticalAnchorPoint(QgsMarkerSymbolLayer.Bottom)
@@ -1798,15 +1837,19 @@ def _configure_inset_boundary_overlay(
     target_crs: Any,
     extent: Any,
     overlay_mode: str = 'boundary',
-) -> None:
+    style: dict[str, Any] | None = None,
+) -> Any:
     if overlay_mode == 'pin':
-        inset_boundary_layer = _create_inset_locator_layer(boundary_layer)
+        inset_boundary_layer = (_create_inset_locator_layer(boundary_layer, style=style) if style is not None
+                                else _create_inset_locator_layer(boundary_layer))
     else:
         inset_boundary_layer = boundary_layer.clone()
         inset_boundary_layer.setName("Inset Boundary Overlay")
         source_renderer = boundary_layer.renderer()
         if source_renderer is not None:
             inset_boundary_layer.setRenderer(source_renderer.clone())
+        if style is not None:
+            _apply_boundary_style(inset_boundary_layer, style)
 
     # Add silently to project so QGIS can render it, but do not show in layer tree.
     project.addMapLayer(inset_boundary_layer, False)
@@ -1823,6 +1866,42 @@ def _configure_inset_boundary_overlay(
 
     inset_item.refresh()
     return inset_boundary_layer
+
+
+def _frame_style(ctx, key):
+    styles = getattr(ctx, 'map_styles', None)
+    return styles[key] if styles is not None else None
+
+
+def _frame_basemap(ctx, key):
+    layers = getattr(ctx, 'frame_basemaps', None)
+    return layers[key] if layers is not None else ctx.basemap_layer
+
+
+def _apply_boundary_style(layer, style):
+    _style_polygon_layer(layer, stroke=style['boundary_stroke'], fill=style['boundary_fill'],
+                         opacity=style['boundary_opacity'], width=style['boundary_width_mm'])
+
+
+def apply_map_style(ctx, key, style):
+    """Restyle private frame layers without loading TIFFs or changing framing."""
+    layer = _frame_basemap(ctx, key)
+    if layer is not None:
+        layer.setOpacity(style['basemap_opacity'])
+        layer.triggerRepaint()
+    overlay = ctx.frame_overlays[key]
+    prefix = 'boundary' if key == 'map_inset' else 'overview'
+    if key != 'map_frame' and ctx.render_options[prefix + '_overlay'] == 'pin':
+        symbol = overlay.renderer().symbol().clone()
+        marker = symbol.symbolLayer(0)
+        marker.setSize(style['pin_size_mm'])
+        marker.setFillColor(ctx.qgis.QColor(style['pin_color']))
+        overlay.renderer().setSymbol(symbol)
+    else:
+        _apply_boundary_style(overlay, style)
+    overlay.triggerRepaint()
+    ctx.map_styles[key] = dict(style)
+    ctx.layout.itemById(key).refresh()
 
 
 def _read_int_env(name: str, default: int) -> int:
@@ -2011,7 +2090,8 @@ def _configure_inset_map(
     extent_override: Any = None,
     buffer_factor: float | None = None,
     inset_dpi: int | None = None,
-) -> None:
+    overlay_style: dict[str, Any] | None = None,
+) -> Any | None:
     """
     Configure one inset map.
 
@@ -2074,11 +2154,12 @@ def _configure_inset_map(
         overlay = _configure_inset_boundary_overlay(
             project=project, inset_item=inset_item, boundary_layer=boundary_layer,
             target_crs=target_crs, extent=inset_extent, overlay_mode=overlay_mode,
+            style=overlay_style,
         )
         inset_item.setLayers([overlay] + ([basemap_layer] if basemap_layer is not None else []))
         inset_item.setBackgroundEnabled(True)
         inset_item.refresh()
-        return
+        return overlay
 
     image_path = package_dir / f"{map_item_id}.png"
 
@@ -2105,16 +2186,18 @@ def _configure_inset_map(
         QgsLayoutItemPicture=QgsLayoutItemPicture,
     )
 
-    _configure_inset_boundary_overlay(
+    overlay = _configure_inset_boundary_overlay(
         project=project,
         inset_item=inset_item,
         boundary_layer=boundary_layer,
         target_crs=target_crs,
         extent=inset_extent,
         overlay_mode=overlay_mode,
+        style=overlay_style,
     )
 
     layout.refresh()
+    return overlay
 
 
 def _apply_layout_variables(ctx: ExportContext) -> None:

@@ -25,7 +25,45 @@ DEFAULT_OPTIONS = {
                         'max_lon': 125.9308, 'max_lat': 7.3282},
     'overview_zoom': 1.0, 'overview_overlay': 'boundary',
     'overview_crs': 'EPSG:4326',
+    'boundary_crs': 'project',
 }
+DEFAULT_MAP_STYLE = {
+    'basemap_opacity': 1.0, 'boundary_stroke': '#991b1b', 'boundary_fill': '#fca5a5',
+    'boundary_width_mm': 0.55, 'boundary_opacity': 0.32,
+    'pin_color': '#c62828', 'pin_size_mm': 4.0,
+}
+DEFAULT_GRID_STYLE = {
+    'lines_visible': True, 'labels_visible': True, 'color': '#5a5a5a',
+    'opacity': 0.6, 'width_mm': 0.25,
+}
+
+
+def validate_style(values, *, grid=False):
+    defaults = DEFAULT_GRID_STYLE if grid else DEFAULT_MAP_STYLE
+    if not isinstance(values, dict) or set(values) - set(defaults):
+        raise ValueError('Unknown map/grid style setting')
+    result = dict(defaults, **values)
+    ranges = {'basemap_opacity': (0, 1), 'boundary_opacity': (0, 1),
+              'boundary_width_mm': (0.05, 5), 'pin_size_mm': (1, 20),
+              'opacity': (0, 1), 'width_mm': (0.05, 2)}
+    for key, value in result.items():
+        if key.endswith('_visible'):
+            if not isinstance(value, bool):
+                raise ValueError('Visibility must be true or false')
+        elif key in ranges:
+            low, high = ranges[key]
+            result[key] = finite_number(value, minimum=low)
+            if result[key] > high:
+                raise ValueError(f'{key} must be from {low} to {high}')
+        elif not isinstance(value, str) or not re.fullmatch(r'#[0-9a-fA-F]{6}', value):
+            raise ValueError('Style colors must be #RRGGBB')
+    return result
+
+
+def validate_map_styles(values):
+    if not isinstance(values, dict) or set(values) - set(MAP_IDS):
+        raise ValueError('Invalid style map ID')
+    return {key: validate_style(values.get(key, {})) for key in MAP_IDS}
 BAT_OPTIONS = {
     'MAP_EXPORT_PAPER_SIZE': 'paper_size', 'MAP_EXPORT_PREVIEW_DPI': 'preview_dpi',
     'MAP_EXPORT_PDF_DPI': 'pdf_dpi', 'MAP_EXPORT_INSET_DPI': 'inset_dpi',
@@ -78,10 +116,11 @@ def validate_options(values):
     result['paper_size'] = str(result['paper_size']).upper()
     if result['paper_size'] not in ('A4', 'A3'):
         raise ValueError('Paper size must be A4 or A3')
-    overview_crs = str(result['overview_crs']).strip()
-    result['overview_crs'] = 'project' if overview_crs.lower() == 'project' else overview_crs.upper()
-    if result['overview_crs'] not in ('project', 'EPSG:4326'):
-        raise ValueError('Overview CRS must be project or EPSG:4326')
+    for key in ('overview_crs', 'boundary_crs'):
+        crs = str(result[key]).strip()
+        result[key] = 'project' if crs.lower() == 'project' else crs.upper()
+        if result[key] not in ('project', 'EPSG:4326'):
+            raise ValueError('Inset CRS must be project or EPSG:4326')
     result['grid_font_size'] = finite_number(result['grid_font_size'], minimum=1)
     if result['grid_font_size'] > 72:
         raise ValueError('Coordinate label font size must be from 1 to 72 pt')
@@ -115,9 +154,14 @@ class EditorDesign:
     maps: dict = field(default_factory=dict)
     texts: dict = field(default_factory=dict)
     text_styles: dict = field(default_factory=dict)
+    map_styles: dict = field(default_factory=dict)
+    grid_style: dict = field(default_factory=dict)
+    source_version: int = field(default=2, compare=False)
 
     def validate(self):
         self.options = validate_options(self.options)
+        self.map_styles = validate_map_styles(self.map_styles)
+        self.grid_style = validate_style(self.grid_style, grid=True)
         for key, state in self.maps.items():
             if key not in MAP_IDS or not isinstance(state.get('crs'), str) or not re.fullmatch(r'EPSG:\d+', state['crs']):
                 raise ValueError('Invalid map ID or extent CRS')
@@ -177,7 +221,9 @@ def design_from_package(package_dir):
     state = printed.get('editor_state') or {}
     texts.update(state.get('texts', {}))
     return EditorDesign(package, options, copy.deepcopy(state.get('maps', {})),
-                        texts, copy.deepcopy(state.get('text_styles', {}))).validate()
+                        texts, copy.deepcopy(state.get('text_styles', {})),
+                        copy.deepcopy(state.get('map_styles', {})),
+                        copy.deepcopy(state.get('grid_style', {}))).validate()
 
 
 def import_bat_settings(path):
@@ -240,9 +286,10 @@ def design_payload(design, relative_to):
         reference = os.path.relpath(design.package_dir, relative_to)
     except ValueError:  # Windows cross-volume references must remain absolute.
         reference = str(design.package_dir)
-    return {'version': 1, 'package': reference, 'options': copy.deepcopy(design.options),
+    return {'version': 2, 'package': reference, 'options': copy.deepcopy(design.options),
             'maps': copy.deepcopy(design.maps), 'texts': copy.deepcopy(design.texts),
-            'text_styles': copy.deepcopy(design.text_styles)}
+            'text_styles': copy.deepcopy(design.text_styles),
+            'map_styles': copy.deepcopy(design.map_styles), 'grid_style': copy.deepcopy(design.grid_style)}
 
 
 def atomic_json(path, value):
@@ -268,16 +315,24 @@ def save_design(design, path):
     path = require_separate_workspace(design.package_dir, path)
     if (path.parent / 'attempt.json').exists():
         raise ValueError('Export snapshots are immutable; save a design in a separate workspace')
+    if path.is_file() and json.loads(path.read_text(encoding='utf-8')).get('version') == 1:
+        raise ValueError('Save V1 designs as a separate V2 copy')
     atomic_json(path, design_payload(design, path.parent))
 
 
 def load_design(path):
     path = Path(path).resolve()
     data = json.loads(path.read_text(encoding='utf-8'))
-    if data.get('version') != 1:
+    if type(data.get('version')) is not int or data['version'] not in (1, 2):
         raise ValueError('Unsupported map design version')
     package, _ = validate_package(path.parent / data['package'])
-    return EditorDesign(package, data['options'], data['maps'], data['texts'], data['text_styles']).validate()
+    options = dict(data['options'])
+    if data['version'] == 1 and 'overview_crs' not in options:
+        state = data['maps'].get('map_inset_2', {})
+        if state.get('crs'):
+            options['overview_crs'] = 'EPSG:4326' if state['crs'] == 'EPSG:4326' else 'project'
+    return EditorDesign(package, options, data['maps'], data['texts'], data['text_styles'],
+                        data.get('map_styles', {}), data.get('grid_style', {}), data['version']).validate()
 
 
 def create_export_attempt(design, workspace):

@@ -191,6 +191,9 @@ def test_export_snapshot_keeps_source_and_previous_outputs(package, tmp_path, fa
     before = {p.name: p.read_bytes() for p in package.iterdir()}
     design = design_from_package(package)
     design.options['grid_font_size'] = 8.5
+    design.map_styles['map_inset']['basemap_opacity'] = 0.2
+    design.map_styles['map_inset_2']['pin_color'] = '#112233'
+    design.grid_style['lines_visible'] = False
     design.maps = {
         'map_frame': {'crs': 'EPSG:32651', 'extent': [1, 2, 101, 62]},
         'map_inset_2': {'crs': 'EPSG:4326', 'extent': [116, 4, 128, 22]},
@@ -220,6 +223,10 @@ def test_export_snapshot_keeps_source_and_previous_outputs(package, tmp_path, fa
     assert args['render_options']['grid_font_size'] == 8.5
     assert args['render_options']['boundary_overlay'] == 'pin'
     assert args['render_options']['overview_crs'] == 'EPSG:4326'
+    assert args['map_styles'] == design.map_styles
+    assert args['grid_style'] == design.grid_style
+    assert ctx.editor_state['map_styles'] == design.map_styles
+    assert ctx.editor_state['grid_style'] == design.grid_style
     assert not args['live_insets']
     assert json.loads((attempt / 'attempt.json').read_text())['status'] == ('failed' if failed else 'complete')
     assert (old / 'print_map.pdf').read_bytes() == b'previous pdf'
@@ -241,7 +248,7 @@ def test_editor_modules_import_without_qt_qgis_or_effects(monkeypatch):
     monkeypatch.setitem(sys.modules, 'qgis', None)
     monkeypatch.setitem(sys.modules, 'osgeo', None)
     for name in ('modules.map_export.editor_model', 'modules.map_export.editor_session',
-                 'modules.map_export.editor_window', 'map_editor'):
+                 'modules.map_export.editor_window', 'modules.map_export.editor_workflow', 'map_editor'):
         module = importlib.import_module(name)
         importlib.reload(module)
 

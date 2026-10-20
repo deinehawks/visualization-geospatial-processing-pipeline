@@ -25,15 +25,17 @@ class EditorSession:
 
     def rebuild(self):
         self.design.validate()
-        self._previous_ctx = self.ctx  # Keep the old scene alive until its view is detached.
-        self.ctx = self.renderer.build_qgis_print_layout(
+        candidate = self.renderer.build_qgis_print_layout(
             package_dir=self.design.package_dir, render_options=copy.deepcopy(self.design.options),
             live_insets=True, map_states=copy.deepcopy(self.design.maps),
             text_values=self.design.texts, text_styles=self.design.text_styles,
+            map_styles=copy.deepcopy(self.design.map_styles), grid_style=copy.deepcopy(self.design.grid_style),
         )
         for key in MAP_IDS:
-            if self.ctx.layout.itemById(key) is None:
+            if candidate.layout.itemById(key) is None:
                 raise ValueError(f'The template is missing a required map: {key}')
+        self._previous_ctx = self.ctx  # Keep the old scene alive until its view is detached.
+        self.ctx = candidate
         self.ctx.layout.renderContext().setDpi(96)
 
     def snapshot(self):
@@ -146,12 +148,17 @@ class EditorSession:
         if key not in ('map_inset', 'map_inset_2') or mode not in ('boundary', 'pin'):
             raise ValueError('Choose an inset and boundary or pin')
         item = self._map(key)
-        previous = [layer for layer in item.layers() if layer is not self.ctx.basemap_layer]
+        basemap = (self.ctx.frame_basemaps[key] if hasattr(self.ctx, 'frame_basemaps')
+                   else self.ctx.basemap_layer)
+        previous = [layer for layer in item.layers() if layer is not basemap]
         layer = self.renderer._configure_inset_boundary_overlay(
             project=self.ctx.project, inset_item=item, boundary_layer=self.ctx.merged_layer,
             target_crs=item.crs(), extent=item.extent(), overlay_mode=mode,
+            style=self.design.map_styles[key],
         )
-        item.setLayers([layer] + ([self.ctx.basemap_layer] if self.ctx.basemap_layer is not None else []))
+        item.setLayers([layer] + ([basemap] if basemap is not None else []))
+        if hasattr(self.ctx, 'frame_overlays'):
+            self.ctx.frame_overlays[key] = layer
         item.setBackgroundEnabled(True)
         for old in previous:
             if old is not self.ctx.merged_layer:
@@ -162,14 +169,103 @@ class EditorSession:
         item.refresh()
 
     def set_paper(self, paper):
-        self.design = self.snapshot()
-        self.design.options['paper_size'] = paper
+        trial = self.snapshot()
+        trial.options['paper_size'] = paper
+        self.design = trial.validate()
         self.rebuild()
 
     def set_overview_crs(self, crs):
-        self.design = self.snapshot()
-        self.design.options['overview_crs'] = crs
+        self.set_inset_crs('map_inset_2', crs)
+
+    def set_inset_crs(self, key, crs):
+        if key not in ('map_inset', 'map_inset_2'):
+            raise ValueError('Only inset CRS can be changed')
+        trial = self.snapshot()
+        trial.options['boundary_crs' if key == 'map_inset' else 'overview_crs'] = crs
+        self.design = trial.validate()
         self.rebuild()
+
+    def set_map_style(self, key, style):
+        from .editor_model import validate_style
+        self._map(key)
+        style = validate_style(style)
+        self.renderer.apply_map_style(self.ctx, key, style)
+        self.design.map_styles[key] = style
+
+    def set_grid_style(self, style):
+        from .editor_model import validate_style
+        style = validate_style(style, grid=True)
+        self.ctx.grid_style = style
+        self.renderer.refresh_main_map_furniture(self.ctx)
+        self.design.grid_style = style
+
+    def _apply_design(self, design):
+        trial = copy.deepcopy(design).validate()
+        if trial.package_dir != self.design.package_dir:
+            raise ValueError('Cannot restore a different map package')
+        old = dict(self.ctx.render_options)
+        if any(old[key] != trial.options[key] for key in ('paper_size', 'boundary_crs', 'overview_crs')):
+            self.design = trial
+            self.rebuild()
+            return
+        current = self.snapshot()
+        self.design = trial
+        for key, prefix in (('map_inset', 'boundary'), ('map_inset_2', 'overview')):
+            if old[prefix + '_overlay'] != trial.options[prefix + '_overlay']:
+                self.set_overlay(key, trial.options[prefix + '_overlay'])
+        self.ctx.render_options = copy.deepcopy(trial.options)
+        self.ctx.grid_style = copy.deepcopy(trial.grid_style)
+        for key in MAP_IDS:
+            self.set_map_style(key, trial.map_styles[key])
+            if key in trial.maps and current.maps.get(key) != trial.maps[key]:
+                self.set_extent(key, trial.maps[key]['extent'])
+        self.renderer.apply_editor_text(self.ctx, trial.texts, trial.text_styles)
+        self.renderer.refresh_main_map_furniture(self.ctx)
+        self.design = trial
+
+    def restore(self, design, *, force=False):
+        """Restore metadata incrementally, rolling a failed restore back to its prior state."""
+        before = self.snapshot()
+        try:
+            if force:
+                self.replace_design(design)
+            else:
+                self._apply_design(design)
+        except Exception as exc:
+            try:
+                self.replace_design(before)
+            except Exception as rollback_exc:
+                raise RuntimeError(f'Design restore failed ({exc}); rollback failed: {rollback_exc}') from exc
+            raise
+
+    def replace_design(self, design):
+        if design.package_dir != self.design.package_dir:
+            raise ValueError('Cannot replace a different map package')
+        self.design = copy.deepcopy(design).validate()
+        self.rebuild()
+
+    def apply_preset(self, preset, key):
+        from .editor_workflow import validate_preset
+        preset = validate_preset(preset)
+        if preset['kind'] == 'location':
+            if key not in ('map_inset', 'map_inset_2'):
+                raise ValueError('Choose an inset for a location preset')
+            if self.design.options['boundary_crs' if key == 'map_inset' else 'overview_crs'] != preset['crs']:
+                self.set_inset_crs(key, preset['crs'])
+            self.set_bounds(key, preset['bounds'])
+            self.set_overlay(key, preset['mode'])
+            prefix, label = ('boundary', 'label_inset') if key == 'map_inset' else ('overview', 'label_inset_2')
+            self.design.options[prefix + '_label'] = preset['label']
+            self.design.options[prefix + '_bounds'] = dict(preset['bounds'])
+            item = self.ctx.layout.itemById(label)
+            item.setText(preset['label'])
+            item.refresh()
+        else:
+            trial = self.snapshot()
+            trial.options.update(preset['options'])
+            trial.map_styles, trial.grid_style = preset['map_styles'], preset['grid_style']
+            trial.text_styles = preset['text_styles']
+            self.restore(trial)
 
 
 def run_snapshot_export(snapshot_path: Path, renderer=None):
@@ -194,9 +290,11 @@ def run_snapshot_export(snapshot_path: Path, renderer=None):
             package_dir=design.package_dir, render_options=design.options, live_insets=False,
             map_states=design.maps, text_values=design.texts, text_styles=design.text_styles,
             output_dir=attempt,
+            map_styles=design.map_styles, grid_style=design.grid_style,
         )
         ctx.metadata_path = attempt / 'map_metadata.json'
-        ctx.editor_state = {'maps': design.maps, 'texts': design.texts, 'text_styles': design.text_styles}
+        ctx.editor_state = {'maps': design.maps, 'texts': design.texts, 'text_styles': design.text_styles,
+                            'map_styles': design.map_styles, 'grid_style': design.grid_style}
         result = renderer._export_print_outputs(ctx)
         atomic_json(marker, {'version': 1, 'status': 'complete', 'outputs': result})
         print(f'Export complete: {attempt}', flush=True)
@@ -208,8 +306,9 @@ def run_snapshot_export(snapshot_path: Path, renderer=None):
 
 class ExportJob:
     """Own one injected process; never terminate another application's processes."""
-    def __init__(self, process_factory):
+    def __init__(self, process_factory, gate=None):
         self.process_factory = process_factory
+        self.gate = gate
         self.process = None
         self.attempt = None
         self.cancel_requested = False
@@ -222,15 +321,20 @@ class ExportJob:
         from .editor_model import create_export_attempt
         if self.busy:
             raise RuntimeError('An export is already running')
-        self.attempt = create_export_attempt(copy.deepcopy(design), workspace)
-        self.cancel_requested = False
-        self.process = self.process_factory()
-        self.process.setProgram(str(program))
-        self.process.setArguments([str(entrypoint), '--export-snapshot', str(self.attempt / 'snapshot.mapedit.json')])
+        if self.gate is not None:
+            self.gate.acquire(self)
         try:
+            self.attempt = create_export_attempt(copy.deepcopy(design), workspace)
+            self.cancel_requested = False
+            self.process = self.process_factory()
+            self.process.setProgram(str(program))
+            self.process.setArguments([str(entrypoint), '--export-snapshot', str(self.attempt / 'snapshot.mapedit.json')])
             self.process.start()
         except Exception:
-            self.finish(-1)
+            if self.process is not None:
+                self.finish(-1)
+            elif self.gate is not None:
+                self.gate.release(self)
             raise
         return self.attempt
 
@@ -245,10 +349,14 @@ class ExportJob:
         if self.process is None:
             return
         receipt = self.attempt / 'attempt.json'
-        state = json.loads(receipt.read_text(encoding='utf-8'))
-        if state['status'] != 'complete':
-            status = 'cancelled' if self.cancel_requested else 'failed'
-            state.update(status=status, exit_code=exit_code)
-            atomic_json(receipt, state)
-        self.process = None
-        return state
+        try:
+            state = json.loads(receipt.read_text(encoding='utf-8'))
+            if state['status'] != 'complete':
+                status = 'cancelled' if self.cancel_requested else 'failed'
+                state.update(status=status, exit_code=exit_code)
+                atomic_json(receipt, state)
+            return state
+        finally:
+            self.process = None
+            if self.gate is not None:
+                self.gate.release(self)
