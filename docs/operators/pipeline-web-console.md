@@ -1,5 +1,13 @@
 # Local Pipeline Web Console V1
 
+## Two-slot opt-in update (2026-10-21)
+
+The single-run descriptions below are the original V1/default behavior. The
+approved [two-run extension](two-run-execution.md) adds an idle-only opt-in,
+server-authoritative capacity, resource waits, and per-run controls for owned
+CLI processes. Default remains one; do not enable before separately authorized
+workstation checks. Forced repair/restart operations remain exclusive.
+
 ## Open it
 
 1. Let the currently running, older terminal process finish or pause and return

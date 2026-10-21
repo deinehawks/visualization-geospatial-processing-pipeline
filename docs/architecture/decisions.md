@@ -1,5 +1,23 @@
 ﻿# Cross-Workstream Decisions
 
+## CW-ADR-014 - Bounded two-run opt-in (2026-10-21)
+
+Status: implemented with hermetic coverage; real-process rollout pending.
+Supersede CW-ADR-013's single-slot restriction only through an idle, reconciled
+operator opt-in, retaining its security and ownership boundaries. Scope is one
+Windows workstation/repository, at most two local invocations and no queue.
+Reuse atomic journals, verified PID/job ownership and named mutexes for atomic
+identity/capacity/storage admission, independent compute/transfer permits and
+serialized short database transactions. No schema or status-enum migration.
+
+Use run-specific controls, disable global hotkeys in two-run mode, and retain
+terminal review. Maintenance/restarts are exclusive. State commit failure never
+authorizes processing replay. Creation receipts precede durable binding; unknown
+remote effects/children block admission and cannot be cleared by local-only
+reconciliation. Read old journals conservatively; retain legacy logs/checkpoints
+and published paths. Rollback is idle policy reduction, not evidence deletion.
+Detailed operation, limitations and validation: `docs/operators/two-run-execution.md`.
+
 ## Status Legend
 
 - **Implemented and verified:** Present in code and covered by inspected safe tests.

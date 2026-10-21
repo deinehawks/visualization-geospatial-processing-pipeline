@@ -1,5 +1,76 @@
 # Refactor Current Status
 
+## Two-run implementation and gated rollout (2026-10-21)
+
+Receipt identity correction: native Windows full volume/file IDs now produce the
+same fingerprints under CLI Python 3.10 and UI Python 3.13. Existing receipts are
+not rewritten: verified NTFS legacy hashes are recomputed only from matching
+current evidence. New-scheme receipts require full canonical identity; ReFS never
+uses truncated aliases. Identity is checked before/after read-only SQLite access.
+No status/schema/path/default/process guard changes. Existing receipt recognition
+through the real UI remains an operator smoke check after a UI-server restart.
+
+Validation: 24 added cases, 268 focused, 1108 defaults/collection, compilation,
+3.10 grammar and scoped whitespace passed. Both actual interpreters agreed on
+native source-file identity and complete in-memory-test fingerprints. A temporary
+fixture connection is now explicitly closed for deterministic WAL byte checks;
+all immutability assertions remain. Two files created and eight scoped files
+modified; no moves/deletes, dependencies, production data/DB/receipt access,
+pipeline/GIS/WebODM/utility actions, commit or push. Previous results below are
+historical. Details/commands: `docs/operators/legacy-run-reconciliation.md`.
+
+UPSDiscord follow-up: an explicit reconciliation-only process exception now
+verifies one selected PID, native creation identity, interpreter and constrained
+startup command. No generic Python/name/PID whitelist or persistent allow policy.
+The confirmation and audit bind the exact invocation; apply rechecks it and all
+other blockers after scoped CIM inspection. Default checks and old receipts remain
+compatible. See the legacy reconciliation operator guide for steps and boundaries.
+Validation: 57 new cases, 244 focused, 1084 safe tests/collection, syntax/3.10 grammar
+and scoped whitespace passed. No production DB/runtime/process/utility, native GIS,
+survey storage, credentials or external service was accessed. No real reconcile
+was applied. Windows elevated verification remains operator work. Two files added,
+six scoped files modified; no dependencies, schema changes, moves/deletions or
+unrelated edits. Previous/frontend results below are historical and unchanged.
+
+Follow-up: explicit legacy reconciliation is implemented as additive local
+receipts, not DB status cleanup. A default read-only preview and exact
+run/evidence-bound confirmation require idle verified ownership and conservative
+Windows process checks. Shared CLI/browser/policy guards accept only unchanged
+evidence; the dashboard keeps original statuses and labels local acknowledgments
+separately from unverified remote state. No schema, default-capacity or remote
+recovery behavior changes. See `docs/operators/legacy-run-reconciliation.md`.
+
+Validation: 187 focused and all 1027 safe tests, 1027 safely collected, 11 frontend
+fixtures, Python compilation, TS typecheck/static build passed. Production DB,
+runtime receipts/process inventory, data and services were not accessed in this
+implementation. No real reconciliation was applied. Windows operator smoke is
+still required. New module/test/operator guide and scoped CLI/admission/API/UI/
+contract/docs changes preserve previous work and unrelated local edits.
+
+Implemented opt-in capacity 1/2, shared CLI/browser admission, identity and
+physical-volume commitment checks, serialized ID/folder claims, compute/transfer
+permits, targeted CLI/browser controls, run-specific log writes with legacy
+reading, and exclusive maintenance/restarts. DB initialization/transactions are
+serialized; persistence failure cannot replay processing. Remote creation results
+and binding acknowledgments retain side-effect evidence. Unknown owners/children,
+legacy execution and unresolved remote effects block admission conservatively.
+
+Default stays one. No live policy/journal, production DB/.env, dataset/share,
+WebODM, QGIS/GDAL, existing export, or active pipeline was accessed or changed.
+No dependency, schema migration, queue, worker, commit or push was introduced.
+Application code, isolated tests and related docs changed; unrelated operator
+edits/deleted BATs remain intact. Public Microsoft API docs were read only.
+Validation commands/coverage and remaining separately authorized workstation
+checks are recorded in `docs/operators/two-run-execution.md`. This implementation
+does not complete the broader refactor phases or production rollout.
+
+Final validation: all 985 guarded defaults, 318 focused checks, 985 safely
+collected cases, 10 frontend fixtures, changed-file compilation/Python 3.10
+grammar, TS type generation/typecheck/static build, isolated UI dependency check
+and scoped whitespace passed. Allocation retry/resume coverage retains the first
+ID and rejects unverified partial-folder ownership. No manual operational check
+was performed and no optional API tests were skipped.
+
 ## Local pipeline web console V1 (2026-10-20)
 
 Implemented all three approved console milestones: Next.js static dashboard,

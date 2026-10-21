@@ -1,5 +1,53 @@
 # Architectural Decision Log
 
+## Two-run opt-in - accepted extension (2026-10-21)
+
+Cross-interpreter receipt correction accepted: supersede only `os.stat()` as the
+Windows database identity source, since 3.10 and 3.13 give different device values.
+Use native full volume/128-bit IDs with attributes-only shared handles; derive
+old NTFS receipt representations only where verified native APIs agree. Preserve
+old receipts and all row/history/binding/path evidence. Add an optional scheme
+marker to new receipts so full identities never fall back to legacy aliases.
+ReFS stays full-width; unknown/partial/mismatched identity fails closed. Native
+identity is an explicitly injected store boundary for tests. No DB migration or
+automatic journal rewrite, cleanup, recompletion or guard bypass. Coordinated
+source rollback retains evidence and may restore conservative blocking. A UI
+server restart, not another round of acknowledgment, loads the fix operationally.
+
+UPSDiscord exception accepted: the operator requires the background UPS utility
+to stay running. Permit a reconciliation-only explicit opt-in for one reviewed
+invocation, never a blanket Python exception. Bind PID/native birth, absolute
+interpreter and exact two-argument UPSDiscord startup command to preview,
+confirmation and receipt. Recheck before apply; unknown metadata, changed identity,
+other Python/GIS processes and owned children remain blockers. Relative bare
+script names require operator attestation; do not claim code/CWD verification.
+Reuse standard-library Windows identity and fixed PID-filtered local CIM through
+trusted system PowerShell, explicit args/no shell/profile/window, bounded timeout,
+and injected/fake process boundaries in tests. No persistent process allow policy,
+database/schema change, dependency, process termination or utility restart. Omit
+the option for conservative rollback; retain all evidence and prior receipts.
+
+Follow-up accepted: stale unowned `running` rows may be explicitly acknowledged
+locally after process/child/ownership checks, without claiming processing success
+or changing the database. Use exact evidence-bound atomic receipts under the
+owned runtime root, shared by CLI/browser/policy guards. Re-read/invalidate on any
+run/stage/binding/database-identity change. There is no blanket reset or remote
+retry permission. Rollback can ignore additive receipts, restoring the old block
+without rewriting historical DB records. This supersedes only the former lack of
+a local-only legacy reconciliation path, not remote-outcome or ownership guards.
+
+The operator approved two local runs on one Windows workstation/repository,
+run-specific controls, and exclusive repairs. Supersede the earlier single-slot
+prohibition only through an idle/reconciled policy; default remains one. Reuse
+durable invocation journals with conservative admission, physical-volume budgets,
+survey/path/remote identities and compute/transfer permits, not worker queues.
+Atomic ID allocation includes a folder claim. Serialize DB initialization/write
+transactions; never replay processing after uncertain persistence. Global hooks
+are disabled under two-slot policy. Do not migrate schema/statuses or move
+published outputs. Preserve legacy reading, remote creation/restart evidence and
+child ownership. Roll back by reducing policy only after safe idle. Real Windows,
+drive mapping, storage and GIS checks remain separately authorized.
+
 ## Local console ownership and browser controls - accepted slice (2026-10-20)
 
 The operator approved replacing terminal commands for normal operation on this

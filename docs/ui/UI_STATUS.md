@@ -1,5 +1,25 @@
 # Pipeline Web Console Status
 
+## Two-run extension (2026-10-21)
+
+Explicit legacy local reconciliation is available through the operator CLI.
+The dashboard displays local-only acknowledgments separately, including a note
+beneath unchanged persisted statuses; it never presents them as completed or
+remote-stopped. New evidence invalidates acknowledgment and restores blocking.
+The feature has no HTTP apply/bypass endpoint. Automated checks: 187 focused,
+1027 defaults/collection, 11 frontend fixtures, compile/typecheck/static build;
+real Windows/visual/production reconciliation remains unperformed. Operator steps
+and safety scope are in `docs/operators/legacy-run-reconciliation.md`.
+
+The console now uses server-authoritative capacity, shows both active local
+invocations/resource waits and offers targeted controls for verified terminal
+ownership. Default is one; two-slot policy is an idle operator-only opt-in.
+Maintenance/restarts remain exclusive. Legacy/uncertain owners still fail closed.
+See `docs/operators/two-run-execution.md` for checks and the separately authorized
+real-workstation rollout gate. No live application/policy was started or changed.
+
+## Original V1 baseline
+
 Date: 2026-10-20.
 
 All three V1 implementation milestones are present. Automated acceptance covers

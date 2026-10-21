@@ -1,5 +1,65 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Two-run coordination coverage (2026-10-21)
+
+Cross-version identity coverage: 23 new mocked native/receipt cases plus one
+authenticated API regression verify old CLI/UI receipts, unchanged receipt/DB
+bytes, canonical full-ID requirements, invalidation on changed evidence, file
+replacement races, ABI/access/handle cleanup, failure closure and ReFS full IDs.
+The common seed helper now explicitly closes its temporary SQLite connection;
+WAL-aware replacement fixtures use SQLite backup under pytest-owned paths rather
+than copying an incomplete main-file image. Existing byte assertions remain.
+All native adapter unit boundaries are fakes; no production DB/process/service
+was used. Actual 3.10/3.13 read-only source-file metadata and in-memory SQLite
+fingerprint probes additionally agree. No default test executes subprocesses.
+Validation: 268 focused, 1108 defaults/collection, compile/3.10 grammar and scoped
+whitespace. No frontend change. Exact commands and pending real UI smoke are in
+`docs/operators/legacy-run-reconciliation.md`; no safety fixture was relaxed.
+
+UPSDiscord follow-up: 57 new tests inject identity, inventory, native-directory and
+CIM-runner boundaries; no real PowerShell/process query runs. They cover exact
+invocation binding, opt-in/default separation, reuse/change/hidden metadata,
+remaining Python/GIS/owned-child blockers, post-CIM snapshots, oversized and
+tampered evidence, CLI scoping, old receipts and unchanged temporary DB bytes.
+No test guard was relaxed and no environment/pytest detection was introduced.
+Validation: 244 focused, 1084 safe tests and safely collected cases, syntax/3.10
+grammar, scoped whitespace. No frontend changes; earlier frontend results remain.
+Exact commands, changed-file scope and unperformed elevated Windows smoke are in
+`docs/operators/legacy-run-reconciliation.md`.
+
+Follow-up reconciliation tests use the same pytest-owned SQLite/console fixtures
+and an explicit inventory callable. Native Toolhelp calls are fake kernel
+boundaries, never real process discovery. Added tests assert unchanged database
+bytes, preview-without-writes, stale and wrong confirmations, binding/attempt
+invalidation, surviving/unknown children, Python/GIS blockers, fail-closed partial
+inventories, receipt failures/idempotence, older schema support, original-ID
+resume, and authenticated additive API/UI semantics. No safety fixture changed.
+Exact commands/results and the remaining Windows smoke check are recorded in
+`docs/operators/legacy-run-reconciliation.md` (187 focused, 1027 defaults/collection,
+11 frontend fixtures, syntax/typecheck/build). No production resource was used.
+
+The new two-run module uses pytest-owned paths/databases, reentrant test locks,
+fake PID/job ownership and mocked Windows mapping APIs. Existing API tests cover
+authenticated read-only capacity, and import safety now includes the targeted
+operator CLI. One existing helper test now asserts exact coordinator invocation
+handoff instead of the former empty guard context. No assertion/guard was removed.
+
+Coverage includes start races, second/third admission, identity/path/remote alias
+conflicts, pre-aggregation physical volumes, aggregate space and post-check disk
+loss, atomic auto-ID claims, policy/repair exclusivity, old/corrupt receipts,
+unknown processes/PID reuse/children, cancellable resource waits, non-nested
+compute/transfers, exact run controls/logs and returned-but-unbound remote IDs.
+Temporary SQLite transaction tests and injected commit/lock failures prove stage
+side effects are not replayed. Frontend fixtures verify server capacity and
+exclusive maintenance instead of globally disabling Start on any active job.
+
+Run the documented focused command, safe defaults, safe collection, changed-file
+syntax/Python-3.10 grammar, frontend fixtures/typecheck/build and scoped whitespace.
+No real child process, GIS, WebODM, network share, credential, production DB or
+runtime journal is used; socket and production guards remain unchanged. Real
+Windows inheritance/drive aliases and operational smoke remain separately
+authorized. Exact commands/results are in the two-run operator guide.
+
 ## Local pipeline console coverage (2026-10-20)
 
 Four new modules exercise projections/command journals, in-process HTTP,

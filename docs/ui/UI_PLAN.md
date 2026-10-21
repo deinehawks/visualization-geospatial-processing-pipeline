@@ -1,5 +1,11 @@
 # Pipeline Web Console V1 Plan
 
+Extension approved 2026-10-21: bounded two-run opt-in on this workstation, with
+run-specific controls, independent compute/transfer waits and exclusive repairs.
+Default remains one. This supersedes only the original parallel-run prohibition;
+security, manual review, explicit ownership and no worker-queue boundaries remain.
+Implementation/rollout details: `docs/operators/two-run-execution.md`.
+
 Approved 2026-10-20: replace terminal commands for normal single-operator use on
 this Windows PC. Next.js static pages use FastAPI only; no browser DB/filesystem
 access, LAN deployment, queue, parallel processing, or arbitrary shell endpoint.

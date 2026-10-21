@@ -1,5 +1,33 @@
 ﻿# API Contract
 
+## Two-run execution extension (2026-10-21)
+
+Follow-up additive field: `GET /api/execution` and `/api/operations.execution`
+include `legacy_reconciled`, a list of exact-evidence local acknowledgments with
+`run_id`, `survey_id`, `persisted_status`, latest-stage fields, fingerprint and
+`remote_status: unverified`. Original DB status projections are never rewritten.
+`legacy_running` now contains only unowned records without a matching current
+receipt. Any changed history/binding invalidates the receipt. Applying receipts
+is an idle-host, exact-confirmation operator CLI operation, not an HTTP endpoint;
+all existing API/session/ownership/remote-recovery restrictions remain unchanged.
+See `docs/operators/legacy-run-reconciliation.md` for limits and validation.
+
+Only the V1 single-slot admission restriction is superseded. Default remains
+one; idle operator-only policy permits two. No queue or database/status migration.
+Authenticated `GET /api/execution` exposes `max_runs`, `occupied`, `available`,
+`blocked`, `holders`, `legacy_running`; `/api/operations` includes it as
+`execution`. Accepted/launching and unverified ownership count. Legacy, unknown,
+recovery or exclusive owners block admission even with a nominal free slot.
+Holders expose `resource_wait` with resource and holder run/operation IDs.
+
+Existing invocation controls accept verified owned CLI runs as well as browser
+runs, but CLI quality review remains terminal-only. Exact invocation binding,
+idempotency, authentication/CSRF/Host/Origin and all existing command allowlists
+remain. Task restarts require exclusive execution. `BUSY`, `IDENTITY_REQUIRED`,
+`DUPLICATE_RUN`, `IDENTITY_CONFLICT`, `REMOTE_IDENTITY_CONFLICT`,
+`STORAGE_COMMITTED` and `INVALID_POLICY/JOURNAL` fail closed. No browser policy
+write endpoint is added. See the two-run operator guide for rollout limits.
+
 ## Status Legend
 
 - **Implemented and verified:** Endpoint or schema exists in code and is covered by inspected tests.
