@@ -124,6 +124,9 @@ class RGBPipeline(
         workspace_layout: Optional[RunWorkspaceLayout] = None,
         published_layout: Optional[PublishedSurveyLayout] = None,
         raster_metadata_reader: Optional[Any] = None,
+        review_provider=None,
+        control_transport=None,
+        enable_hotkeys: bool = True,
     ):
         if not isinstance(config, Mapping):
             raise TypeError("config must be a mapping")
@@ -191,6 +194,8 @@ class RGBPipeline(
         self.task1_bounded     = task1_bounded
         self.force_segregation = force_segregation
         self.rgb_only          = bool(rgb_only)
+        self.review_provider = review_provider
+        self.enable_hotkeys = enable_hotkeys
         self.webodm_mode       = webodm_mode.strip().lower()
 
         # Derive task skip flags from webodm_mode
@@ -199,6 +204,7 @@ class RGBPipeline(
         self.control = PipelineControl(
             self.base_dir,
             self.run_id,
+            **({'transport': control_transport} if control_transport is not None else {}),
         )
 
         if loggers is None:
@@ -5111,14 +5117,36 @@ class RGBPipeline(
                 f"| attempt {restarts}/{max_restarts}"
             )
 
-            processor.restart_task(
-                project_id=int(project_id),
-                task_id=str(task_id_to_restart),
-                restart_from=restart_from,
-            )
+            provider = self.review_provider
+            if provider is not None:
+                provider.restart_started(int(project_id), str(task_id_to_restart), restart_from)
+            try:
+                processor.restart_task(
+                    project_id=int(project_id),
+                    task_id=str(task_id_to_restart),
+                    restart_from=restart_from,
+                )
+            except Exception as exc:
+                if provider is not None:
+                    raise StageRequiresRecovery(
+                        'Browser-requested WebODM restart needs reconciliation; it will not be replayed.',
+                        output={'project_id': project_id, 'task_id': task_id_to_restart,
+                                'restart_from': restart_from},
+                    ) from exc
+                raise
+            if provider is not None:
+                try:
+                    provider.restart_acknowledged()
+                except Exception as exc:
+                    raise StageRequiresRecovery(
+                        'WebODM restart was acknowledged but its receipt could not be committed.',
+                        output={'project_id': project_id, 'task_id': task_id_to_restart},
+                    ) from exc
             success, runtime, task_info = processor.wait_for_completion(
                 int(project_id), str(task_id_to_restart), control_check=lambda: self._check_control_or_raise("webodm"),
             )
+            if provider is not None:
+                provider.restart_finished(task_info)
 
             updated_task_state = {
                 "id": str(task_id_to_restart),
@@ -5154,7 +5182,8 @@ class RGBPipeline(
             task2 = web.get("task2") or {}
             task4 = web.get("task4") or {}
 
-            raw = quality_gate_prompt(
+            prompt = quality_gate_prompt if self.review_provider is None else self.review_provider.decision
+            raw = prompt(
                 logger=logger,
                 survey_id=survey_id,
                 project_id=int(project_id),
@@ -5163,6 +5192,8 @@ class RGBPipeline(
                 webodm_url=self.config.get("webodm", {}).get("url", ""),
                 task4=task4 if task4.get("id") else None,
                 fallback_review=_fallback_reviewed,
+                **({'check_control': lambda: self._check_control_or_raise('quality_gate')}
+                   if self.review_provider is not None else {}),
             )
 
             if raw in ("yes", "y"):
@@ -5524,7 +5555,8 @@ class RGBPipeline(
             self.control.clear_abort()
             self.control.clear_pause()
 
-        self.control.start_hotkeys(pipeline_logger)
+        if self.enable_hotkeys:
+            self.control.start_hotkeys(pipeline_logger)
 
         # Resume a previously paused run
         try:
@@ -5710,6 +5742,11 @@ class RGBPipeline(
                     ):
                         del self._force_webodm_operations
                 self._hydrate_from_state()
+
+                # A browser stop/pause requested during a blocking GDAL call
+                # must be observed before final success and workspace cleanup.
+                if getattr(self.control, 'transport', None) is not None:
+                    self._check_control_or_raise(stage_name)
 
                 if stage_name == "quality_gate":
                     q = self.state.get("quality_gate") or {}

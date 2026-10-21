@@ -54,3 +54,12 @@ data/*.flag
 
 # Optional Google Sheets reporter state; credentials must live outside the repo.
 data/sheet-sync/
+
+# Local pipeline console: journals, isolated environment, and frontend artifacts
+runtime/pipeline-ui/
+.venv-ui/
+web/pipeline-console/node_modules/
+web/pipeline-console/.next/
+web/pipeline-console/out/
+web/pipeline-console/.npm-cache/
+web/pipeline-console/*.tsbuildinfo

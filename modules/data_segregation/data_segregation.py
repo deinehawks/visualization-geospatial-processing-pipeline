@@ -77,6 +77,7 @@ def resolve_source_dataset_dir(
     logger: logging.Logger,
     date_hint: Optional[str] = None,
     uav_folder: Optional[str] = None,
+    candidate_selector=None,
 ) -> Path:
     """
     Resolve the actual dataset folder.
@@ -202,6 +203,12 @@ def resolve_source_dataset_dir(
                     + "\n".join(f"  - {c}" for c in all_candidates)
                 )
             # Multiple matches even with date hint — fall through to prompt
+
+        if candidate_selector is not None:
+            selected = Path(candidate_selector(tuple(all_candidates)))
+            if selected not in all_candidates:
+                raise ValueError('Selected dataset was not one of the resolved candidates')
+            return selected
 
         print("\n[!] Multiple matching dataset folders found:")
         for i, path in enumerate(all_candidates[:10], 1):

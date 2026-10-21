@@ -1,0 +1,4 @@
+# Optional server environment, separate from production/QGIS environments.
+-c requirements-ui-lock.txt
+fastapi==0.141.1
+uvicorn==0.52.4

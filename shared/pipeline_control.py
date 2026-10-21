@@ -5,9 +5,10 @@ from pathlib import Path
 
 
 class PipelineControl:
-    def __init__(self, base_dir: Path, run_id: str):
+    def __init__(self, base_dir: Path, run_id: str, *, transport=None):
         self.base_dir = Path(base_dir)
         self.run_id = str(run_id)
+        self.transport = transport
         self.data_dir = self.base_dir / "data"
 
         self.pause_flag = self.data_dir / f"pause_{self.run_id}.flag"
@@ -60,6 +61,12 @@ class PipelineControl:
         self.abort_flag.unlink(missing_ok=True)
 
     def check_or_raise(self) -> None:
+        if self.transport is not None:
+            action = self.transport.poll()
+            if action == 'stop':
+                raise RuntimeError('__PIPELINE_ABORTED__')
+            if action == 'pause':
+                raise RuntimeError('__PIPELINE_PAUSED__')
         if self.abort_flag.exists():
             raise RuntimeError("__PIPELINE_ABORTED__")
 

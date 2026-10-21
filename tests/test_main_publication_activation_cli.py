@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 import types
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,7 @@ def _install_fake_pipeline(monkeypatch):
 
 
 def _prepare_cli(monkeypatch, tmp_path, argv):
+    monkeypatch.setattr(rgb_main, 'execution_guard_factory', lambda *_: nullcontext())
     monkeypatch.setattr(
         rgb_main,
         "load_pipeline_config",
@@ -90,6 +92,28 @@ def test_cli_leaves_publication_activation_disabled_by_default(monkeypatch, tmp_
     assert pipeline.run_kwargs["publication_confirmation"] is None
     assert pipeline.run_kwargs["keep_workspace"] is False
     assert pipeline.init_kwargs["crossrun_enabled_override"] is None
+
+
+def test_cli_structured_preflight_adapter_never_acquires_execution_guard(monkeypatch, tmp_path):
+    _prepare_cli(monkeypatch, tmp_path, ['--survey','source','--storage-preflight-only'])
+    guard = lambda *_: pytest.fail('Report-only execution must not acquire a run lease')
+    reports = []
+    result = rgb_main.main(observer=reports.append, guard_factory=guard)
+    assert reports == [result]
+    assert result['mode'] == 'task4' and result['report']['ok']
+    assert result['config_fingerprint'] and FakeRGBPipeline.instances == []
+
+
+def test_cli_guard_prevents_pipeline_construction(monkeypatch, tmp_path):
+    _prepare_cli(monkeypatch, tmp_path, ['--survey','source'])
+    from contextlib import contextmanager
+    @contextmanager
+    def reject(*_):
+        raise RuntimeError('another execution owns the slot')
+        yield
+    with pytest.raises(RuntimeError, match='owns the slot'):
+        rgb_main.main(guard_factory=reject)
+    assert FakeRGBPipeline.instances == []
 
 
 def test_cli_passes_keep_workspace_opt_out(monkeypatch, tmp_path):

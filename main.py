@@ -9,6 +9,11 @@ import sqlite3
 import tempfile
 from typing import Any
 import uuid
+import hashlib
+
+from operator_ui.storage import cli_execution_guard
+
+execution_guard_factory = cli_execution_guard
 
 from shared.config import load_pipeline_config
 from shared.db.repo import PipelineRepo
@@ -238,6 +243,7 @@ def resolve_cli_source_dir(
     run_record: dict | None = None,
     rebind_source_dir: str | Path | None = None,
     rebind_confirmation: str | None = None,
+    candidate_selector=None,
 ) -> Path:
     if resume:
         if not run_id:
@@ -292,10 +298,12 @@ def resolve_cli_source_dir(
         logger,
         date_hint=date_hint,
         uav_folder=uav_folder,
+        **({'candidate_selector': candidate_selector} if candidate_selector else {}),
     )
 
 
-def main() -> None:
+def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=None,
+         guard_factory=None):
     parser = argparse.ArgumentParser(description="Run production RGB pipeline")
     parser.add_argument("--survey", required=True, help="Survey folder inside FIELD_DATA_ROOT")
     parser.add_argument(
@@ -515,7 +523,7 @@ def main() -> None:
         help="Run WebODM Task 4 then Task 2 (Orthomosaic + 3D).",
     )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     if args.resume and not args.run_id:
         parser.error("--run-id is required when using --resume")
@@ -778,6 +786,7 @@ def main() -> None:
         run_record=run_record,
         rebind_source_dir=args.rebind_source_dir,
         rebind_confirmation=args.source_rebind_confirmation,
+        **({'candidate_selector': candidate_selector} if candidate_selector else {}),
     )
 
     # Determine webodm_mode from CLI flags
@@ -864,6 +873,17 @@ def main() -> None:
         rgb_only=args.rgb,
     )
     print(format_storage_report(storage_report))
+    preflight = {
+        'report': storage_report, 'source_dir': str(source_dir),
+        'run_id': selected_run_id, 'survey_id': args.survey_id, 'year': args.year,
+        'mode': webodm_mode, 'surveys_root': str(surveys_root),
+        'workspace_root': str(workspace_root),
+        'stage_statuses': latest_stage_statuses,
+        'config_fingerprint': hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest(),
+        'webodm_url': (config.get('webodm') or {}).get('url', ''),
+    }
+    if observer is not None:
+        observer(preflight)
     try:
         require_storage_capacity(storage_report)
     except StorageCapacityError:
@@ -916,124 +936,127 @@ def main() -> None:
             f"task2 project {args.webodm_task_recovery_project_id} ({action})"
         )
     if args.storage_preflight_only:
-        return
+        return preflight
 
-    if args.rebind_source_dir:
-        rebind_result = PipelineRepo(database_path).rebind_run_source_dir(
-            selected_run_id,
-            expected_source_dir=str(run_record["source_dir"]),
-            new_source_dir=str(source_dir),
-        )
-        outcome = "updated" if rebind_result["changed"] else "already current"
-        print(f"Source rebind persisted: {outcome}")
+    with (guard_factory or execution_guard_factory)(base_dir, selected_run_id):
+        if args.rebind_source_dir:
+            rebind_result = PipelineRepo(database_path).rebind_run_source_dir(
+                selected_run_id,
+                expected_source_dir=str(run_record["source_dir"]),
+                new_source_dir=str(source_dir),
+            )
+            outcome = "updated" if rebind_result["changed"] else "already current"
+            print(f"Source rebind persisted: {outcome}")
 
-    print("\n===== PRODUCTION RGB PIPELINE =====")
-    print(f"Source dir   : {source_dir}")
-    print(f"Surveys root : {surveys_root}")
-    print(f"Year         : {args.year}")
-    print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
-    print(f"WebODM mode  : {mode_display}")
-    print(f"Cross-run    : {'disabled' if args.disable_cross_run else 'enabled'}")
-    print(f"UAV folder   : {args.uav or 'any'}")
-    print(f"Image mode   : {'DJI *_D.JPG only' if args.rgb else 'all JPG/JPEG'}")
-    print(f"Workspace    : {workspace_root}")
-    if args.rebind_workspace_to_configured_root:
-        print(
-            "Legacy workspace retained: "
-            f"{base_dir / 'data' / 'workspaces' / selected_run_id}"
-        )
-    print("===================================\n")
+        print("\n===== PRODUCTION RGB PIPELINE =====")
+        print(f"Source dir   : {source_dir}")
+        print(f"Surveys root : {surveys_root}")
+        print(f"Year         : {args.year}")
+        print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
+        print(f"WebODM mode  : {mode_display}")
+        print(f"Cross-run    : {'disabled' if args.disable_cross_run else 'enabled'}")
+        print(f"UAV folder   : {args.uav or 'any'}")
+        print(f"Image mode   : {'DJI *_D.JPG only' if args.rgb else 'all JPG/JPEG'}")
+        print(f"Workspace    : {workspace_root}")
+        if args.rebind_workspace_to_configured_root:
+            print(
+                "Legacy workspace retained: "
+                f"{base_dir / 'data' / 'workspaces' / selected_run_id}"
+            )
+        print("===================================\n")
 
-    from pipelines.rgb_pipeline import RGBPipeline
+        from pipelines.rgb_pipeline import RGBPipeline
 
-    try:
-        pipeline = RGBPipeline(
-            base_dir=base_dir,
-            config=config,
-            source_dir=source_dir,
-            surveys_root=surveys_root,
-            year=args.year,
-            run_id=selected_run_id,
-            workspace_root=workspace_root,
-            survey_id_override=args.survey_id,
+        try:
+            pipeline = RGBPipeline(
+                base_dir=base_dir,
+                config=config,
+                source_dir=source_dir,
+                surveys_root=surveys_root,
+                year=args.year,
+                run_id=selected_run_id,
+                workspace_root=workspace_root,
+                survey_id_override=args.survey_id,
 
-            # production mode
-            use_year_subdir_override=True,
-            export_name_overrides=None, # using naming templates
-            crossrun_enabled_override=False if args.disable_cross_run else None,
+                # production mode
+                use_year_subdir_override=True,
+                export_name_overrides=None, # using naming templates
+                crossrun_enabled_override=False if args.disable_cross_run else None,
 
-            # WebODM task mode
-            skip_task1_webodm=True,
-            webodm_mode=webodm_mode,
-            task1_bounded=False,
-            force_segregation=False,
-            rgb_only=args.rgb,
-        )
+                # WebODM task mode
+                skip_task1_webodm=True,
+                webodm_mode=webodm_mode,
+                task1_bounded=False,
+                force_segregation=False,
+                rgb_only=args.rgb,
+                **(pipeline_options or {}),
+            )
 
-        result = pipeline.run(
-            resume=args.resume,
-            force_stages=set(args.force_stage or []),
-            empty_webodm_recovery=(
-                {
-                    "operation": args.recover_empty_webodm_project,
-                    "project_id": args.webodm_recovery_project_id,
-                    "confirmation": args.webodm_recovery_confirmation,
-                }
-                if args.recover_empty_webodm_project
-                else None
-            ),
-            missing_webodm_project_recovery=(
-                {
-                    "operation": args.recover_missing_webodm_project,
-                    "project_id": args.missing_webodm_project_id,
-                    "confirmation": (
-                        args.missing_webodm_recovery_confirmation
-                    ),
-                }
-                if args.recover_missing_webodm_project
-                else None
-            ),
-            missing_webodm_task_recovery=(
-                {
-                    "operation": args.recover_missing_webodm_task,
-                    "project_id": args.webodm_task_recovery_project_id,
-                    "confirmation": args.webodm_task_recovery_confirmation,
-                }
-                if args.recover_missing_webodm_task
-                else None
-            ),
-            qgis_tile_rebuild=(
-                {
-                    'task_key': args.rebuild_qgis_tiles,
-                    'confirmation': args.qgis_tile_rebuild_confirmation,
-                }
-                if args.rebuild_qgis_tiles
-                else None
-            ),
-            raw_input_recovery=(
-                {"confirmation": args.raw_recovery_confirmation}
-                if args.recover_missing_raw
-                else None
-            ),
-            publication_confirmation=(
-                args.publication_confirmation if args.activate_publication else None
-            ),
-            keep_workspace=args.keep_workspace,
-        )
-    except sqlite3.Error as exc:
-        if not is_sqlite_full_error(exc):
-            raise
-        print(
-            "Pipeline state write failed because SQLite reported a full disk. "
-            f"Database: {database_path}"
-        )
-        raise SystemExit(4) from exc
+            result = pipeline.run(
+                resume=args.resume,
+                force_stages=set(args.force_stage or []),
+                empty_webodm_recovery=(
+                    {
+                        "operation": args.recover_empty_webodm_project,
+                        "project_id": args.webodm_recovery_project_id,
+                        "confirmation": args.webodm_recovery_confirmation,
+                    }
+                    if args.recover_empty_webodm_project
+                    else None
+                ),
+                missing_webodm_project_recovery=(
+                    {
+                        "operation": args.recover_missing_webodm_project,
+                        "project_id": args.missing_webodm_project_id,
+                        "confirmation": (
+                            args.missing_webodm_recovery_confirmation
+                        ),
+                    }
+                    if args.recover_missing_webodm_project
+                    else None
+                ),
+                missing_webodm_task_recovery=(
+                    {
+                        "operation": args.recover_missing_webodm_task,
+                        "project_id": args.webodm_task_recovery_project_id,
+                        "confirmation": args.webodm_task_recovery_confirmation,
+                    }
+                    if args.recover_missing_webodm_task
+                    else None
+                ),
+                qgis_tile_rebuild=(
+                    {
+                        'task_key': args.rebuild_qgis_tiles,
+                        'confirmation': args.qgis_tile_rebuild_confirmation,
+                    }
+                    if args.rebuild_qgis_tiles
+                    else None
+                ),
+                raw_input_recovery=(
+                    {"confirmation": args.raw_recovery_confirmation}
+                    if args.recover_missing_raw
+                    else None
+                ),
+                publication_confirmation=(
+                    args.publication_confirmation if args.activate_publication else None
+                ),
+                keep_workspace=args.keep_workspace,
+            )
+        except sqlite3.Error as exc:
+            if not is_sqlite_full_error(exc):
+                raise
+            print(
+                "Pipeline state write failed because SQLite reported a full disk. "
+                f"Database: {database_path}"
+            )
+            raise SystemExit(4) from exc
 
-    print("\n===== PIPELINE RESULT =====")
-    print(f"Success : {result.get('success')}")
-    print(f"Run ID  : {result.get('run_id')}")
-    print(f"Error   : {result.get('error', '—')}")
-    print("===========================\n")
+        print("\n===== PIPELINE RESULT =====")
+        print(f"Success : {result.get('success')}")
+        print(f"Run ID  : {result.get('run_id')}")
+        print(f"Error   : {result.get('error', '—')}")
+        print("===========================\n")
+        return result
 
 
 if __name__ == "__main__":
