@@ -1,5 +1,87 @@
 # Architectural Decision Log
 
+## Local console ownership and browser controls - accepted slice (2026-10-20)
+
+The operator approved replacing terminal commands for normal operation on this
+PC, one active run, manual browser review, core controls plus existing tile
+recovery, and monitor-then-resume for legacy terminal processes. This deliberately
+supersedes the initial shared read-only web contract only within CW-ADR-013.
+
+Use Next.js static export plus loopback FastAPI, not a second runtime Node server
+or an in-request pipeline. A dedicated explicit helper reuses CLI source/storage/
+launch logic via structured results and injectable review/control adapters.
+Global Windows mutexes and named process jobs, PID creation times, owned atomic
+journals and one-use preflight tickets provide conservative single-host admission.
+Do not add queues/workers/parallel runs, auto-replay unknown dispatch, kill remote
+tasks, change SQLite schema/status semantics or expose arbitrary CLI options.
+
+API reads are genuinely read-only. Console overlays/audit/review questions live
+separately; the pipeline DB remains authoritative. Original results are retained
+if status commit fails. Ambiguous remote restarts cannot be cleared by local-only
+reconciliation. All authentication is an operator-launched loopback session with
+CSRF/Host/Origin enforcement; it is not LAN/multi-user authorization.
+
+Rollback preserves current CLI/evidence and needs no DB downgrade. Optional
+server/frontend dependencies are isolated and locked. Broader ADR-004/009/011/012
+work remains pending beyond this narrow host/control/manual-review slice. Live
+Windows inheritance, artifact readiness, scaling, storage and GIS validation
+require separate approval; passing hermetic tests does not finish production rollout.
+
+## Responsive sidebar sizing - accepted correction (2026-10-20)
+
+The larger-canvas sidebar cap caused horizontal overflow in the existing form
+rows. Supersede only that hard maximum: retain center-first stretch and canvas
+navigation, allow the right splitter panel to grow beyond 400 pixels, and use
+Qt long-row wrapping with expanding fields. Keep compound map controls short
+enough to fit a narrow panel by placing Apply-scale and Reset on separate rows.
+Wrap the explanatory hint and use bounded combo content-length hints rather than
+sizing to the longest preset/font name. Do not merely hide horizontal scrollbars
+or make the canvas/print geometry smaller to mask clipping.
+
+This is ephemeral widget layout only: no saved preference/design-format change,
+rendering change, worker, or dependency. Existing open designs must be saved
+before restarting; rollback is a scoped source change, not data migration.
+Mock coverage verifies policies and action wiring, not rendered pixel geometry;
+Windows display scaling and divider resizing still need an operator check.
+API basis: [Qt form row wrapping](https://doc.qt.io/archives/qt-5.15/qformlayout.html#RowWrapPolicy-enum)
+and [combo size-adjust policies](https://doc.qt.io/archives/qt-5.15/qcombobox.html#SizeAdjustPolicy-enum).
+
+## Canvas navigation separated from map editing — accepted update (2026-10-20)
+
+The operator requested a larger, editor-like navigable canvas. Maximize the
+window on launch, prioritize center space, fit the actual paper rather than
+empty scene margins, and keep navigation controls above the preview. Offer
+view-only pointer-centered Ctrl+wheel zoom and middle/Space-drag panning, with
+fit/width/actual-size controls and F11 side-panel focus. Retain ordinary map
+wheel/drag editing for compatibility; do not register system keyboard hooks.
+
+Use graphics-view transforms/scrollbars, bounded scaling, and native QGIS
+view-zoom notifications. Canvas state stays ephemeral and separate from design
+history, saved map geometry, export snapshots, paper/DPI, and print rendering.
+Do not introduce persistent preferences, schema/dependency changes, draggable
+layout frames, or rendering workers. Existing designs and outputs are untouched;
+restart after saving to use the update. Real high-DPI/gesture visual verification
+remains operator-authorized rather than inferred from mock tests.
+
+## Native-DPI inset basemaps — accepted fix (2026-10-20)
+
+Use QGIS's XYZ `tilePixelRatio` source-DPI support on private inset layers in
+both editor and final rendering. Do not lower whole-page export DPI, hardcode a
+geographic tile zoom, change map extents/CRS, or replace vector pins/labels with
+low-resolution screenshots. Standard/`@2x` sources declare native ratios 1/2;
+valid existing explicit ratios are preserved. Main-map layers stay unchanged.
+
+Clone only when normalization is needed, retain encoded URI parameters and
+opacity, validate before installation, and make repeat preparation idempotent.
+The shared renderer covers both editor and batch insets. Record resolved scaling
+as additive metadata without persisting URLs/credentials or changing design V2.
+The earlier saved design and exported maps remain valid and untouched; restart
+and re-export into a new attempt to apply the fix. Source raster text retains
+its intrinsic detail limit, and real visual consistency is an operator check.
+
+Basis: [QGIS 3.34 source-DPI setup](https://github.com/qgis/QGIS/blob/release-3_34/src/providers/wms/qgswmsprovider.cpp#L1698)
+and [tile resolution compensation](https://github.com/qgis/QGIS/blob/release-3_34/src/providers/wms/qgswmsprovider.cpp#L799).
+
 ## Integrated processed-map generator — accepted implementation (2026-10-20)
 
 The operator approved a Generate Map page alongside the existing V2 editor.

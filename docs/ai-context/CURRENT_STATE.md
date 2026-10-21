@@ -1,6 +1,27 @@
 ﻿# Current State
 
-## Snapshot
+## Current console implementation - 2026-10-20
+
+Local Pipeline Web Console V1 now implements the approved Next.js/FastAPI slice:
+monitoring, exact source/storage checks, owned start/resume, manual browser quality
+review, cooperative local controls and guarded tile recovery. It is this-PC-only,
+single-active-operation, with typed/session-protected commands and separate atomic
+runtime evidence. Current SQLite remains authoritative and API reads do not migrate
+it. Ambiguous ownership/remote outcomes block rather than auto-replay.
+
+All three implementation milestones have hermetic coverage: 257 focused checks,
+935 full safe tests/collection and eight frontend fixtures, typecheck/build/syntax/
+whitespace and isolated UI dependency validation. Source docs and optional local
+build/server environments are ready; no production server, storage, WebODM or GIS
+smoke check was run. Preserve the active terminal run; wait for it to exit before
+authorizing live UI checks. See docs/ui/UI_STATUS.md and the new operator guide.
+
+The snapshot below is historical. Its test counts, operational run notes and
+missing-feature statements are not current production status; do not execute its
+old recovery priorities without fresh operator authorization. Earlier map-editor
+and unrelated local changes remain intact. No commit/push was performed.
+
+## Historical Snapshot
 
 - Snapshot date: 2026-09-11
 - Repository state: pipeline refactor in progress; shared API/UI contracts have been added for coordinated pipeline and web-app workstreams.

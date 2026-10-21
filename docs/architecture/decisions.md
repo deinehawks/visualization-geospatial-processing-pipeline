@@ -22,7 +22,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 | ID | Status | Decision |
 |---|---|---|
 | CW-ADR-001 | Approved target behavior | Shared docs define API/UI contracts; `docs/refactor/` remains pipeline roadmap authority |
-| CW-ADR-002 | Approved target behavior | Initial API is read-only |
+| CW-ADR-002 | Partially superseded by CW-ADR-013 | Original read-only scope; approved local V1 controls are the only exception |
 | CW-ADR-003 | Approved target behavior | UI must use FastAPI contracts, not SQLite, log files, filesystem scans, or Python internals |
 | CW-ADR-004 | Approved target behavior | Target architecture and current implementation must remain visibly separated |
 | CW-ADR-005 | Approved target behavior | Combined WebODM mode uses `--both-tasks` / `Orthomosaic + 3D` with fixed Task 4 then Task 2 execution |
@@ -33,6 +33,40 @@ Architecture decisions are append-only except for status changes, corrections, o
 | CW-ADR-010 | Implemented and verified | Keep UAV location and spectral selection independent |
 | CW-ADR-011 | Implemented and verified | Apply the all-assets ZIP export contract to Task 4 |
 | CW-ADR-012 | Implemented and verified | Explicitly replace a confirmed-deleted Task 4 project |
+| CW-ADR-013 | Implemented with hermetic verification | Local V1 browser execution, one host-owned invocation and explicit review/recovery boundaries |
+
+## CW-ADR-013 - Local Pipeline Console V1
+
+- **Date/approval:** 2026-10-20; operator explicitly approved the browser replacing
+  terminal commands for normal operation, this PC only, one active invocation,
+  manual browser review, core controls plus tile recovery, and no legacy takeover.
+- **Decision:** Next.js static export served by loopback FastAPI. The frontend
+  uses `/api` only. Shared CLI adapters provide source selection and structured
+  preflight/results. Dedicated request-owned helpers disable terminal input and
+  hotkeys. Host/session/Origin/CSRF guards protect typed local commands.
+- **Ownership:** Global Windows mutex plus application-owned atomic journals,
+  PID creation times and global named jobs serialize updated CLI/browser work
+  and identify surviving children. Unknown owners/dispatches remain blocking;
+  HTTP/server/browser loss never authorizes replay or remote replacement.
+- **State:** Pipeline SQLite is authoritative and read-only to API projections;
+  no schema migration or new DB status. Console lifecycle/review/command state
+  lives separately. Exact immutable requests and one-use preflights prevent
+  duplicate launch. Manual review/restart is bound to a specific question and
+  exact task; ambiguous remote restart requires diagnosis, not local unlock.
+- **Compatibility:** Native CLI input/hotkeys/defaults remain. New exclusion
+  intentionally rejects competing launches; the broad scheduler/lock work is
+  not completed. Publication/cleanup/force/repair/rebinding controls remain
+  deferred. Existing tile quarantine, task bindings and output policies persist.
+- **Rollout:** Three implementation milestones are covered by isolated tests and
+  a static build, not real production/UI/GIS validation. Preserve CLI and all
+  runtime evidence. Source rollback needs no DB downgrade; never delete journals
+  to bypass ownership. Dependencies are optional and isolated from production.
+- **Supersession:** CW-ADR-002 and corresponding initial API prohibitions are
+  superseded only for the explicit V1 endpoint families documented in the
+  [API contract](../contracts/api-contract.md). No other mutation is authorized.
+
+Windows basis: [global object namespaces](https://learn.microsoft.com/en-us/windows/win32/termserv/kernel-object-namespaces)
+and [named-job lifecycle/inherited membership](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects).
 
 ## CW-ADR-001 - Shared Contracts Reference Refactor Roadmap
 
@@ -45,7 +79,7 @@ Architecture decisions are append-only except for status changes, corrections, o
 
 ## CW-ADR-002 - Initial API Is Read-Only
 
-- **Status:** Approved target behavior
+- **Status:** Historical initial scope; bounded V1 exception in CW-ADR-013.
 - **Context:** Start/pause/resume/abort/retry/rerun/publish/recover semantics still involve protected resources and unresolved state decisions.
 - **Decision:** The initial FastAPI layer exposes read-only run, stage, event, artifact, statistics, and system-resource views only.
 - **Compatibility requirement:** No endpoint may mutate SQLite, flag files, workspaces, WebODM, QGIS/GDAL, publication manifests, or cleanup state until explicitly approved.

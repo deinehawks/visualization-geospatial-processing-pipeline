@@ -1,5 +1,29 @@
 ﻿# Run State Model
 
+## Local console overlay - 2026-10-20
+
+The approved V1 API maps current SQLite state without initialization/migration.
+Stage attempts are ordered by row ID; the newest per stage is authoritative,
+including failed/paused/running attempts after older success. Attempt numbers are
+read projections, not new columns. Task intent is not guessed from one surviving
+binding in an incomplete combined run.
+
+Console-owned `accepted`, `preparing`, `running`, `awaiting_review`, `finished`,
+`failed`, `requires_recovery` and `resolved` refer to an invocation receipt, not
+`runs.status`. Process ownership (PID plus birth time), job descendants, review
+questions, control acknowledgments, and local-session actor audit are distinct
+from pipeline success and remote WebODM lifecycle. A finished helper can contain
+a failed/paused pipeline result; exit code alone is never success evidence.
+Missing/mismatched results and receipt-commit failures remain blocking evidence.
+
+Review decisions are atomic, question-bound and consumed once; a new invocation
+gets a new question. Local pause/stop is cooperative and does not cancel remote
+tasks. Browser requests during the final blocking stage are checked before
+success/cleanup. Reconciliation only records an operator acknowledgment after
+dead ownership/no remaining children; it neither rewrites SQLite nor settles an
+ambiguous remote restart. Legacy unowned `running` rows are not auto-cleared.
+Broader pending state/locking decisions below remain pending outside this slice.
+
 ## Status Legend
 
 - **Implemented and verified:** Present in code and covered by inspected safe tests.
@@ -157,6 +181,8 @@ Status: **Implemented and verified** with fake WebODM and temporary SQLite/files
 - Pause semantics are resolved for active local stage attempts and Task 4 remote detach/reattach; abort semantics and broader external side effects remain unresolved.
 - Broader resource locking remains unresolved in ADR-004.
 - Quality gate API/UI approval semantics remain unresolved in ADR-012.
-- Exact database migration and backward-compatible persistence shape for `partially_completed` remains unresolved until the implementation slice.
+- Earlier `partially_completed` persistence uncertainty was resolved by the
+  implemented combined-run path using existing text statuses. Broader new-state
+  migrations remain deferred; V1 console overlays add no pipeline schema change.
 
 

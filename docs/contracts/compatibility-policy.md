@@ -15,6 +15,24 @@ Status: **Approved target behavior**.
 
 This policy applies to externally visible behavior used by operators, the future FastAPI layer, the future Next.js UI, map export, reporting, and automation.
 
+### Local console V1 implementation note - 2026-10-20
+
+FastAPI/Next.js are now implemented for the bounded local-console slice in
+CW-ADR-013 and the API contract's V1 matrix. Original proposed statistics, durable
+events, broad mutation controls and multi-host scheduling remain future work.
+Existing CLI flags/defaults/input/hotkeys, SQLite rows/statuses and output paths
+remain compatible; the new shared host guard intentionally rejects competing
+CLI/browser dispatches. Pipeline mode/recovery/publication semantics are reused,
+not inferred by UI projections. There is no DB migration.
+
+`/api` commands are typed, idempotent and tied to exact preflight/run/question
+identity. The static build has no production-data/configuration access. Optional
+server/frontend dependency manifests and locks are separate from production
+requirements. Runtime receipts are not a replacement for canonical task bindings
+or permission to rewrite historical state. Real rollout remains separately
+authorized. Earlier statements about unavailable UI controls must be read with
+this narrow supersession, not interpreted as approval of unrelated endpoints.
+
 ## Compatibility Rules
 
 | Contract area | Compatibility requirement | Current status | Owner |

@@ -1,6 +1,20 @@
 ﻿# Next Actions
 
-## Highest Priority
+## Current next step - 2026-10-20
+
+Let the existing terminal processing finish without interference, then obtain
+separate approval for a small local-console smoke check. Open `run_pipeline_ui.bat`,
+verify read-only/history/ownership UI first, then explicitly authorize source,
+WebODM and QGIS work for that sample. Check browser/server reconnect, quality
+decisions, exact-ID resume, final-stage controls and tile-quarantine retention.
+No real process/storage/GIS or visual rollout is implied by hermetic test results.
+
+UI/API plans, status and accepted bounded controls now live in `docs/ui/` and
+CW-ADR-013. Broader publication/cleanup/repair controls, LAN, queues and parallel
+runs remain deferred. Historical operational priorities below were not rechecked
+and do not authorize work on those real runs. Preserve all local/failed evidence.
+
+## Historical Highest Priority
 
 1. Run storage-preflight-only for the guarded Task 4 tile rebuild on BCO-102
    run `47cd8922-630c-4a22-90d0-8494669ecb80`, review D: free capacity, then

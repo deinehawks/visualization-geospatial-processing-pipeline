@@ -13,9 +13,64 @@
 
 Status: **Approved target behavior**.
 
-No FastAPI application or endpoint is implemented in this repository at the time of inspection. All endpoints below are proposed read-only contracts unless later implementation verifies them.
+The initial document described a proposed read-only API. On 2026-10-20 the
+operator approved and implemented the local V1 console and the bounded control
+contracts below. Earlier example schemas/statistics proposals remain targets
+unless explicitly covered by the V1 surface. Automated validation is not live
+production rollout verification.
 
-The initial API must not start, pause, resume, abort, retry, rerun, publish, recover, clean up, upload, download, execute QGIS/GDAL, or mutate SQLite/filesystem/WebODM state.
+The original read-only restriction remains for all operations outside this
+explicit V1 approval. There is no general shell, path, setting-edit, publish,
+cleanup, binding-repair or force-stage endpoint.
+
+## Local V1 Surface (2026-10-20)
+
+FastAPI serves the static Next.js build at `http://127.0.0.1:8765`, with API routes
+under `/api`. Imports/server construction load no `.env`, initialize no pipeline
+schema and run no geospatial commands. Explicit source/preflight/execution helper
+dispatch is the only configuration-loading boundary. Browser access requires a
+one-use launcher exchange, HttpOnly SameSite cookie and CSRF/Host/Origin checks.
+
+| Routes | Implemented V1 behavior |
+| --- | --- |
+| `GET /api/health`, `POST /api/bootstrap`, `GET /api/session` | Minimal health and local launcher session; no production probe |
+| `GET /api/runs?before=&limit=` | Read-only insertion-order pagination, default 50/max 100, opaque next cursor and explicit database availability |
+| `GET /api/runs/{id}` | Persisted run, ordered attempts, newest-per-stage authority, canonical task evidence, recorded artifacts and console ownership/review overlays |
+| `GET /api/runs/{id}/stages`, `/events`, `/logs`, `/artifacts` | Bounded projections; events/logs explicitly log-derived; no artifact file download or source scanning |
+| `GET /api/operations`, `/api/operations/{id}` | Owned invocation state, verified process/resource status, bounded helper log, review, preflight/result/failure evidence and control acknowledgments |
+| `POST /api/preflight` | `{command_id, inputs}` dispatches one explicit source-resolution/storage-check helper; ambiguity returns candidates, never terminal input |
+| `POST /api/start` | `{command_id, preflight_id}` consumes the exact passing request once; helper repeats and compares preflight before pipeline construction |
+| `POST /api/operations/{id}/controls` | `{command_id, action: pause|stop}` requests cooperative local control for a verified browser-owned invocation only |
+| `POST /api/operations/{id}/review` | Exact `{command_id, review_id, action}` approval/failure; restart additionally requires selected task, canonical stage and exact confirmation |
+| `POST /api/operations/{id}/reconcile` | Exact local acknowledgment only after owner and job descendants are gone; refuses unresolved remote restart intent; never replays or rewrites pipeline DB status |
+
+Run inputs allow only new/resume/rebuild-tiles action, dataset, survey ID/year,
+Task 2/Task 4/Both, original run ID, date/UAV, node ID, RGB/cross-run/workspace
+options, and task-bound tile confirmation. Extra fields are rejected. Resume
+uses persisted identity and requires mode selection when evidence is incomplete.
+Source/root/credentials/rebinding/force/publication fields cannot be passed through.
+
+Command IDs are 32-character UUID hex strings. Immutable requests, process birth
+identity and named Windows jobs establish ownership separately from persisted
+pipeline outcomes. Accepted/requested are not success. Missing/mismatched results,
+dispatch uncertainty and post-result receipt failures require reconciliation;
+completed results survive separate failure evidence. Repeated identical commands
+return prior evidence; conflicting bodies cannot reuse IDs. Local-session actor
+audit is server-generated, not client-supplied. No pipeline schema migration.
+
+Run status is never inferred from exit code or an old completed attempt. Browser
+`awaiting_review`, `accepted`, `preparing`, resource-busy and reconciliation labels
+are console overlays, not new SQLite statuses. Local stop preserves existing
+failure semantics and never means remote WebODM cancellation. Progress is shown
+only when reported; unknown timings/metrics remain unavailable. Stage output JSON
+is bounded at 256 KiB per attempt; oversized history fails explicitly rather than
+silently changing authoritative attempt selection.
+
+These controls deliberately supersede only the matching families in the original
+deferred list below. Arbitrary retry/rerun, publication, cleanup, repairs and
+configuration mutation remain deferred. The broader proposed statistics/resource
+endpoints below are not implemented by V1. See the
+[operator guide](../operators/pipeline-web-console.md) for real-test boundaries.
 
 ## Conventions
 
@@ -33,11 +88,11 @@ Status: **Approved target behavior**.
 
 | Endpoint | Status | Purpose | Current backing data | Dependency |
 |---|---|---|---|---|
-| `GET /runs` | Proposed and awaiting approval | List pipeline runs | `runs`, derived stage summaries | FastAPI read layer |
-| `GET /runs/{run_id}` | Proposed and awaiting approval | Run detail | `runs`, latest/attempt stage state, artifacts/events projections | FastAPI read layer |
-| `GET /runs/{run_id}/stages` | Proposed and awaiting approval | Stage attempts | `stages` | Attempt ordering contract |
-| `GET /runs/{run_id}/events` | Proposed and awaiting approval | Pipeline events | Text logs today; future `pipeline_events` | Event projection/parser |
-| `GET /runs/{run_id}/artifacts` | Proposed and awaiting approval | Artifacts and publication evidence | Stage output JSON, publication manifests | Artifact projection |
+| `GET /runs` | Implemented under `/api` | List pipeline runs | `runs`, derived stage summaries | V1 read model |
+| `GET /runs/{run_id}` | Implemented under `/api` | Run detail | Persisted state plus console overlays | V1 read model |
+| `GET /runs/{run_id}/stages` | Implemented under `/api` | Stage attempts | `stages` | Newest row per stage authoritative |
+| `GET /runs/{run_id}/events` | Implemented under `/api` | Log-derived event view | Bounded attributed text-log tails | Partial instrumentation remains explicit |
+| `GET /runs/{run_id}/artifacts` | Implemented under `/api` | Recorded artifact paths, not live verification | Bounded stage output JSON | No source probes/downloads |
 | `GET /statistics/overview` | Proposed and awaiting approval | Dashboard summary | Aggregated runs/stages/logs | Metrics definitions |
 | `GET /statistics/performance` | Proposed and awaiting approval | Runtime and throughput | Run/stage runtimes, events | Metrics collection |
 | `GET /statistics/storage` | Proposed and awaiting approval | Storage use | Publication manifests, workspace scans, future metrics | Metrics collection |

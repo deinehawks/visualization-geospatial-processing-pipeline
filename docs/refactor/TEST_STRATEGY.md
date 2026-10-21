@@ -1,5 +1,112 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Local pipeline console coverage (2026-10-20)
+
+Four new modules exercise projections/command journals, in-process HTTP,
+source/pipeline hooks and mocked Windows ownership. Existing CLI tests inject a
+fake execution guard explicitly and add shared report-only/guard checks. No test
+runner detection or production behavior switch was introduced.
+
+Coverage: missing/readonly/legacy DB, latest failed versus older completed stage,
+bounded JSON/log tails/rotation and secret redaction; original resume identity,
+unknown modes and input allowlists; exact immutable preflight/ticket consumption,
+cross-tab exclusion and CLI/browser admission; verified PID birth/reuse, global
+mutex/job ABI, orphan/unknown ownership, reconnect and explicit reconciliation;
+question-bound idempotent review, uncertain remote restart, local-session audit,
+cooperative requested/acknowledged controls and post-final-stage cleanup prevention;
+structured helper results versus exit status, early import/spawn failure, bounded
+summary snapshots, immutable result preservation on commit failure, and tile
+recovery argument/identity handoff. Existing owned tile-quarantine tests stay active.
+
+All filesystem/SQLite fixtures are pytest-owned. Popen, kernel handles, job counts,
+WebODM, QGIS and source discovery are fakes. Windows adapter tests replace only
+the module's platform boundary, not global OS state. ASGI's test scheduler has
+no socketpair/self-pipe and refuses real I/O registration, preserving every
+existing network guard; thread notifications use bounded memory-loop polling.
+HTTP tests explicitly require optional UI dev extras and skip if absent; none
+were skipped here. New tests perform no filesystem cleanup/deletion.
+
+Results: 257 focused, all 935 defaults and safe collection, eight Node contract
+fixtures, syntax, TypeScript type generation/check, Next.js static export, isolated
+UI dependency consistency and scoped whitespace passed. The operator guide lists
+exact commands, package setup, acceptance mapping, and pending separately approved
+visual/real-kernel/process/source/WebODM/GDAL checks. Full safety exclusions,
+fixtures and production/external boundaries were not weakened.
+
+## Responsive property-sidebar regression (2026-10-20)
+
+Fourteen added fake-Qt cases cover all five property forms' row-wrap/field-growth
+policies, seven choice widgets' content-independent width hints, the wrapped Map
+hint, and full-width scale/reset placement with unchanged selected-map action
+dispatch. The existing canvas-control case now rejects a right-panel width cap
+and verifies its initial allocation. Widget doubles record constructor arguments
+and explicit form enums; no real GUI/layout engine is initialized.
+
+The window run passed 69 tests, focused regressions passed 386, all 839 guarded
+defaults passed, and 839 tests collected safely. Syntax and scoped whitespace
+passed. Exact commands and the remaining real-display resize/100%/150%/200%
+scaling checklist are in the operator guide. This is policy/wiring evidence,
+not proof of rendered pixel fit. No shared safety guard/test-level/dependency
+changed; no real GIS/service/source storage/production state was accessed.
+
+## Larger canvas and view-only gestures (2026-10-20)
+
+Twenty-one new fake-Qt cases cover zoom routing/anchoring/bounds, zero and
+trackpad wheel motion, middle/Space drag on scrollbars rather than map extents,
+hand-mode cleanup/auto-repeat, focus-panel hide/restore/refit, visible controls,
+shortcuts/action availability, paper-only fit and native width/actual-size zoom,
+and maximized startup with unchanged package/design launch arguments. Assertions
+check dirty state, undo history, selection, and saved extents remain unchanged
+for canvas navigation; existing ordinary map editing/grouping tests stay active.
+
+Qt events, transforms, scrollbars, layouts, and application launch are explicit
+test doubles. No QApplication/QGIS instance, keyboard hooks, pipeline, service,
+credentials, production DB/source roots, or existing output is used. Shared
+safety guards, test levels, dependencies, and external exclusions are unchanged.
+Results: 55 window tests, 372 focused regressions, all 825 guarded defaults,
+825-test safe collection, syntax, and scoped whitespace passed. Exact commands
+and the separately authorized real-display/gesture checklist are in the operator
+guide. Existing path-length and native-inset regression coverage remains enabled.
+
+## Native-DPI inset tile normalization (2026-10-20)
+
+Twenty-five new mocked renderer cases exercise QGIS-style URI/layer boundaries:
+standard/retina and declared ratios, duplicate parameter removal, encoded URL
+and opacity preservation, private frame ownership/idempotency, invalid-source
+rollback without URI logging, non-XYZ refusal-to-change, both inset preparation
+paths, unchanged saved extents/CRS/styles/output DPI, metadata, and resolution
+compensation across 96/300/450/800 DPI. Final image settings are tested with a
+fake exporter and fake output boundary; no image is rendered or deleted.
+
+Existing renderer fixtures use explicit non-XYZ provider fakes in place of
+opaque objects; assertions and production checks remain intact. No actual Qt,
+QGIS, GDAL, helper process, tile request, credentials, DB, source drive, or old
+output is used. Safety guards, external-test exclusions, and dependencies remain
+unchanged. Native source-DPI math is checked against the QGIS 3.34 implementation;
+these tests do not claim actual service/font/image visual verification.
+
+Results: 245 renderer/session/model checks, 351 focused regressions, all 804
+guarded default tests, 804 collected tests, syntax, and scoped whitespace passed.
+Exact commands and the separately authorized visual checklist are in the map
+editor operator guide. Prior atomic-save regression coverage remains enabled.
+
+## Atomic JSON snapshot path-length regression (2026-10-20)
+
+Six new model cases emulate a legacy 260-character write limit on pytest-owned
+paths. They reproduce the reported 232/269-character destination/old temporary
+path, verify the new 247-character temporary path, start an export with a fake
+process, preserve existing JSON on write/replace/serialization failure, and
+assert unique same-directory temporary filenames. Cleanup is guarded by a test
+ownership sentinel, resolved containment, and filesystem-root/owned-root refusal;
+the sentinel outside the deleted temporary file must remain unchanged.
+
+No real Qt/QGIS, helper subprocess, source drive, production DB, or existing
+output is used. Shared safety guards/test levels remain unchanged. The model
+run passed 48 tests, the focused editor/generator/renderer run passed 316, the
+safe suite passed all 779, and safe collection found 779; syntax and scoped
+whitespace checks passed. Exact commands are in the operator guide. Real export
+verification remains separately operator-run after saving and restarting.
+
 ## Integrated generator coverage (2026-10-20)
 
 Added a pure generator regression module and extended the fake Qt window tests.

@@ -1,5 +1,141 @@
 # Refactor Current Status
 
+## Local pipeline web console V1 (2026-10-20)
+
+Implemented all three approved console milestones: Next.js static dashboard,
+input/detail/review/recovery views and bounded FastAPI projections; one dedicated
+request-owned execution helper, shared CLI admission and explicit input/review/
+control adapters; and existing guarded tile recovery plus security/failure tests.
+Read-only API access never constructs PipelineRepo or loads `.env`. Explicit
+helpers alone reuse shared source/preflight and RGB execution, preserving CLI
+defaults, paths, statuses, bindings and output policy. No pipeline DB migration.
+
+Typed commands have immutable requests, one-use preflights, PID birth identity,
+global Windows mutex/job ownership, trusted local-session audit, atomic review
+decisions and actual control acknowledgments. Browser/server loss never replays
+dispatch; ambiguous restart/missing results and status-write failure preserve
+evidence and block admission. Pause/stop after blocking final stages precedes
+success cleanup. Original results survive separate receipt-failure evidence.
+The console is loopback-only, session/Host/Origin/CSRF protected. No queue, LAN
+auth, general shell, publication/cleanup/repair/rebinding UI or map integration.
+
+Validation: 257 focused checks, all 935 safe defaults, 935 safely collected tests,
+eight frontend fixtures, syntax, generated TS types/typecheck, static export,
+isolated UI-server pip check, and scoped tracked/new-file whitespace. Windows
+kernel/process/GIS/service boundaries are fakes; ASGI uses an explicit memory-only
+scheduler with all network guards active. Exact commands/coverage and remaining
+real-process/UI/storage/WebODM/GDAL checks are in the operator guide/UI status.
+These are implementation milestones, not wider phase/production rollout completion.
+
+Created the console package, static frontend, launcher, optional dependency locks,
+four regression modules, UI plan/status and operator guide. Modified only shared
+launch/source/control seams, CLI test injection, ignore rules and related docs.
+Installed frontend dependencies and a new `.venv-ui` locally; production Python
+environments, requirements, datasets, DB, credentials, shares, outputs, checkpoints
+and the active pipeline were not accessed/changed. Public docs/package indexes
+were the only external access. No server/pipeline/GIS/operational service,
+destructive data operation, commit or push was run. Prior local changes remain.
+
+## Responsive editor property sidebar (2026-10-20)
+
+Fixed the clipping reported after the larger-canvas change: removed the right
+panel's 400-pixel maximum, increased its initial splitter allocation to 400,
+enabled long-row wrapping and growing fields in all five property forms, wrapped
+the Map hint, and bounded combo size hints independently of long preset/font
+names. Apply-scale and Reset now occupy separate full-width rows; their actions
+and the two-button zoom row retain existing behavior. Center stretch and all
+canvas gestures remain unchanged. Wider panels are available by dragging the
+canvas/sidebar divider; vertical scrolling remains available on every tab.
+
+Validation: 14 new mocked cases, 69 window tests, 386 focused regressions, all
+839 safe default tests, 839-test safe collection, syntax, and scoped whitespace
+passed. Tests assert responsive policies/uncapped width and original button
+dispatch, with existing canvas/history/render regressions retained. Exact
+commands and the unperformed Windows scaling/resize check are in the operator
+guide. The fixture now records constructed widget arguments and models form
+enums; no real Qt/QGIS application was started.
+
+Modified the window, its existing test module, and four documents; nothing
+created/moved/deleted. Earlier uncommitted work and unrelated edits are intact.
+Application source changed, not designs, datasets, output maps, production DB,
+credentials, or source storage. No GIS/pipeline/service/destructive operation,
+commit, or push occurred. No dependency, schema, design format, framing, DPI,
+or export behavior changed. Visual verification remains an operator check.
+
+## Larger canvas and independent view navigation (2026-10-20)
+
+Implemented the requested larger editor canvas: maximized startup, slimmer side
+panels, center-first sizing, tighter actual-paper fitting, and a persistent
+canvas navigation bar. Ctrl+wheel zooms around the pointer; middle-drag or
+Space+left-drag pans the view. Blank-workspace wheel zoom, trackpad deltas,
+bounded transforms, fit/width/actual-size controls, and F11 panel focus are
+available. Regular unmodified map gestures remain compatible. Hand mode clears
+on focus loss and ignores auto-repeat releases. No frame geometry is unlocked.
+
+All new navigation is view-only: no saved extents/scales, design versions,
+dirty state, undo entries, output DPI, paper, or export rendering changes.
+Validation: 21 new cases, 55 window checks, 372 focused regressions, all 825
+guarded default tests, 825-test safe collection, syntax, and scoped whitespace
+passed. The operator guide records exact commands, gestures, and acceptance
+coverage. Tests use fake Qt/QGIS/application boundaries and owned fixture paths.
+
+Changed the launcher entry point, editor window, one test module, and four
+documents. No new/moved/deleted files or dependencies; no protected production
+data, source storage, old maps/exports, DB, credentials, pipeline, tile service,
+or real QGIS/GDAL was accessed/changed. Public QGIS API docs were consulted
+read-only; no live UI, commit, or push was run. Earlier uncommitted atomic-save
+and inset-scaling work and unrelated local edits remain intact. Real display/
+gesture verification is a separately authorized operator check, not completed
+by the mocked suite.
+
+## Native-DPI XYZ inset scaling (2026-10-20)
+
+Implemented the approved inset label-size fix using QGIS's native source-DPI
+tile scaling, on independent inset layers for both live and final rendering.
+Standard tiles declare ratio 1 and existing `@2x` tiles ratio 2, with valid
+explicit ratios retained. URI parameters/opacity survive normalization; invalid
+layers fail before replacement. The main map, geometry, CRS, pins, styling,
+paper, design versions, and chosen preview/PDF/inset DPI are unchanged. Additive
+`print_layout.inset_tile_scaling` metadata contains no source URLs/credentials.
+
+Validation: 25 new mocked cases, 245 renderer/session/model checks, 351 focused
+regressions, all 804 guarded default tests, 804-test safe collection, changed-file
+syntax, and scoped whitespace passed. The operator guide records exact commands,
+coverage, primary implementation references, restart instructions, and remaining
+visual checks. Placeholder basemap fakes now explicitly identify their provider;
+shared guards/test levels remain unchanged. No real tile requests or GIS were run.
+
+Changed one renderer, one existing test module, and four documentation files;
+no created/moved/deleted files or new dependencies. Prior local atomic-save work
+and unrelated changes remain intact. No production dataset/database/settings,
+source storage, existing map outputs, pipeline, or operational external service
+was accessed/changed, and no commit/push occurred. Only public QGIS source/docs
+were consulted read-only. Real preview/PDF label appearance still requires a
+separately authorized operator check; this is not a wider rollout completion.
+
+## Short atomic JSON temporary filenames (2026-10-20)
+
+Patched the editor's atomic saver to use `<full UUID>.tmp` beside the destination
+instead of appending the UUID to the full destination filename. The reported
+232-character export snapshot previously required a 269-character temporary
+path; the new temporary path is 247 characters. Same-directory replacement,
+full UUID uniqueness, existing JSON formats, export-folder naming, and cleanup
+semantics remain unchanged. Failed writes/replaces preserve the destination.
+
+Six isolated cases reproduce a legacy 260-character limit, exercise actual
+snapshot creation with a fake process, and verify atomic failure preservation
+and uniqueness. A sentinel/containment guard restricts cleanup to owned test
+temporary files. Validation: 48 model tests, 316 focused regressions, all 779
+guarded default tests, 779-test safe collection, syntax, and scoped whitespace
+checks passed. Exact commands and restart guidance are in the operator guide.
+
+Changed one application source, one existing test module, and three documentation
+files. No production data/settings/database/source drives, existing packages or
+exports, QGIS/GDAL, pipeline, or services were accessed or modified. No files
+were moved/deleted outside pytest-owned disposable temporary files, and no
+commit/push occurred. Broader long-path support and a real export check remain
+outside this narrowly scoped fix; save the open design before restarting.
+
 ## Integrated Map Generator implementation (2026-10-20)
 
 The approved Generate Map page is implemented alongside the V2 editor. Startup
