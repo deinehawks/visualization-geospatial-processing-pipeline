@@ -21,15 +21,23 @@ class ConsoleService:
         self.pipeline_python = Path(pipeline_python) if pipeline_python else self.base_dir / '.venv310' / 'Scripts' / 'python.exe'
 
     def legacy_running(self):
-        owned = {item.get('run_id') for item in self.store.operations() if item['kind'] in ('run', 'cli')}
-        return [row['run_id'] for row in self.reader.query("SELECT run_id FROM runs WHERE status='running'")
-                if row['run_id'] not in owned]
+        from .legacy_reconciliation import legacy_status
+        return legacy_status(self.store, self.reader.database)['legacy_running']
 
     def recorded_inputs(self, run_id):
         for row in self.store.operations():
             if row['kind'] == 'run' and row.get('run_id') == run_id:
                 return read_json(self.store.directory(row['operation_id']) / 'request.json').get('inputs', {})
         return {}
+
+    def execution_status(self):
+        with self.store.lock():
+            value = self.store.capacity()
+            from .legacy_reconciliation import legacy_status
+            legacy = legacy_status(self.store, self.reader.database)
+            if legacy['legacy_running']:
+                value.update(available=0, blocked=True)
+            return redact({**value, **legacy})
 
     def normalize(self, inputs):
         value = RunInput.model_validate(inputs).model_dump()
@@ -148,7 +156,7 @@ class ConsoleService:
         for key, filename in (('result', 'result.json'), ('failure', 'failure.json'), ('review', 'review.json'), ('preflight', 'preflight.json')):
             if (path / filename).is_file():
                 value[key] = read_json(path / filename)
-        value['controls_available'] = verified and value['kind'] == 'run' and value['state'] in ('running', 'awaiting_review')
+        value['controls_available'] = verified and value['kind'] in ('run', 'cli') and value['state'] in ('running', 'awaiting_review')
         log = path / 'console.log'
         value['log_tail'] = ''
         if log.is_file() and not log.is_symlink():
@@ -202,9 +210,11 @@ class ConsoleService:
                 return {'state': 'acknowledged' if consumed.exists() else 'requested', 'command_id': command.command_id}
             value = self.operation(operation_id)
             review = value.get('review') or {}
-            if not value['controls_available'] or value['state'] != 'awaiting_review' or review.get('review_id') != command.review_id:
+            if value['kind'] != 'run' or not value['controls_available'] or value['state'] != 'awaiting_review' or review.get('review_id') != command.review_id:
                 raise ConsoleError('Review is stale or unavailable', 'STALE_REVIEW')
             if command.action == 'restart':
+                if any(row['operation_id'] != operation_id for row in self.store.occupants()):
+                    raise ConsoleError('Task restart requires exclusive local execution', 'BUSY')
                 task = (review.get('tasks') or {}).get(command.task)
                 if not task or not task.get('id') or command.restart_from not in WEBODM_RESTART_STAGE_NAMES:
                     raise ConsoleError('Invalid review task or restart stage', 'INVALID_INPUT', 422)

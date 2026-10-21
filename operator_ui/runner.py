@@ -11,6 +11,7 @@ import uuid
 from .models import RunInput
 from .projections import redact, safe_url
 from .storage import ConsoleError, ConsoleStore, atomic_json, now, read_json
+from .coordination import Execution
 
 
 class DatasetChoiceRequired(ConsoleError):
@@ -129,6 +130,7 @@ def execute(store, operation_id, *, launch=None):
         try:
             observed = False
             interaction = BrowserInteraction(store, operation_id)
+            execution = Execution(store, operation_id)
             def observe(value):
                 nonlocal observed
                 observed = True
@@ -138,7 +140,8 @@ def execute(store, operation_id, *, launch=None):
                 expected = request.get('expected_preflight')
                 if expected is not None:
                     keys = ('source_dir', 'mode', 'run_id', 'year', 'survey_id', 'surveys_root',
-                            'workspace_root', 'config_fingerprint', 'stage_statuses')
+                            'workspace_root', 'config_fingerprint', 'stage_statuses', 'bindings',
+                            'published_path', 'exclusive')
                     if any(value.get(key) != expected.get(key) for key in keys):
                         raise ConsoleError('Inputs/configuration/state changed; perform a new preflight', 'PREFLIGHT_CHANGED')
             # A real execution always reruns the shared preflight inside launch.
@@ -149,7 +152,7 @@ def execute(store, operation_id, *, launch=None):
                             observer=observe, candidate_selector=require_dataset_choice,
                             pipeline_options={'review_provider': interaction, 'control_transport': interaction,
                                               'enable_hotkeys': False},
-                            guard_factory=lambda *_: nullcontext())
+                            guard_factory=lambda *_: nullcontext(execution))
             if not observed:
                 raise ConsoleError('Shared launch did not perform preflight', 'PREFLIGHT_MISSING')
             if request['kind'] == 'preflight':
@@ -170,9 +173,10 @@ def execute(store, operation_id, *, launch=None):
                 atomic_json(directory / 'result.json', redact(payload))
                 intent = directory / 'restart-intent.json'
                 unresolved = intent.exists() and not read_json(intent).get('resolved')
-                state = 'requires_recovery' if unresolved else 'finished'
+                uncertain = unresolved or result.get('requires_recovery') or store.status(operation_id)['state'] == 'requires_recovery'
+                state = 'requires_recovery' if uncertain else 'finished'
                 if request['kind'] == 'run' and not result.get('success') and not result.get('paused'):
-                    state = 'requires_recovery' if unresolved else 'failed'
+                    state = 'requires_recovery' if uncertain else 'failed'
                 store.update(operation_id, state=state)
             return payload
         except BaseException as exc:

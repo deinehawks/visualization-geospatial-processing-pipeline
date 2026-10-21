@@ -11,6 +11,9 @@ import re
 import uuid
 from datetime import datetime, timezone
 
+from .admission import AdmissionMixin
+from .identities import canonical_path, volume_identity
+
 
 class ConsoleError(RuntimeError):
     def __init__(self, message, code='CONFLICT', status=409):
@@ -32,7 +35,10 @@ def identifier(value):
 def read_json(path):
     if Path(path).is_symlink():
         raise ConsoleError('Console journal cannot be a symlink')
-    value = json.loads(Path(path).read_text(encoding='utf-8'))
+    try:
+        value = json.loads(Path(path).read_text(encoding='utf-8'))
+    except (ValueError, UnicodeError) as exc:
+        raise ConsoleError('Unreadable console journal; reconciliation required', 'INVALID_JOURNAL') from exc
     if not isinstance(value, dict):
         raise ConsoleError('Invalid console journal', 'INVALID_JOURNAL')
     return value
@@ -152,13 +158,18 @@ class WindowsProcesses:
 TERMINAL = frozenset({'finished', 'failed', 'canceled', 'resolved'})
 
 
-class ConsoleStore:
-    def __init__(self, root, *, lock_factory=WindowsMutex, processes=None):
+class ConsoleStore(AdmissionMixin):
+    def __init__(self, root, *, lock_factory=WindowsMutex, processes=None,
+                 path_identity=canonical_path, volume_key=volume_identity, database_identity=None):
+        from .file_identity import database_identities
         self.root = Path(root).resolve()
         if self.root == Path(self.root.anchor):
             raise ValueError('Console workspace cannot be a filesystem root')
         self.lock_factory = lock_factory
         self.processes = processes or WindowsProcesses()
+        self.path_identity = path_identity
+        self.volume_identity = volume_key
+        self.database_identity = database_identity or database_identities
 
     def lock(self):
         return self.lock_factory(self.root)
@@ -223,8 +234,7 @@ class ConsoleStore:
                 if read_json(directory / 'request.json') != request:
                     raise ConsoleError('Command ID already has another request', 'IDEMPOTENCY_CONFLICT')
                 return self.status(operation_id), False
-            if self.occupied():
-                raise ConsoleError('An operation is active or requires reconciliation', 'BUSY')
+            admission = self.admit(request)
             if request['kind'] == 'run' and any(
                 read_json(self.directory(row['operation_id']) / 'request.json').get('preflight_id') == request['preflight_id']
                 for row in self.operations()
@@ -235,7 +245,7 @@ class ConsoleStore:
             created = now()
             value = {'operation_id': operation_id, 'created_at': created, 'updated_at': created,
                      'state': 'accepted', 'kind': request['kind'], 'run_id': request.get('run_id'),
-                     'job_name': 'Global\\VizPipelineJob-' + uuid.uuid4().hex}
+                     'job_name': 'Global\\VizPipelineJob-' + uuid.uuid4().hex, **admission}
             atomic_json(directory / 'status.json', value)
             return value, True
 
@@ -271,20 +281,39 @@ class ConsoleStore:
             intent = self.directory(operation_id) / 'restart-intent.json'
             if intent.exists() and not read_json(intent).get('resolved'):
                 raise ConsoleError('Remote restart outcome needs separate reconciliation', 'REMOTE_OUTCOME_UNKNOWN')
+            mutation = self.directory(operation_id) / 'remote-mutation.json'
+            if mutation.exists() and not read_json(mutation).get('resolved'):
+                raise ConsoleError('Remote creation outcome needs separate reconciliation', 'REMOTE_OUTCOME_UNKNOWN')
+            if value.get('pending_creation'):
+                raise ConsoleError('Returned remote identity is not durably bound; use binding repair first', 'REMOTE_OUTCOME_UNKNOWN')
             atomic_json(self.directory(operation_id) / ('reconciled-' + uuid.uuid4().hex + '.json'),
                         {'confirmation': confirmation, 'at': now(), 'previous_state': value['state']})
             return self.update(operation_id, state='resolved')
 
 
 @contextmanager
-def cli_execution_guard(base_dir, run_id):
+def cli_execution_guard(base_dir, run_id, *, admission=None, exclusive=False):
+    from .coordination import Execution
+    from .projections import safe_url
+    if admission is not None:
+        admission = {**admission, 'webodm_url': safe_url(admission.get('webodm_url') or '')}
     store = ConsoleStore(Path(base_dir) / 'runtime' / 'pipeline-ui')
     operation_id = uuid.uuid4().hex
-    store.reserve(operation_id, {'kind': 'cli', 'run_id': run_id})
+    with store.lock():
+        store.verify_legacy(Path(base_dir) / 'data' / 'pipeline.db')
+        store.reserve(operation_id, {'kind': 'cli', 'run_id': run_id,
+                                     **({'admission': admission} if admission is not None else {}),
+                                     **({'exclusive': exclusive} if exclusive else {})})
     with store.claim(operation_id):
+        execution = Execution(store, operation_id)
         try:
-            yield
-        finally:
-            # Does not assert pipeline success; existing DB/results remain authoritative.
+            yield execution
+        except BaseException:
             with store.lock():
-                store.update(operation_id, state='finished')
+                store.update(operation_id, state='requires_recovery')
+            raise
+        else:
+            with store.lock():
+                current = store.status(operation_id)
+                if current['state'] != 'requires_recovery':
+                    store.update(operation_id, state='finished')

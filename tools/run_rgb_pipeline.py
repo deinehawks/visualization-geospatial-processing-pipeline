@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 from typing import Sequence
+import uuid
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,8 +25,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     from shared.config import load_pipeline_config
 
     config = load_pipeline_config()
-    pipeline = RGBPipeline(base_dir=args.base_dir, config=config, source_dir=args.source_dir, surveys_root=args.surveys_root, year=args.year)
-    result = pipeline.run(resume=False)
+    from operator_ui.storage import cli_execution_guard
+    run_id = str(uuid.uuid4())
+    # This low-level legacy launcher has no structured preflight. It must never
+    # bypass admission, and two-run policy deliberately rejects it; use main.py.
+    with cli_execution_guard(args.base_dir, run_id, exclusive=True):
+        pipeline = RGBPipeline(base_dir=args.base_dir, config=config, source_dir=args.source_dir, surveys_root=args.surveys_root, year=args.year, run_id=run_id)
+        result = pipeline.run(resume=False)
     print("\n===== FINAL RESULT =====")
     print(result)
     return 0

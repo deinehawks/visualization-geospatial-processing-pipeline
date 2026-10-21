@@ -3,10 +3,12 @@ from __future__ import annotations
 
 import logging
 import time
+import sqlite3
 from typing import Any, Callable, Dict, Optional, List
 
 from shared.db.repo import PipelineRepo
 from shared.storage_preflight import StorageCapacityError
+from shared.execution import StatePersistenceError
 from shared.logging import (
     log_output_loaded,
     log_stage_canceled,
@@ -164,8 +166,10 @@ class StageRunner:
         attempt = 0
 
         while True:
+            processing_returned = False
             try:
                 result = fn()
+                processing_returned = True
                 runtime = time.perf_counter() - wall_start
 
                 if state is not None and output_key:
@@ -266,6 +270,18 @@ class StageRunner:
                     raise
 
                 attempt += 1
+
+                if processing_returned or isinstance(exc, (StatePersistenceError, sqlite3.Error)):
+                    failure = StageRequiresRecovery('Stage persistence failed; processing will not be replayed',
+                                                    output=result if processing_returned and isinstance(result, dict) else None)
+                    try:
+                        self.repo.finish_stage_with_status(stage_id=stage_id, status='requires_recovery',
+                            runtime_seconds=time.perf_counter() - wall_start, output=failure.output,
+                            error_message=str(failure))
+                    except Exception:
+                        self.logger.exception('Could not persist recovery-required stage; retained invocation evidence is authoritative for admission')
+                    self.logger.exception('Stage requires explicit recovery after state failure')
+                    raise failure from exc
 
                 if attempt < retry_attempts:
                     log_stage_retry(

@@ -142,12 +142,20 @@ class ReadModel:
     def logs(self, run_id, cursor=None):
         detail = self.detail(run_id)
         directory = self.logs_root
+        owned = directory / 'runs' / run_id
+        # New invocations write their own files; historical global logs remain
+        # readable. Resolve only this run's contained directories.
+        roots = [directory]
+        if owned.resolve().parent == (directory / 'runs').resolve() and owned.is_dir() and not owned.is_symlink():
+            roots.extend(sorted((entry for entry in owned.iterdir() if entry.is_dir() and not entry.is_symlink()),
+                                key=lambda entry: entry.stat().st_mtime_ns)[-20:])
         root = self.logs_root.resolve()
         if directory.is_symlink() or not directory.resolve().is_relative_to(root) or not directory.is_dir():
             return {'items': [], 'cursor': None, 'availability': 'unavailable'}
         # Only known logical log files, bounded tails, no arbitrary path endpoint.
         values, positions = [], {}
-        for name in ('pipeline.log', 'webodm.log', 'qgis.log', 'data_segregation.log', 'cross_run_filter.log', 'kml.log'):
+        for directory, name in ((folder, name) for folder in roots for name in
+                ('pipeline.log', 'webodm.log', 'qgis.log', 'data_segregation.log', 'cross_run_filter.log', 'kml.log')):
             path = directory / name
             if path.is_symlink() or not path.is_file():
                 continue
@@ -160,7 +168,7 @@ class ReadModel:
             for index, line in enumerate(lines):
                 parts = line.split('|', 5)
                 if len(parts) >= 6 and parts[3].strip() == run_id:
-                    values.append({'event_id': f'{name}:{stat.st_mtime_ns}:{index}', 'message': redact(line),
+                    values.append({'event_id': f'{directory.name}:{name}:{stat.st_mtime_ns}:{index}', 'message': redact(line),
                                    'source': 'text_log'})
-            positions[name] = [stat.st_size, stat.st_mtime_ns]
+            positions[name if directory == self.logs_root else directory.name + '/' + name] = [stat.st_size, stat.st_mtime_ns]
         return {'items': values[-500:], 'cursor': positions, 'availability': 'bounded_tail'}

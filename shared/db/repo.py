@@ -4,10 +4,31 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
+from contextlib import contextmanager, nullcontext, ExitStack
+import sqlite3
+import time
 from typing import Any, Optional, Dict
 
 from .connection import connect
 from .schema import SCHEMA_SQL
+from shared.execution import StatePersistenceError
+
+
+class _CommitRetry:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def __getattr__(self, name):
+        return getattr(self.connection, name)
+
+    def commit(self):
+        for attempt in range(3):
+            try:
+                return self.connection.commit()
+            except sqlite3.OperationalError as exc:
+                if getattr(exc, 'sqlite_errorcode', None) != getattr(sqlite3, 'SQLITE_BUSY', 5) or not self.connection.in_transaction or attempt == 2:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
 
 
 def utc_now_iso() -> str:
@@ -29,9 +50,38 @@ class PipelineRepo:
     - survey_id can be attached to a run later.
     """
 
-    def __init__(self, db_file: Path):
+    def __init__(self, db_file: Path, *, transaction_gate=None):
         self.db_file = Path(db_file)
+        self.transaction_gate = transaction_gate
         self._init_db()
+
+    @contextmanager
+    def _connection(self):
+        gate = self.transaction_gate or nullcontext
+        with ExitStack() as stack:
+            try:
+                stack.enter_context(gate())
+            except Exception as exc:
+                raise StatePersistenceError('State transaction ownership unavailable; processing must not be replayed') from exc
+            connection = None
+            try:
+                connection = connect(self.db_file)
+                guarded = _CommitRetry(connection) if self.transaction_gate else connection
+                yield guarded
+                guarded.commit()
+            except sqlite3.Error as exc:
+                if connection is not None:
+                    connection.rollback()
+                if self.transaction_gate:
+                    raise StatePersistenceError('Pipeline state transaction failed; do not replay processing') from exc
+                raise
+            except BaseException:
+                if connection is not None:
+                    connection.rollback()
+                raise
+            finally:
+                if connection is not None:
+                    connection.close()
 
     @staticmethod
     def _ensure_column(conn, table: str, column: str, coltype: str) -> None:
@@ -41,7 +91,7 @@ class PipelineRepo:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype};")
 
     def _init_db(self) -> None:
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.executescript(SCHEMA_SQL)
 
             # ---- migrations for older DBs ----
@@ -62,7 +112,7 @@ class PipelineRepo:
         workspace_root: Optional[str] = None,
     ) -> None:
         now = utc_now_iso()
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO runs (
@@ -96,7 +146,7 @@ class PipelineRepo:
             conn.commit()
 
     def attach_survey_id(self, run_id: str, survey_id: str) -> None:
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -117,7 +167,7 @@ class PipelineRepo:
     ) -> None:
         now = utc_now_iso()
         status = status or ("completed" if success else "failed")
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -129,7 +179,7 @@ class PipelineRepo:
             conn.commit()
 
     def get_run(self, run_id: str) -> Optional[dict]:
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT run_id, survey_id, status, started_at, finished_at, total_runtime_seconds,
@@ -162,7 +212,7 @@ class PipelineRepo:
             raise ValueError("new_source_dir is required")
 
         now = utc_now_iso()
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 "SELECT source_dir FROM runs WHERE run_id=?",
                 (run_id,),
@@ -225,7 +275,7 @@ class PipelineRepo:
         reason: str = "pause_flag",
     ) -> None:
         now = utc_now_iso()
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -240,7 +290,7 @@ class PipelineRepo:
             conn.commit()
 
     def mark_run_running(self, run_id: str) -> None:
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE runs
@@ -257,7 +307,7 @@ class PipelineRepo:
     # SURVEYS (optional, for survey-level analytics)
     def upsert_survey_running(self, survey_id: str) -> None:
         now = utc_now_iso()
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 INSERT INTO surveys (survey_id, status, started_at)
@@ -280,7 +330,7 @@ class PipelineRepo:
     ) -> None:
         now = utc_now_iso()
         status = status or ("completed" if success else "failed")
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE surveys
@@ -334,7 +384,7 @@ class PipelineRepo:
     # STAGES (run_id-based)
     def start_stage(self, run_id: str, stage_name: str) -> int:
         now = utc_now_iso()
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             cur = conn.execute(
                 """
                 INSERT INTO stages (run_id, stage_name, status, started_at)
@@ -374,7 +424,7 @@ class PipelineRepo:
             raise ValueError("stage status is required")
         now = utc_now_iso()
         output_json = json.dumps(output) if output is not None else None
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             conn.execute(
                 """
                 UPDATE stages
@@ -394,7 +444,7 @@ class PipelineRepo:
         resume. Older completed evidence remains available through
         ``get_latest_stage_output()`` for explicit legacy-output recovery.
         """
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             latest_row = conn.execute(
                 """
                 SELECT id, run_id, stage_name, status, started_at, finished_at,
@@ -413,7 +463,7 @@ class PipelineRepo:
         Return the output_json of the latest completed stage record.
         Always reads from a completed record so resume state is consistent.
         """
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 """
                 SELECT output_json
@@ -443,7 +493,7 @@ class PipelineRepo:
         run_id: str,
         operation_key: str,
     ) -> Optional[dict]:
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             row = conn.execute(
                 '''
                 SELECT id, run_id, survey_id, project_id, task_id, task_name,
@@ -460,7 +510,7 @@ class PipelineRepo:
             return dict(row) if row else None
 
     def list_webodm_bindings(self, run_id: str) -> list[dict]:
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             rows = conn.execute(
                 '''
                 SELECT id, run_id, survey_id, project_id, task_id, task_name,
@@ -503,7 +553,7 @@ class PipelineRepo:
 
         normalized_task_id = str(task_id) if task_id else None
         now = utc_now_iso()
-        with connect(self.db_file) as conn:
+        with self._connection() as conn:
             current_row = conn.execute(
                 '''
                 SELECT * FROM webodm_tasks

@@ -12,6 +12,7 @@ import uuid
 import hashlib
 
 from operator_ui.storage import cli_execution_guard
+from operator_ui.identities import volume_identity
 
 execution_guard_factory = cli_execution_guard
 
@@ -32,6 +33,22 @@ from modules.data_segregation.data_segregation import (
     resolve_source_dataset_dir,
     validate_source_uav_folder,
 )
+
+
+def read_bindings_read_only(database, run_id):
+    if not Path(database).is_file():
+        return []
+    connection = sqlite3.connect(Path(database).resolve().as_uri() + '?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute('PRAGMA query_only=ON')
+        columns = {row['name'] for row in connection.execute('PRAGMA table_info(webodm_tasks)')}
+        if not {'project_id', 'task_id', 'run_id'} <= columns:
+            return []
+        return [dict(row) for row in connection.execute(
+            'SELECT project_id, task_id FROM webodm_tasks WHERE run_id=?', (run_id,))]
+    finally:
+        connection.close()
 
 
 def read_run_state_read_only(database: Path, run_id: str) -> dict | None:
@@ -746,6 +763,10 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             parser.error(
                 f"Cannot resume run {selected_run_id!r}: no run record was found."
             )
+        if args.survey_id and run_record.get('survey_id') and args.survey_id != run_record['survey_id']:
+            parser.error('Resume survey ID must match the persisted run identity')
+        if run_record.get('year') and args.year != int(run_record['year']):
+            parser.error('Resume year must match the persisted run identity')
         latest_stage_statuses = read_latest_stage_statuses_read_only(
             database_path,
             selected_run_id,
@@ -871,16 +892,24 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             storage_config.get("published_min_free_percent", 0)
         ),
         rgb_only=args.rgb,
+        volume_key=volume_identity,
     )
     print(format_storage_report(storage_report))
     preflight = {
         'report': storage_report, 'source_dir': str(source_dir),
-        'run_id': selected_run_id, 'survey_id': args.survey_id, 'year': args.year,
+        'run_id': selected_run_id, 'survey_id': (run_record or {}).get('survey_id') or args.survey_id, 'year': args.year,
         'mode': webodm_mode, 'surveys_root': str(surveys_root),
         'workspace_root': str(workspace_root),
         'stage_statuses': latest_stage_statuses,
         'config_fingerprint': hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest(),
         'webodm_url': (config.get('webodm') or {}).get('url', ''),
+        'bindings': read_bindings_read_only(database_path, selected_run_id) if args.resume else [],
+        'published_path': str(surveys_root / str(args.year) / str((run_record or {}).get('survey_id') or args.survey_id) / 'rgb')
+                          if ((run_record or {}).get('survey_id') or args.survey_id) else None,
+        'exclusive': bool(args.force_stage or args.activate_publication or args.rebind_source_dir
+                          or args.rebind_workspace_to_configured_root or args.recover_missing_raw
+                          or args.rebuild_qgis_tiles or args.recover_empty_webodm_project
+                          or args.recover_missing_webodm_project or args.recover_missing_webodm_task),
     }
     if observer is not None:
         observer(preflight)
@@ -938,7 +967,18 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
     if args.storage_preflight_only:
         return preflight
 
-    with (guard_factory or execution_guard_factory)(base_dir, selected_run_id):
+    factory = guard_factory or execution_guard_factory
+    guard = (factory(base_dir, selected_run_id, admission=preflight, exclusive=preflight['exclusive'])
+             if factory is cli_execution_guard else factory(base_dir, selected_run_id))
+    with guard as execution:
+        if execution is not None:
+            execution.bind(preflight)
+            if args.resume:
+                current = read_run_state_read_only(database_path, selected_run_id)
+                if current != run_record or read_latest_stage_statuses_read_only(database_path, selected_run_id) != latest_stage_statuses:
+                    raise RuntimeError('Resume identity/state changed during admission; check again')
+            # Physical free space may change after the earlier report was built.
+            execution.recheck_storage(preflight['report'])
         if args.rebind_source_dir:
             rebind_result = PipelineRepo(database_path).rebind_run_source_dir(
                 selected_run_id,
@@ -968,6 +1008,14 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         from pipelines.rgb_pipeline import RGBPipeline
 
         try:
+            options = dict(pipeline_options or {})
+            if execution is not None:
+                from operator_ui.controls import LocalControls
+                options['execution'] = execution
+                options.setdefault('control_transport', LocalControls(execution.store, execution.operation_id))
+                options['enable_hotkeys'] = not execution.two_runs and options.get('enable_hotkeys', True)
+                options['logs_dir'] = base_dir / 'data' / 'logs' / 'runs' / selected_run_id / execution.operation_id
+                options['checkpoint_dir'] = base_dir / 'data' / 'logs' / 'runs' / selected_run_id
             pipeline = RGBPipeline(
                 base_dir=base_dir,
                 config=config,
@@ -989,7 +1037,7 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
                 task1_bounded=False,
                 force_segregation=False,
                 rgb_only=args.rgb,
-                **(pipeline_options or {}),
+                **options,
             )
 
             result = pipeline.run(
@@ -1056,6 +1104,8 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         print(f"Run ID  : {result.get('run_id')}")
         print(f"Error   : {result.get('error', '—')}")
         print("===========================\n")
+        if execution is not None:
+            execution.failed_result(result)
         return result
 
 

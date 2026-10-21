@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Optional
 
 from shared.logging import log_event, log_ok, log_section, log_step, log_warn
+from shared.execution import resource, transfer
 
 
 class QGISTileResumeCorruptionError(RuntimeError):
@@ -38,13 +39,16 @@ class QGISTools:
         gdalwarp_path: str = "gdalwarp",
         gdal2tiles_path: str = "gdal2tiles.py",
         gdalinfo_path: str = "gdalinfo",
+        execution=None,
     ) -> None:
         self.logger = logger
+        self.execution = execution
         self.qgis_root = qgis_root
         self.gdalwarp_path = gdalwarp_path
         self.gdal2tiles_path = gdal2tiles_path
         self.gdalinfo_path = gdalinfo_path
 
+    @resource('compute')
     def _run_command(self, tool: str, cmd: list[str], **kwargs) -> subprocess.CompletedProcess:
         argv0 = Path(str(cmd[0])).name if cmd else ""
         log_event(
@@ -108,7 +112,7 @@ class QGISTools:
         else:
             log_step(self.logger, 1, f"Staging {src.name} to local disk: {dst}")
             t0 = time.perf_counter()
-            shutil.copy2(src, dst)
+            transfer(self, shutil.copy2, src, dst)
             elapsed = time.perf_counter() - t0
             log_ok(self.logger, f"Staged locally in {elapsed:.1f}s: {dst}")
 
@@ -253,7 +257,7 @@ class QGISTools:
                 f"{output_tif}"
             )
             t_copy = time.perf_counter()
-            shutil.copy2(write_target, output_tif)
+            transfer(self, shutil.copy2, write_target, output_tif)
             copy_elapsed = time.perf_counter() - t_copy
             self.logger.info(
                 f"Network copy complete in {copy_elapsed:.1f}s: {output_tif.name}"
@@ -464,7 +468,8 @@ class QGISTools:
             gdal2tiles_cmd += f' "{input_tif}" "{output_dir}"'
             bat_lines.append(gdal2tiles_cmd)
 
-            bat_path = output_dir.parent / "_gdal2tiles_run.bat"
+            import uuid
+            bat_path = output_dir.parent / ('_gdal2tiles_' + uuid.uuid4().hex + '.bat')
             bat_path.write_text("\r\n".join(bat_lines), encoding="utf-8")
             cmd = ["cmd.exe", "/c", str(bat_path)]
 

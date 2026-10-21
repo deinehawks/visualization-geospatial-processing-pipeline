@@ -13,6 +13,7 @@ import subprocess
 import shutil
 import tempfile
 import struct
+from shared.execution import resource, remote_mutation, resource_scope, transfer
 
 
 class WebODMTaskNotFound(RuntimeError):
@@ -32,11 +33,12 @@ class WebODMProjectLookupError(RuntimeError):
 
 
 class WebODMProcessor:
-    def __init__(self, url: str, username: str, password: str, logger: logging.Logger):
+    def __init__(self, url: str, username: str, password: str, logger: logging.Logger, *, execution=None):
         self.base_url = url.rstrip("/")
         self.username = username
         self.password = password
         self.logger = logger
+        self.execution = execution
 
         self.token: Optional[str] = None
         self.headers: Dict[str, str] = {}
@@ -66,9 +68,11 @@ class WebODMProcessor:
         self.logger.info("Authentication successful")
 
     # Projects / Tasks
+    @remote_mutation
     def create_project(self, name: str, description: str = "") -> int:
         self.logger.info(f"Creating project: {name}")
 
+        self._remote_mutation_started = True
         resp = self.session.post(
             f"{self.base_url}/api/projects/",
             headers=self.headers,
@@ -78,8 +82,16 @@ class WebODMProcessor:
         resp.raise_for_status()
 
         project_id = resp.json()["id"]
+        self._own_project(project_id)
+        if self.execution is not None:
+            self.execution.created(project_id)
         self.logger.info(f"Project created (ID={project_id})")
         return int(project_id)
+
+    def _own_project(self, project_id):
+        execution = getattr(self, 'execution', None)
+        if execution is not None:
+            execution.remote(self.base_url, project_id)
 
     def get_project(
         self,
@@ -90,6 +102,7 @@ class WebODMProcessor:
     ) -> dict:
         """Fetch one exact project and distinguish a confirmed 404."""
         project_id = int(project_id)
+        self._own_project(project_id)
         url = f"{self.base_url}/api/projects/{project_id}/"
         last_err: Optional[Exception] = None
 
@@ -156,6 +169,7 @@ class WebODMProcessor:
         Canonical task fetch with resilience against transient network drops
         (WinError 10053, ReadTimeout, ProtocolError, Docker hiccups).
         """
+        self._own_project(project_id)
         url = f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/"
 
         last_err: Optional[Exception] = None
@@ -405,6 +419,8 @@ class WebODMProcessor:
 
             time.sleep(poll_seconds)
 
+    @resource('bulk_transfer')
+    @remote_mutation
     def create_task_with_images(
         self,
         project_id: int,
@@ -421,6 +437,8 @@ class WebODMProcessor:
     ) -> str:
         from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
         import threading
+
+        self._own_project(project_id)
 
         self.logger.info(f"Creating task: {name}")
         self.logger.info(f"Image source: {image_folder}")
@@ -607,6 +625,7 @@ class WebODMProcessor:
                 "Uploading images to WebODM")
             poller_thread.start()
 
+            self._remote_mutation_started = True
             resp = self.session.post(
                 f"{self.base_url}/api/projects/{project_id}/tasks/",
                 headers=headers,
@@ -619,6 +638,8 @@ class WebODMProcessor:
 
             _finalize_live()
             task_id = str(resp.json()["id"])
+            if getattr(self, 'execution', None) is not None:
+                self.execution.created(project_id, task_id)
             self.logger.info(
                 f"Upload complete | task_id={task_id} "
                 f"| images={len(image_files)} | elapsed={self.fmt_elapsed(time.time() - start)}"
@@ -825,6 +846,7 @@ class WebODMProcessor:
         except Exception:
             return {"ok": True, "status_code": resp.status_code}
 
+    @resource('bulk_transfer')
     def download_asset(self, project_id: int, task_id: str, asset_type: str, out_file: str) -> None:
         """
         Downloads a single asset (by asset_type) from WebODM task assets endpoint.
@@ -839,6 +861,7 @@ class WebODMProcessor:
                     if chunk:
                         f.write(chunk)
 
+    @resource('bulk_transfer')
     def download_all_assets(self, project_id: int, task_id: str, out_file: str) -> None:
         """
         Downloads the full task assets zip.
@@ -906,19 +929,21 @@ class WebODMProcessor:
             f"(LZW compressed, tiled 512×512)"
         )
         try:
-            subprocess.run(cmd, check=True, capture_output=True, text=True)
+            with resource_scope(self, 'compute'):
+                subprocess.run(cmd, check=True, capture_output=True, text=True)
         except FileNotFoundError:
             self.logger.warning(
                 "gdalwarp not found. Skipping reprojection (keeping raw)."
             )
-            shutil.copy2(src, dst)
+            transfer(self, shutil.copy2, src, dst)
         except subprocess.CalledProcessError as exc:
             self.logger.warning(
                 f"gdalwarp failed. Keeping raw. "
                 f"stderr={exc.stderr[:200] if exc.stderr else ''}"
             )
-            shutil.copy2(src, dst)
+            transfer(self, shutil.copy2, src, dst)
 
+    @resource('compute')
     def convert_laz_to_pcd(
         self,
         src: Path,

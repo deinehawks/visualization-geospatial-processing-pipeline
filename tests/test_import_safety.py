@@ -12,6 +12,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 TOOL_PATHS = [
+    REPOSITORY_ROOT / 'tools' / 'pipeline_control.py',
     REPOSITORY_ROOT / "tools" / "run_rgb_pipeline.py",
     REPOSITORY_ROOT / "tools" / "query_pipeline_db.py",
     REPOSITORY_ROOT / "tools" / "reset_environment.py",

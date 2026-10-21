@@ -17,6 +17,16 @@ export function busy(operation) {
   return operation && (operation.resource_busy === true || !['finished','failed','resolved','canceled'].includes(operation.state));
 }
 
+export function canDispatch(execution, legacy = [], maintenance = false) {
+  return !!execution && !execution.blocked && execution.available > 0 && legacy.length === 0 &&
+    (!maintenance || execution.occupied === 0);
+}
+
+export function legacyDisposition(runId, execution) {
+  return execution?.legacy_reconciled?.some(row=>row.run_id===runId)
+    ? 'Locally reconciled; WebODM unverified' : '';
+}
+
 export function tileConfirmation(inputs) {
   return `REBUILD QGIS TILES ${inputs.rebuild_task || 'task2'} FOR RUN ${inputs.run_id}`;
 }

@@ -62,6 +62,59 @@ def login(client):
     return {'Origin':ORIGIN,'X-Console-CSRF':response.json()['csrf']}
 
 
+def test_capacity_api_is_authenticated_and_read_only(client, console):
+    assert client.get('/api/execution').status_code == 401
+    login(client)
+    value = client.get('/api/execution').json()
+    assert value['max_runs'] == 1 and value['occupied'] == 0 and value['available'] == 1
+    assert not console.store.root.exists()
+    console.popen.assert_not_called()
+
+
+def test_capacity_api_reports_two_pending_slots(client, console):
+    console.store.configure(2, database=console.reader.database)
+    console.store.reserve(uid(), {'kind': 'preflight', 'run_id': 'first'})
+    console.store.reserve(uid(), {'kind': 'preflight', 'run_id': 'second'})
+    login(client)
+    value = client.get('/api/execution').json()
+    assert value['max_runs'] == 2 and value['occupied'] == 2 and value['available'] == 0
+    assert len(value['holders']) == 2
+
+
+def test_legacy_receipt_is_reported_separately_without_changing_persisted_run(client, console):
+    from operator_ui.legacy_reconciliation import reconcile_legacy
+    seed(console, 'old', 'running')
+    inventory = lambda: [{'pid':os.getpid(), 'name':'python.exe'}]
+    preview = reconcile_legacy(console.store, console.reader.database, 'old', inventory=inventory)
+    reconcile_legacy(console.store, console.reader.database, 'old', inventory=inventory, confirmation=preview['confirmation'])
+    login(client)
+    response = client.get('/api/operations')
+    assert response.status_code == 200
+    value = response.json()
+    assert value['legacy_running'] == [] and value['execution']['available'] == 1
+    record = value['execution']['legacy_reconciled'][0]
+    assert record['run_id'] == 'old' and record['remote_status'] == 'unverified'
+    assert client.get('/api/runs/old').json()['run']['status'] == 'running'
+    console.popen.assert_not_called()
+
+
+def test_api_recognizes_old_python310_receipt_using_native_identity(client, console):
+    from tests.test_receipt_file_identity import MODERN, LEGACY, old_receipt
+    console.store.database_identity = lambda _: (MODERN, LEGACY)
+    seed(console, 'old', 'running')
+    receipt = old_receipt(console, LEGACY, ups=True)
+    before = receipt.read_bytes()
+    login(client)
+    response = client.get('/api/operations')
+    assert response.status_code == 200
+    value = response.json()
+    assert value['legacy_running'] == [] and not value['execution']['blocked']
+    assert value['execution']['available'] == 1
+    assert value['execution']['legacy_reconciled'][0]['persisted_status'] == 'running'
+    assert receipt.read_bytes() == before
+    console.popen.assert_not_called()
+
+
 def test_health_does_not_read_database_or_create_runtime(client,console,monkeypatch):
     monkeypatch.setattr(console.reader,'query',Mock(side_effect=AssertionError('database probe')))
     assert client.get('/api/health').json()['status']=='ok'

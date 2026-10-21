@@ -440,6 +440,7 @@ def run(
     survey_id_override: Optional[str] = None,
     use_year_subdir: bool = True,
     rgb_only: bool = False,
+    survey_allocator=None,
 ) -> Dict[str, Any]:
 
     log_section(logger, "DATA SEGREGATION")
@@ -450,7 +451,10 @@ def run(
 
     log_step(logger, 1, "Resolve survey ID")
 
-    if survey_id_override:
+    if survey_allocator is not None:
+        survey_id, survey_path = survey_allocator(surveys_root, year, survey_id_override, use_year_subdir, force, logger)
+        log_ok(logger, f'Claimed survey ID: {survey_id}')
+    elif survey_id_override:
         survey_id = survey_id_override
         log_ok(logger, f"Using provided survey ID: {survey_id}")
     else:
@@ -459,7 +463,7 @@ def run(
     survey_base = surveys_root / str(year) if use_year_subdir else surveys_root
     survey_path = survey_base / survey_id / "rgb"
 
-    if survey_path.exists() and not force:
+    if survey_allocator is None and survey_path.exists() and not force:
         raise FileExistsError(f"Survey path already exists: {survey_path}")
 
     log_step(logger, 2, "Create folder structure")

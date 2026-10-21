@@ -31,6 +31,7 @@ from shared.artifacts import (
 )
 
 from shared.publication_lock import PublicationLockedError
+from shared.execution import resource, transfer, StatePersistenceError
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
 from modules.webodm.webodm_processor import (
     WebODMProcessor,
@@ -127,6 +128,7 @@ class RGBPipeline(
         review_provider=None,
         control_transport=None,
         enable_hotkeys: bool = True,
+        execution=None,
     ):
         if not isinstance(config, Mapping):
             raise TypeError("config must be a mapping")
@@ -152,6 +154,7 @@ class RGBPipeline(
                 )
 
         self.base_dir = Path(base_dir)
+        self.execution = execution
         self.config = config
         self.source_dir = Path(source_dir)
         self.surveys_root = Path(surveys_root)
@@ -206,6 +209,8 @@ class RGBPipeline(
             self.run_id,
             **({'transport': control_transport} if control_transport is not None else {}),
         )
+        if execution is not None:
+            execution.check_control = self.control.check_or_raise
 
         if loggers is None:
             self.logs_dir.mkdir(parents=True, exist_ok=True)
@@ -250,7 +255,8 @@ class RGBPipeline(
 
         if repository is None:
             repository = PipelineRepo(
-                Path(db_file) if db_file is not None else db_path(self.base_dir)
+                Path(db_file) if db_file is not None else db_path(self.base_dir),
+                **({'transaction_gate': execution.transaction} if execution is not None else {}),
             )
         self.repo = repository
         self.repo.create_run(
@@ -308,6 +314,7 @@ class RGBPipeline(
             username=webodm_cfg["username"],
             password=webodm_cfg["password"],
             logger=logger,
+            **({'execution': self.execution} if self.execution is not None else {}),
         )
 
     def _require_survey_id(self) -> str:
@@ -875,6 +882,7 @@ class RGBPipeline(
         )
         return plan
 
+    @resource('bulk_transfer')
     def prepare_publication_staging(self) -> Dict[str, Any]:
         """Prepare a staged RGB publication set without activating it.
 
@@ -942,6 +950,7 @@ class RGBPipeline(
             raise RuntimeError("survey_id is not set yet. Run data_segregation first.")
         return f"PUBLISH {self.survey_id} {self.run_id}"
 
+    @resource('bulk_transfer')
     def activate_publication_explicit(self, *, confirmation: str) -> Dict[str, Any]:
         """Activate a staged RGB publication only after explicit confirmation.
 
@@ -1133,6 +1142,8 @@ class RGBPipeline(
     def _load_webodm_checkpoint(self) -> dict:
         import json
         path = self._webodm_checkpoint_path()
+        if not path.exists() and self.execution is not None:
+            path = self.base_dir / 'data' / 'logs' / path.name
         if not path.exists():
             return {}
         try:
@@ -1203,6 +1214,8 @@ class RGBPipeline(
                 },
             ) from exc
 
+        if self.execution is not None:
+            self.execution.binding_committed(project_id, task_id)
         web = self.state.setdefault('webodm', {})
         existing_project = web.get('project_id')
         if (
@@ -2036,6 +2049,7 @@ class RGBPipeline(
             if item.is_file()
         )
 
+    @resource('bulk_transfer')
     def _stage_upload_cache(
         self,
         *,
@@ -2085,7 +2099,7 @@ class RGBPipeline(
             if dst.exists() and dst.stat().st_size == src.stat().st_size:
                 copied += 1
             else:
-                shutil.copy2(src, dst)
+                transfer(self, shutil.copy2, src, dst)
                 copied += 1
 
             if copied % progress_every == 0 or copied == len(images):
@@ -2123,6 +2137,7 @@ class RGBPipeline(
             shutil.rmtree(directory)
         directory.mkdir(parents=True, exist_ok=True)
 
+    @resource('bulk_transfer')
     def _replace_legacy_directory_after_success(
         self,
         *,
@@ -2152,7 +2167,7 @@ class RGBPipeline(
             backup_target=backup_target,
         )
 
-        shutil.copytree(source, temp_target)
+        transfer(self, shutil.copytree, source, temp_target)
         try:
             if target.exists():
                 target.rename(backup_target)
@@ -2190,6 +2205,7 @@ class RGBPipeline(
         else:
             backup_target.rename(target)
 
+    @resource('bulk_transfer')
     def _replace_legacy_file_after_success(
         self,
         *,
@@ -2219,7 +2235,7 @@ class RGBPipeline(
             backup_target=backup_target,
         )
 
-        shutil.copy2(source, temp_target)
+        transfer(self, shutil.copy2, source, temp_target)
         try:
             if target.exists():
                 target.rename(backup_target)
@@ -2426,6 +2442,7 @@ class RGBPipeline(
 
             raise
     # STAGES
+    @resource('bulk_transfer')
     def stage_data_segregation(self) -> Dict[str, Any]:
         logger = self.loggers["segregation"]
         logger.info("Stage: Data Segregation")
@@ -2444,6 +2461,7 @@ class RGBPipeline(
             ),
             force=self.force_segregation,
             rgb_only=self.rgb_only,
+            **({'survey_allocator': self.execution.allocate_survey} if self.execution is not None else {}),
         )
 
         # .../<year>/<survey_id>/rgb by default; can be without year subdir.
@@ -2482,6 +2500,7 @@ class RGBPipeline(
 
         return summary
 
+    @resource('bulk_transfer')
     def stage_raw_input_recovery(self) -> Dict[str, Any]:
         logger = self.loggers["cross_run_filter"]
         rgb_path = self._require_rgb_path()
@@ -2521,6 +2540,7 @@ class RGBPipeline(
         )
         return result
 
+    @resource('bulk_transfer')
     def stage_cross_run_image_filter(self) -> Dict[str, Any]:
         logger = self.loggers["cross_run_filter"]
         logger.info("Stage: Cross-run image filter")
@@ -2557,7 +2577,7 @@ class RGBPipeline(
 
             images = self._iter_jpeg_files(input_dir)
             for img in images:
-                shutil.copy2(img, output_dir / img.name)
+                transfer(self, shutil.copy2, img, output_dir / img.name)
 
             self._replace_legacy_directory_after_success(
                 source_dir=output_dir,
@@ -3961,7 +3981,7 @@ class RGBPipeline(
             target_image = target_folder / source_image.name
 
             try:
-                shutil.copy2(source_image, target_image)
+                transfer(self, shutil.copy2, source_image, target_image)
                 total_bytes += target_image.stat().st_size
             except Exception as e:
                 raise RuntimeError(
@@ -4081,6 +4101,7 @@ class RGBPipeline(
             gdalwarp_path=gdalwarp_path,
             gdal2tiles_path=gdal2tiles_path,
             gdalinfo_path=gdalinfo_path,
+            **({'execution': self.execution} if self.execution is not None else {}),
         )
 
         local_staging_cfg = qgis_cfg.get("local_staging") or {}
@@ -4433,7 +4454,7 @@ class RGBPipeline(
                         workspace_tiles_dir.mkdir(parents=True, exist_ok=True)
                     else:
                         self._reset_workspace_directory(workspace_tiles_dir)
-                    shutil.copytree(
+                    transfer(self, shutil.copytree,
                         tiling_output_dir,
                         workspace_tiles_dir,
                         dirs_exist_ok=True,
@@ -5118,6 +5139,8 @@ class RGBPipeline(
             )
 
             provider = self.review_provider
+            if getattr(self, 'execution', None) is not None:
+                self.execution.require_exclusive()
             if provider is not None:
                 provider.restart_started(int(project_id), str(task_id_to_restart), restart_from)
             try:
@@ -5196,6 +5219,8 @@ class RGBPipeline(
                    if self.review_provider is not None else {}),
             )
 
+            if getattr(getattr(self, 'control', None), 'transport', None) is not None:
+                self._check_control_or_raise('quality_gate')
             if raw in ("yes", "y"):
                 if _fallback_reviewed:
                     logger.info(
@@ -5850,6 +5875,8 @@ class RGBPipeline(
 
         # ── Paused / Canceled / Aborted / Runtime Failure ─────────
         except RuntimeError as e:
+            if isinstance(e, (StageRequiresRecovery, StatePersistenceError)):
+                self.state['requires_recovery'] = True
             if str(e) == "__PIPELINE_PAUSED__":
                 self.state.update(
                     {

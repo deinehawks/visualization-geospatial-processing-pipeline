@@ -80,12 +80,13 @@ def inspect_storage_requirements(
     min_free_gb: int,
     min_free_percent: int,
     disk_usage: Callable[[str], object] = shutil.disk_usage,
+    volume_key: Callable[[Path], str] | None = None,
 ) -> dict:
     grouped: dict[str, dict[str, object]] = {}
     for requirement in requirements:
         target = Path(requirement.path).expanduser().resolve(strict=False)
         probe = _nearest_existing_path(target)
-        key = _volume_key(probe)
+        key = (volume_key or _volume_key)(probe)
         group = grouped.setdefault(
             key,
             {
@@ -179,6 +180,7 @@ def build_storage_preflight(
     published_min_free_percent: int = 0,
     rgb_only: bool = False,
     disk_usage: Callable[[str], object] = shutil.disk_usage,
+    volume_key: Callable[[Path], str] | None = None,
 ) -> dict:
     mode = str(webodm_mode).strip().lower()
     if mode not in WORKSPACE_MULTIPLIERS:
@@ -243,6 +245,7 @@ def build_storage_preflight(
         min_free_gb=min_free_gb,
         min_free_percent=min_free_percent,
         disk_usage=disk_usage,
+        volume_key=volume_key,
     )
     report.update(
         {

@@ -1,5 +1,5 @@
 """Hermetic console contracts: owned paths, temporary SQLite, fake processes only."""
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import importlib
 import json
@@ -63,7 +63,7 @@ def console(tmp_path, temporary_sqlite_db_path):
 
 
 def seed(console, run_id='original', status='failed', *, mode=None):
-    with sqlite3.connect(console.reader.database) as connection:
+    with closing(sqlite3.connect(console.reader.database)) as connection, connection:
         connection.execute('INSERT INTO runs (run_id,survey_id,status,source_dir,surveys_root,year,started_at) VALUES (?,?,?,?,?,?,?)',
                            (run_id, 'AH-026136', status, str(console.base_dir / 'source'), str(console.base_dir / 'surveys'), 2026, '2026-10-20T00:00:00+00:00'))
         if mode:
@@ -319,7 +319,7 @@ def test_helper_structured_failures_never_report_success(console,failure):
     def launch(argv, **options):
         assert '--storage-preflight-only' not in argv
         assert options['pipeline_options']['enable_hotkeys'] is False
-        assert options['guard_factory'](None,None).__enter__() is None
+        assert options['guard_factory'](None,None).__enter__().operation_id == started['operation_id']
         if failure == 'config_changed':
             options['observer']({**expected,'config_fingerprint':'changed'})
         elif failure == 'storage_fail':

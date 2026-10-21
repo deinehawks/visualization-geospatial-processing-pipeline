@@ -109,8 +109,13 @@ def create_app(service, *, launch_key, static_dir=None, on_start=None):
 
     @app.get('/api/operations')
     def operations():
+        execution = service.execution_status()
         return {'items': [service.operation(row['operation_id']) for row in service.store.operations()],
-                'legacy_running': service.legacy_running()}
+                'legacy_running': execution['legacy_running'], 'execution': execution}
+
+    @app.get('/api/execution')
+    def execution_status():
+        return service.execution_status()
 
     @app.get('/api/operations/{operation_id}')
     def operation(operation_id: str):
