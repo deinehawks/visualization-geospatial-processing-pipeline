@@ -295,7 +295,9 @@ def design_payload(design, relative_to):
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + '.' + uuid.uuid4().hex + '.tmp')
+    # Keep same-directory atomic replacement without repeating a potentially
+    # long destination name (export snapshots can approach Windows MAX_PATH).
+    temporary = path.with_name(uuid.uuid4().hex + '.tmp')
     try:
         temporary.write_text(json.dumps(value, indent=2, ensure_ascii=False, allow_nan=False), encoding='utf-8')
         temporary.replace(path)

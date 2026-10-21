@@ -17,6 +17,123 @@ from unittest.mock import Mock
 
 
 @pytest.fixture
+def atomic_workspace(tmp_path, monkeypatch):
+    """Guard failed-write cleanup so only owned temporary files may be removed."""
+    root = (tmp_path / 'atomic-owned').resolve()
+    root.mkdir()
+    sentinel = root / '.test-owner'
+    sentinel.write_text('atomic JSON test ownership', encoding='utf-8')
+    original_unlink = Path.unlink
+
+    def owned_unlink(path, *args, **kwargs):
+        target = path.resolve()
+        assert sentinel.read_text(encoding='utf-8') == 'atomic JSON test ownership'
+        assert target != root and target != Path(target.anchor)
+        assert target.is_relative_to(root) and target != sentinel
+        assert target.suffix == '.tmp'
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'unlink', owned_unlink)
+    return root
+
+
+def padded_directory(root, length):
+    """Use real pytest-owned paths while matching the reported path length."""
+    padding = length - len(str(root)) - 1
+    assert 1 <= padding <= 200
+    directory = root / ('p' * padding)
+    directory.mkdir()
+    assert len(str(directory)) == length
+    return directory
+
+
+def legacy_path_limit(monkeypatch):
+    """Emulate the affected Windows runtime without relying on host policy."""
+    writes = []
+    original_write = Path.write_text
+
+    def limited_write(path, *args, **kwargs):
+        if len(str(path)) >= 260:
+            raise FileNotFoundError(2, 'Legacy Windows path limit', str(path))
+        writes.append(path)
+        return original_write(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, 'write_text', limited_write)
+    return writes
+
+
+def test_atomic_json_short_temporary_name_fits_reported_snapshot_path(atomic_workspace, monkeypatch):
+    folder = padded_directory(atomic_workspace, 210)
+    destination = folder / 'snapshot.mapedit.json'
+    assert len(str(destination)) == 232
+    assert len(str(destination)) + 1 + 32 + 4 == 269  # Previous temporary path.
+    writes = legacy_path_limit(monkeypatch)
+    atomic_json(destination, {'title': 'Saved safely'})
+    assert json.loads(destination.read_text()) == {'title': 'Saved safely'}
+    assert len(writes) == 1 and writes[0].parent == folder
+    assert len(str(writes[0])) == 247
+    assert len(writes[0].stem) == 32 and writes[0].suffix == '.tmp'
+    assert not list(folder.glob('*.tmp'))
+    assert (atomic_workspace / '.test-owner').is_file()
+
+
+def test_export_job_saves_snapshot_under_legacy_path_limit(package, atomic_workspace, monkeypatch):
+    workspace = padded_directory(atomic_workspace, 161)
+    writes = legacy_path_limit(monkeypatch)
+    process = Mock()
+    job = ExportJob(lambda: process)
+    design = design_from_package(package)
+    attempt = job.start(design, workspace, 'python', 'editor.py')
+    assert len(str(attempt)) == 210
+    assert load_design(attempt / 'snapshot.mapedit.json').texts == design.texts
+    assert json.loads((attempt / 'attempt.json').read_text())['status'] == 'incomplete'
+    assert all(path.parent == attempt and len(str(path)) < 260 for path in writes)
+    process.start.assert_called_once()
+    assert (atomic_workspace / '.test-owner').is_file()
+
+
+@pytest.mark.parametrize('failure', ['write', 'replace', 'serialize'])
+def test_atomic_json_failure_preserves_destination_and_cleans_only_owned_temp(atomic_workspace, monkeypatch, failure):
+    destination = atomic_workspace / 'existing.json'
+    destination.write_text('{"original": true}', encoding='utf-8')
+    original_write = Path.write_text
+    original_replace = Path.replace
+
+    def failed_write(path, *args, **kwargs):
+        if path.suffix == '.tmp':
+            original_write(path, 'partial temporary content', encoding='utf-8')
+            raise OSError('temporary write failed')
+        return original_write(path, *args, **kwargs)
+
+    def failed_replace(path, *args, **kwargs):
+        if path.suffix == '.tmp':
+            raise OSError('atomic replace failed')
+        return original_replace(path, *args, **kwargs)
+
+    if failure == 'write':
+        monkeypatch.setattr(Path, 'write_text', failed_write)
+    elif failure == 'replace':
+        monkeypatch.setattr(Path, 'replace', failed_replace)
+    value = {'new': float('nan') if failure == 'serialize' else True}
+    with pytest.raises(ValueError if failure == 'serialize' else OSError):
+        atomic_json(destination, value)
+    assert destination.read_text(encoding='utf-8') == '{"original": true}'
+    assert not list(atomic_workspace.glob('*.tmp'))
+    assert (atomic_workspace / '.test-owner').read_text(encoding='utf-8') == 'atomic JSON test ownership'
+
+
+def test_atomic_json_uses_unique_same_directory_temporary_files(atomic_workspace, monkeypatch):
+    writes = legacy_path_limit(monkeypatch)
+    destination = atomic_workspace / 'settings.json'
+    atomic_json(destination, {'version': 1})
+    atomic_json(destination, {'version': 2})
+    assert len(writes) == 2 and writes[0] != writes[1]
+    assert all(path.parent == destination.parent and len(path.name) == 36 for path in writes)
+    assert json.loads(destination.read_text()) == {'version': 2}
+    assert not list(atomic_workspace.glob('*.tmp'))
+
+
+@pytest.fixture
 def package(tmp_path):
     root = tmp_path / 'package'
     root.mkdir()

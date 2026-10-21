@@ -112,6 +112,190 @@ and manual choice, both boundary formats, cancellation, unsaved handoff, mapped
 drive loss, page fit/display scaling, and preview/PDF alignment in real QGIS.
 No such live/source-drive check has been run by the coding agent.
 
+## Export snapshot path-length fix
+
+If export reports `No such file or directory` for a long
+`snapshot.mapedit.json.<UUID>.tmp` path, the editor may be hitting the legacy
+Windows path limit before starting QGIS export. Atomic JSON saving now uses a
+36-character `<UUID>.tmp` sibling instead of repeating the destination filename.
+For the reported case, the temporary path decreases from 269 to 247 characters.
+Full UUID uniqueness, same-directory atomic replacement, and cleanup on failure
+remain intact. Existing destination JSON survives failed writing/replacement.
+
+Save the current design before restarting `run_map_editor.bat`; reopen that
+design and retry Export. The running process does not automatically reload this
+patch. No package/output folders need renaming or deletion. This is not a global
+long-path setting: paths whose directories or final filenames already exceed
+the runtime's limit may still need a shorter workspace in a separate change.
+
+Validation (all filesystem fixtures pytest-owned, helper/QGIS boundaries mocked):
+
+```powershell
+python -m py_compile modules/map_export/editor_model.py tests/test_map_editor_model.py
+python -m pytest tests/test_map_editor_model.py -q
+python -m pytest tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_map_editor_generator.py tests/test_qgis_print_exporter_config.py -q
+python -m pytest -q
+python -m pytest --collect-only -q
+git diff --check -- modules/map_export/editor_model.py tests/test_map_editor_model.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/TEST_STRATEGY.md
+```
+
+Results: 48 model tests, 316 focused regressions, and all 779 guarded default
+tests passed; 779 tests collected safely. Syntax and scoped whitespace checks
+passed. Six new cases cover the reported path, helper snapshot creation, unique
+same-folder temporary files, and failed write/replace/serialization preservation.
+No real QGIS run, source-drive access, existing output modification, commit, or
+push was performed for this fix; live export confirmation remains an operator
+check. Only the atomic-saving source, its tests, and these operator/status/test
+records changed; nothing was moved or deleted outside disposable test files.
+
+## Readable inset basemap names at export DPI
+
+Both inset frames now declare their XYZ tiles' native resolution in the live
+editor and final export: standard tiles use `tilePixelRatio=1` (96 source DPI),
+and the existing `@2x` basemap uses `2` (192 source DPI). Existing valid explicit
+1/2 ratios are retained. This lets QGIS compensate for output DPI when selecting
+tiles instead of selecting progressively finer tile zooms with tiny text.
+The main basemap/orthomosaic and its rendering are not changed.
+
+Normalization uses private inset layers and preserves opacity, URL parameters,
+provider options encoded in the URI, bounds, CRS, pins, and boundary styling.
+Non-XYZ layers remain untouched. Preview/PDF/inset DPI stay at their chosen
+values (defaults 300/450/800); no paper, framing, or design-format change is
+needed. New export metadata records `print_layout.inset_tile_scaling` per inset
+without recording URLs/credentials. A failed replacement layer is not installed.
+
+Save your design, restart `run_map_editor.bat`, reopen the design, and export
+again. No map regeneration, bounds changes, or old-output deletion is required.
+Native scaling preserves readable physical label size, but raster text remains
+limited by the source tiles; higher output DPI cannot create new tile detail.
+Which individual names appear still depends on the provider and geographic zoom.
+
+Technical basis: the [QGIS 3.34 XYZ source-DPI implementation](https://github.com/qgis/QGIS/blob/release-3_34/src/providers/wms/qgswmsprovider.cpp#L1698)
+and its [output/source DPI compensation](https://github.com/qgis/QGIS/blob/release-3_34/src/providers/wms/qgswmsprovider.cpp#L799).
+Only public documentation/source was consulted; no live tile service was used
+by the coding agent. Real inset label appearance still needs operator export
+confirmation at the intended page size.
+
+Validation commands (all GIS/layer/process behavior mocked):
+
+```powershell
+python -m py_compile modules/map_export/qgis_print_exporter.py tests/test_qgis_print_exporter_config.py
+python -m pytest tests/test_qgis_print_exporter_config.py tests/test_map_editor_session.py tests/test_map_editor_model.py -q --tb=short
+python -m pytest tests/test_map_editor_generator.py tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_map_export_manifest_resolution.py tests/test_map_export_multi_root.py tests/test_qgis_print_exporter_config.py -q
+python -m pytest -q
+python -m pytest --collect-only -q
+git diff --check -- modules/map_export/qgis_print_exporter.py tests/test_qgis_print_exporter_config.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+```
+
+Results: 245 renderer/session/model checks, 351 focused regressions, all 804
+guarded default tests, and 804-test safe collection passed. Syntax and scoped
+whitespace checks passed. Twenty-five new cases cover standard/retina sources,
+duplicate parameters, URI/opacity preservation, idempotency, invalid-layer
+failure, non-XYZ sources, private layers in live/final/legacy paths, unchanged
+extents/CRS/styles/DPI, DPI compensation, final image DPI, and metadata recording.
+No QGIS/GDAL execution, real tiles, source drives, production database, existing
+outputs, dependency changes, commit, or push was involved. Modified one renderer,
+one test module, and four documentation files; no files were created/moved/deleted.
+The earlier local atomic-save fix and unrelated local edits remain untouched.
+
+## Larger, navigable editing canvas
+
+The editor now opens maximized. The center preview gets the expandable share of
+the workspace, with slimmer/resizable side panels. **Fit Page** fits the actual
+paper with a small margin instead of the whole layout scene's empty workspace.
+The fixed print frame geometry and exported page size are not changed.
+
+A navigation bar stays directly above the preview, outside the property tabs:
+**- / +**, **Fit Page**, **Fit Width**, **100%**, and **Focus Canvas**.
+
+| Gesture/control | Canvas-only effect |
+| --- | --- |
+| Ctrl + mouse wheel | Zoom around the pointer anywhere over the canvas |
+| Wheel over page labels or empty workspace | Zoom the canvas |
+| Middle-button drag | Pan the canvas without moving map contents |
+| Space + left-drag | Hand-pan after the canvas has keyboard focus |
+| Ctrl+Plus / Ctrl+Minus | Zoom the canvas in/out |
+| Ctrl+0 | Fit the page |
+| F11 / Focus Canvas | Hide or restore both side panels, then refit the paper |
+| Fit Width / 100% | Native QGIS layout-view width/actual-size zoom |
+
+Regular left-drag and wheel **inside a map frame** still edit that map's contents
+as before, unless Ctrl or the Space hand gesture selects canvas navigation.
+Click the canvas before using Space if you were typing in a text field. Losing
+focus clears hand mode, and auto-repeat does not end a held Space gesture.
+The wheel supports trackpad pixel deltas and ignores zero-motion events. Zoom
+is bounded to avoid runaway view transforms. Canvas navigation does not change
+map scales, bounds, labels, paper size, DPI, saved designs, dirty state, or undo
+history; selection outlines remain preview-only. No canvas preferences are
+written to a package, database, or design file.
+
+Save your design and restart `run_map_editor.bat` to load the updated UI. No map
+regeneration is needed. The previous atomic-saving and inset-scaling fixes stay
+in place. QGIS's [layout-view API](https://api.qgis.org/api/3.34/classQgsLayoutView.html)
+supplies actual-size/width zoom and view-only zoom-change notification.
+
+Validation commands (Qt/QGIS/application launch are faked, not executed):
+
+```powershell
+python -m py_compile map_editor.py modules/map_export/editor_window.py tests/test_map_editor_window.py
+python -m pytest tests/test_map_editor_window.py -q --tb=short
+python -m pytest tests/test_map_editor_generator.py tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_map_export_manifest_resolution.py tests/test_map_export_multi_root.py tests/test_qgis_print_exporter_config.py -q
+python -m pytest -q
+python -m pytest --collect-only -q
+git diff --check -- map_editor.py modules/map_export/editor_window.py tests/test_map_editor_window.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+```
+
+Results: 55 window tests, 372 focused regressions, all 825 guarded default tests,
+and safe collection of 825 tests passed. Syntax and scoped whitespace passed.
+Twenty-one new cases cover canvas wheel routing/anchor/limits, trackpads, hand
+panning, focus/auto-repeat cleanup, panel toggling, visible controls/shortcuts,
+fit/actual/width zoom, no design/history changes, and maximized launch with all
+existing inputs. Changed two source files, one test module, and four documents;
+no new/moved/deleted files or dependencies. No production data, existing outputs,
+source drives, credentials, pipeline, tile service, real QGIS/GDAL, or commit/push
+was touched. Prior local changes remain intact. Only public API docs were read.
+Separately authorize a live UI check for display scaling, tighter fit, pointer
+anchoring, panel restoration, and pan/zoom behavior before broader rollout.
+
+## Sidebar clipping correction (2026-10-20)
+
+Save your design, close the editor, and restart `run_map_editor.bat`. The right
+sidebar no longer has a 400-pixel width cap. Drag the divider between the canvas
+and property tabs to widen it; the center still gets the expandable workspace.
+Long form rows wrap their fields below labels when needed. Apply-scale and Reset
+have separate full-width rows, and long preset/font names no longer dictate the
+whole panel width. Use vertical scrolling for controls below the viewport.
+No map regeneration, design conversion, or export-setting changes are needed.
+
+Validation commands executed (external GIS/process boundaries are mocked):
+
+```powershell
+python -m py_compile modules/map_export/editor_window.py tests/test_map_editor_window.py
+python -m pytest tests/test_map_editor_window.py -q --tb=short
+python -m pytest tests/test_map_editor_generator.py tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_map_export_manifest_resolution.py tests/test_map_export_multi_root.py tests/test_qgis_print_exporter_config.py -q
+python -m pytest -q
+python -m pytest --collect-only -q | Select-Object -Last 2
+git diff --check -- modules/map_export/editor_window.py tests/test_map_editor_window.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+git status --short
+```
+
+Results: 69 window checks, 386 focused regressions, all 839 safe default tests,
+and collection of 839 tests passed; syntax and scoped whitespace passed.
+Fourteen new cases cover five responsive forms, seven content-length-limited
+choice widgets, hint wrapping, and full-row button placement/action dispatch.
+Existing tests retain canvas-only zoom/pan/history and renderer/export coverage.
+One application module, one test module, and four documents changed; nothing was
+created, moved, or deleted. Unrelated and earlier uncommitted changes remain.
+No production data/configuration, source drive, real QGIS/GDAL, generated map,
+pipeline, DB, credentials, operational service, commit, or push was touched.
+Only public Qt API documentation was read externally.
+
+Remaining authorized-operator check: inspect all four tabs at Windows 100%,
+150%, and 200% scaling, narrow/widen the divider, scroll vertically, and confirm
+scale/reset/zoom controls and long preset/font choices remain reachable. Verify
+F11 restores the panels and canvas zoom still changes only the page view. Real
+Qt pixel geometry was not tested by the mocked suite.
+
 ## V2 editing workspace
 
 Restart the editor with the same launcher to use V2. The light interface has a

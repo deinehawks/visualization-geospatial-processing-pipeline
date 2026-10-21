@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import math
 import sys
 
 from .editor_model import (
@@ -35,6 +36,9 @@ def create_window_class():
             self.anchor = None
             self.drag_map = None
             self.pending = [0.0, 0.0]
+            self.canvas_anchor = None
+            self.canvas_button = None
+            self.space_down = False
             self.pan_timer = QTimer(self)
             self.pan_timer.setSingleShot(True)
             self.pan_timer.setInterval(40)
@@ -46,6 +50,8 @@ def create_window_class():
                 self.owner.history.end_group()
             self.anchor = None
             self.pending = [0.0, 0.0]
+            self.canvas_anchor = self.canvas_button = None
+            self.setCursor(Qt.OpenHandCursor if self.space_down else Qt.ArrowCursor)
 
         def flush_pan(self):
             dx, dy = self.pending
@@ -57,6 +63,15 @@ def create_window_class():
             return self.mapToScene(event.pos())
 
         def mousePressEvent(self, event):
+            if self.owner.session:
+                self.setFocus()
+                if event.button() == Qt.MiddleButton or (self.space_down and event.button() == Qt.LeftButton):
+                    self.flush_pan()
+                    self.cancel_drag()
+                    self.canvas_anchor, self.canvas_button = event.pos(), event.button()
+                    self.setCursor(Qt.ClosedHandCursor)
+                    event.accept()
+                    return
             if self.owner.session and event.button() == Qt.LeftButton:
                 point = self._point(event)
                 key = self.owner.hit_item(point)
@@ -70,7 +85,14 @@ def create_window_class():
             event.accept()
 
         def mouseMoveEvent(self, event):
-            if self.anchor is not None:
+            if self.canvas_anchor is not None:
+                position = event.pos()
+                dx, dy = position.x() - self.canvas_anchor.x(), position.y() - self.canvas_anchor.y()
+                self.canvas_anchor = position
+                horizontal, vertical = self.horizontalScrollBar(), self.verticalScrollBar()
+                horizontal.setValue(horizontal.value() - dx)
+                vertical.setValue(vertical.value() - dy)
+            elif self.anchor is not None:
                 point = self._point(event)
                 item = self.owner.session._map(self.drag_map)
                 dx = (point.x() - self.anchor.x()) / item.rect().width()
@@ -83,6 +105,12 @@ def create_window_class():
             event.accept()
 
         def mouseReleaseEvent(self, event):
+            if self.canvas_anchor is not None:
+                if event.button() == self.canvas_button:
+                    self.canvas_anchor = self.canvas_button = None
+                    self.setCursor(Qt.OpenHandCursor if self.space_down else Qt.ArrowCursor)
+                event.accept()
+                return
             self.pan_timer.stop()
             self.flush_pan()
             self.anchor = None
@@ -92,13 +120,22 @@ def create_window_class():
             event.accept()
 
         def wheelEvent(self, event):
+            delta = event.angleDelta().y()
+            if not delta:
+                delta = event.pixelDelta().y()
+            if not delta:
+                event.accept()
+                return
             self.flush_pan()
             self.cancel_drag()
             if self.owner.session:
                 key = self.owner.hit_item(self._point(event))
-                if key in MAP_IDS:
+                if self.space_down or event.modifiers() & Qt.ControlModifier or key not in MAP_IDS:
+                    factor = 1.2 ** max(-4, min(4, delta / 120))
+                    self.owner.zoom_page(factor, anchor=event.pos())
+                else:
                     self.owner.select_item(key)
-                    factor = 1 / 1.2 if event.angleDelta().y() > 0 else 1.2
+                    factor = 1 / 1.2 if delta > 0 else 1.2
                     self.owner.perform(lambda: self.owner.session.zoom(key, factor))
             event.accept()
 
@@ -117,8 +154,31 @@ def create_window_class():
                     painter.restore()
 
         def keyPressEvent(self, event):
+            if event.key() == Qt.Key_Space and self.owner.session:
+                self.space_down = True
+                if self.canvas_anchor is None:
+                    self.setCursor(Qt.OpenHandCursor)
+                event.accept()
+                return
             # The fixed-layout editor never forwards delete/cut/move-item shortcuts.
             event.ignore()
+
+        def keyReleaseEvent(self, event):
+            if event.key() == Qt.Key_Space:
+                if event.isAutoRepeat():
+                    event.accept()
+                    return
+                self.space_down = False
+                if self.canvas_anchor is None:
+                    self.setCursor(Qt.ArrowCursor)
+                event.accept()
+                return
+            event.ignore()
+
+        def focusOutEvent(self, event):
+            self.space_down = False
+            self.cancel_drag()
+            super().focusOutEvent(event)
 
         def contextMenuEvent(self, event):
             event.accept()
@@ -136,6 +196,7 @@ def create_window_class():
             self.selected_id = 'map_frame'
             self.export_outputs = {}
             self.presets = []
+            self.canvas_focus = False
             self.font_color = '#000000'
             self.helper_gate = HelperGate()
             self.job = ExportJob(self._new_process, self.helper_gate)
@@ -169,6 +230,9 @@ def create_window_class():
                 ('save_as', 'Save As', 'Ctrl+Shift+S', lambda: self.save(save_as=True)),
                 ('undo', 'Undo', 'Ctrl+Z', self.undo), ('redo', 'Redo', 'Ctrl+Shift+Z', self.redo),
                 ('fit', 'Fit Page', 'Ctrl+0', self.fit_page),
+                ('canvas_in', 'Canvas +', 'Ctrl+=', lambda: self.zoom_page(1.2)),
+                ('canvas_out', 'Canvas -', 'Ctrl+-', lambda: self.zoom_page(1 / 1.2)),
+                ('focus_canvas', 'Focus Canvas', 'F11', self.toggle_canvas_focus),
                 ('export', 'Export PDF + PNG', 'Ctrl+E', self.export),
                 ('cancel', 'Cancel export', '', self.cancel_export),
             ):
@@ -177,9 +241,17 @@ def create_window_class():
                     action.setShortcut(shortcut)
                 if key == 'redo':
                     action.setShortcuts(['Ctrl+Y', 'Ctrl+Shift+Z'])
+                if key == 'canvas_in':
+                    action.setShortcuts(['Ctrl+=', 'Ctrl++'])
+                if key == 'focus_canvas':
+                    action.setCheckable(True)
                 self.actions[key] = action
             splitter = QSplitter()
+            self.editor_splitter = splitter
             objects = QWidget()
+            self.object_panel = objects
+            objects.setMinimumWidth(140)
+            objects.setMaximumWidth(240)
             objects.setStyleSheet('background: white; color: #0f172a;')
             object_layout = QVBoxLayout(objects)
             object_layout.addWidget(QLabel('PAGE OBJECTS'))
@@ -192,8 +264,34 @@ def create_window_class():
             splitter.addWidget(objects)
             self.view = MapView(self)
             self.view.setBackgroundBrush(QColor('#e2e8f0'))
-            splitter.addWidget(self.view)
+            self.view.setMinimumSize(400, 300)
+            self.view.setFocusPolicy(Qt.StrongFocus)
+            canvas = QWidget()
+            canvas_layout = QVBoxLayout(canvas)
+            canvas_layout.setContentsMargins(0, 0, 0, 0)
+            navigation = QHBoxLayout()
+            self.canvas_buttons = {}
+            for key, label, handler in (
+                ('out', '-', lambda: self.zoom_page(1 / 1.2)),
+                ('in', '+', lambda: self.zoom_page(1.2)),
+                ('fit', 'Fit Page', self.fit_page),
+                ('width', 'Fit Width', self.fit_page_width),
+                ('actual', '100%', self.actual_page_size),
+                ('focus_canvas', 'Focus Canvas', self.toggle_canvas_focus),
+            ):
+                button = QPushButton(label)
+                if key == 'focus_canvas':
+                    button.setCheckable(True)
+                button.clicked.connect(handler)
+                navigation.addWidget(button)
+                self.canvas_buttons[key] = button
+            navigation.addStretch()
+            canvas_layout.addLayout(navigation)
+            canvas_layout.addWidget(QLabel('Ctrl+wheel: canvas zoom | Middle/Space-drag: pan canvas'))
+            canvas_layout.addWidget(self.view, 1)
+            splitter.addWidget(canvas)
             self.tabs = QTabWidget()
+            self.tabs.setMinimumWidth(300)
             tab_layouts = []
             for title in ('Map', 'Text', 'Style', 'Page'):
                 scroll = QScrollArea()
@@ -203,10 +301,14 @@ def create_window_class():
                 scroll.setWidget(controls)
                 self.tabs.addTab(scroll, title)
             panel = tab_layouts[0]
-            panel.addWidget(QLabel('Drag a map to pan; scroll to zoom its contents.'))
+            map_hint = QLabel('Drag/wheel over a map edits its contents. Ctrl+wheel zooms the canvas.')
+            map_hint.setWordWrap(True)
+            panel.addWidget(map_hint)
 
             maps = QGroupBox('Map framing')
             form = QFormLayout(maps)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             self.map_choice = QComboBox()
             self.map_choice.addItems(['Main Map', 'Upper Inset', 'Lower Inset'])
             self.map_choice.currentIndexChanged.connect(self.select_map)
@@ -214,24 +316,21 @@ def create_window_class():
             self.scale = QDoubleSpinBox()
             self.scale.setRange(1, 1e10)
             self.scale.setDecimals(2)
-            scale_row = QWidget()
-            scale_layout = QHBoxLayout(scale_row)
-            scale_layout.setContentsMargins(0, 0, 0, 0)
-            scale_layout.addWidget(self.scale)
+            form.addRow('Scale', self.scale)
             apply_scale = QPushButton('Apply 1:scale')
             apply_scale.clicked.connect(lambda: self.perform(lambda: self.session.set_scale(self.map_id(), self.scale.value())))
-            scale_layout.addWidget(apply_scale)
-            form.addRow('Scale', scale_row)
+            form.addRow(apply_scale)
             buttons = QWidget()
             row = QHBoxLayout(buttons)
+            row.setContentsMargins(0, 0, 0, 0)
             for text, factor in [('Zoom in', 1 / 1.2), ('Zoom out', 1.2)]:
                 button = QPushButton(text)
                 button.clicked.connect(lambda _checked=False, f=factor: self.perform(lambda: self.session.zoom(self.map_id(), f)))
                 row.addWidget(button)
             reset = QPushButton('Reset map')
             reset.clicked.connect(lambda: self.perform(lambda: self.session.reset_map(self.map_id())))
-            row.addWidget(reset)
             form.addRow(buttons)
+            form.addRow(reset)
             self.bounds = QLineEdit()
             self.bounds.setPlaceholderText('min_lon,min_lat,max_lon,max_lat')
             form.addRow('WGS 84 bounds', self.bounds)
@@ -277,6 +376,8 @@ def create_window_class():
             panel = tab_layouts[1]
             labels = QGroupBox('Text — updates as you type')
             form = QFormLayout(labels)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             self.text_choice = QComboBox()
             self.text_choice.addItems(['Title', 'Location', 'Upper inset label', 'Lower inset label', 'Disclaimer'])
             self.text_choice.currentIndexChanged.connect(self.select_text)
@@ -305,6 +406,8 @@ def create_window_class():
             self.style_controls = {}
             styling = QGroupBox('Selected map style')
             form = QFormLayout(styling)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             for key, title, low, high, step in (
                 ('basemap_opacity', 'Basemap opacity (%)', 0, 100, 5),
                 ('boundary_opacity', 'Boundary opacity (%)', 0, 100, 5),
@@ -328,6 +431,8 @@ def create_window_class():
             panel.addWidget(styling)
             grid = QGroupBox('Main-map coordinates and grid')
             form = QFormLayout(grid)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             self.grid_lines, self.grid_labels = QCheckBox('Show grid lines'), QCheckBox('Show coordinate labels')
             for control in (self.grid_lines, self.grid_labels):
                 control.toggled.connect(self.change_grid_style)
@@ -351,6 +456,8 @@ def create_window_class():
             panel = tab_layouts[3]
             output = QGroupBox('Page and export')
             form = QFormLayout(output)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             self.paper = QComboBox()
             self.paper.addItems(['A3', 'A4'])
             self.paper.currentTextChanged.connect(self.change_paper)
@@ -385,9 +492,17 @@ def create_window_class():
                 panel.addWidget(action)
                 self.actions['output_' + kind] = action
             panel.addStretch()
+            # Long preset/font names must not force a scroll tab wider than its
+            # viewport. Keep a useful field hint and let forms wrap narrow rows.
+            for choice in (self.map_choice, self.overlay, self.overview_crs,
+                           self.preset_choice, self.text_choice, self.font_family, self.paper):
+                choice.setMinimumContentsLength(12)
+                choice.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
             splitter.addWidget(self.tabs)
+            splitter.setStretchFactor(0, 0)
             splitter.setStretchFactor(1, 1)
-            splitter.setSizes([200, 900, 400])
+            splitter.setStretchFactor(2, 0)
+            splitter.setSizes([170, 1100, 400])
             self.pages = QTabWidget()
             self.generator = create_generator_page(self)
             self.pages.addTab(self.generator.container, 'Generate Map')
@@ -454,15 +569,53 @@ def create_window_class():
             self.view.viewport().update()
             self.update_state()
 
-        def zoom_page(self, factor):
+        def zoom_page(self, factor, *, anchor=None):
+            if not self.session or not math.isfinite(factor) or factor <= 0:
+                return
+            current = self.view.transform().m11()
+            if not math.isfinite(current) or current <= 0:
+                return
+            target = max(0.1, min(50.0, current * factor))
+            factor = target / current
+            if factor == 1.0:
+                return
+            self.view.flush_pan()
+            self.view.cancel_drag()
+            before = self.view.mapToScene(anchor) if anchor is not None else None
+            self.view.scale(factor, factor)
+            if before is not None:
+                after = self.view.mapToScene(anchor)
+                center = self.view.mapToScene(self.view.viewport().rect().center())
+                self.view.centerOn(center.x() + before.x() - after.x(), center.y() + before.y() - after.y())
+            self.view.emitZoomLevelChanged()
+            self.view.viewport().update()
+
+        def fit_page_width(self):
             if self.session:
-                self.view.scale(factor, factor)
-                self.view.viewport().update()
+                self.view.cancel_drag()
+                self.view.zoomWidth()
+
+        def actual_page_size(self):
+            if self.session:
+                self.view.cancel_drag()
+                self.view.zoomActual()
+
+        def toggle_canvas_focus(self, *_args):
+            if not self.session:
+                return
+            self.canvas_focus = not self.canvas_focus
+            self.object_panel.setVisible(not self.canvas_focus)
+            self.tabs.setVisible(not self.canvas_focus)
+            self.actions['focus_canvas'].setChecked(self.canvas_focus)
+            self.canvas_buttons['focus_canvas'].setChecked(self.canvas_focus)
+            QTimer.singleShot(0, self.fit_page)
 
         def update_actions(self):
             active = self.session is not None
-            for key in ('save', 'save_as', 'import', 'fit'):
+            for key in ('save', 'save_as', 'import', 'fit', 'canvas_in', 'canvas_out', 'focus_canvas'):
                 self.actions[key].setEnabled(active)
+            for button in self.canvas_buttons.values():
+                button.setEnabled(active)
             grouped_edit = (self.history is not None and self.history.group_start is not None
                             and self.history.group_start != self.history.current)
             self.actions['undo'].setEnabled(active and self.history is not None
@@ -677,7 +830,13 @@ def create_window_class():
 
         def fit_page(self):
             if self.session:
-                self.view.zoomFull()
+                self.view.cancel_drag()
+                page = self.session.ctx.layout.pageCollection().page(0)
+                if page is not None:
+                    self.view.fitInView(page.sceneBoundingRect().adjusted(-4, -4, 4, 4), Qt.KeepAspectRatio)
+                    self.view.emitZoomLevelChanged()
+                else:
+                    self.view.zoomFull()
 
         def refresh_controls(self, *_args):
             if not self.session:

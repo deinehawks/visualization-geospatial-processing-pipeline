@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
+from urllib.parse import parse_qsl, urlencode
 
 import pytest
 
@@ -31,6 +32,232 @@ def _load_exporter_module(monkeypatch):
     monkeypatch.setitem(sys.modules, module_name, module)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def native_tile_fakes(monkeypatch):
+    """Exercise URI editing and private layer ownership without Qt or networking."""
+    class Uri:
+        def __init__(self):
+            self.values = []
+
+        def setEncodedUri(self, source):
+            self.values = parse_qsl(source, keep_blank_values=True)
+
+        def param(self, key):
+            return next(iter(self.params(key)), '')
+
+        def params(self, key):
+            return [value for name, value in self.values if name == key]
+
+        def removeParam(self, key):
+            self.values = [(name, value) for name, value in self.values if name != key]
+
+        def setParam(self, key, value):
+            self.values.append((key, value))
+
+        def encodedUri(self):
+            return urlencode(self.values).encode('utf-8')
+
+    class Layer:
+        def __init__(self, source, *, opacity=0.65, provider='wms', valid=True):
+            self._source, self._opacity, self._provider = source, opacity, provider
+            self.valid = valid
+            self.clones, self.source_updates = [], []
+
+        def source(self):
+            return self._source
+
+        def providerType(self):
+            return self._provider
+
+        def name(self):
+            return 'Test basemap'
+
+        def opacity(self):
+            return self._opacity
+
+        def setOpacity(self, value):
+            self._opacity = value
+
+        def clone(self):
+            candidate = Layer(self._source, opacity=self._opacity, provider=self._provider, valid=self.valid)
+            self.clones.append(candidate)
+            return candidate
+
+        def setDataSource(self, source, name, provider):
+            self.source_updates.append((source, name, provider))
+            self._source, self._provider, self._opacity = source, provider, 1.0
+
+        def isValid(self):
+            return self.valid
+
+    core = ModuleType('qgis.core')
+    core.QgsDataSourceUri = Uri
+    monkeypatch.setitem(sys.modules, 'qgis.core', core)
+    return SimpleNamespace(Uri=Uri, Layer=Layer, core=core)
+
+
+@pytest.mark.parametrize(('suffix', 'ratio_values', 'expected'), (
+    ('.png', [], '1'), ('@2x.png', [], '2'),
+    ('.png', ['0'], '1'), ('@2x.png', ['0'], '2'),
+    ('.png', ['bad'], '1'), ('.png', ['2'], '2'),
+    ('.png', ['0', '0'], '1'),
+))
+def test_inset_native_dpi_uses_private_layer_and_preserves_source_parameters(
+    monkeypatch, native_tile_fakes, suffix, ratio_values, expected,
+):
+    exporter = _load_exporter_module(monkeypatch)
+    url = 'https://tiles.invalid/{z}/{x}/{y}' + suffix + '?key=fake-token&style=light'
+    values = [('type', 'xyz'), ('url', url), ('zmin', '1'), ('zmax', '18'),
+              ('http-header:referer', 'https://example.invalid/editor')]
+    values.extend(('tilePixelRatio', ratio) for ratio in ratio_values)
+    original = native_tile_fakes.Layer(urlencode(values))
+    ctx = SimpleNamespace(basemap_layer=original, project=Mock())
+    candidate = exporter._inset_basemap_with_native_dpi(ctx, 'map_inset')
+    parsed = native_tile_fakes.Uri()
+    parsed.setEncodedUri(candidate.source())
+    assert parsed.params('tilePixelRatio') == [expected]
+    assert parsed.param('url') == url and parsed.param('zmax') == '18'
+    assert parsed.param('http-header:referer') == 'https://example.invalid/editor'
+    assert candidate.opacity() == original.opacity() == 0.65
+    assert original.source() == urlencode(values) and original.source_updates == []
+    assert ctx.basemap_layer is original
+    assert ctx.inset_tile_scaling['map_inset'] == {
+        'mode': 'native_dpi', 'tile_pixel_ratio': int(expected), 'source_dpi': 96 * int(expected),
+    }
+    if ratio_values == [expected]:
+        assert candidate is original and not original.clones
+        ctx.project.addMapLayer.assert_not_called()
+    else:
+        assert candidate is not original and ctx.frame_basemaps['map_inset'] is candidate
+        ctx.project.addMapLayer.assert_called_once_with(candidate, False)
+    assert exporter._inset_basemap_with_native_dpi(ctx, 'map_inset') is candidate
+    assert len(original.clones) <= 1
+
+
+@pytest.mark.parametrize('kind', ['absent', 'gdal', 'wms'])
+def test_inset_native_dpi_does_not_reconfigure_other_sources(monkeypatch, native_tile_fakes, kind):
+    exporter = _load_exporter_module(monkeypatch)
+    layer = None if kind == 'absent' else native_tile_fakes.Layer('url=https://example.invalid/wms', provider=kind)
+    ctx = SimpleNamespace(basemap_layer=layer, project=Mock())
+    assert exporter._inset_basemap_with_native_dpi(ctx, 'map_inset') is layer
+    ctx.project.addMapLayer.assert_not_called()
+    assert not hasattr(ctx, 'inset_tile_scaling')
+    if layer is not None:
+        assert not layer.clones and not layer.source_updates
+
+
+def test_inset_normalization_failure_preserves_layers_and_does_not_log_uri(monkeypatch, native_tile_fakes, capsys):
+    exporter = _load_exporter_module(monkeypatch)
+    layer = native_tile_fakes.Layer(urlencode({'type': 'xyz', 'url': 'https://tiles.invalid/?key=fake-token'}), valid=False)
+    bases = {'map_inset': layer}
+    ctx = SimpleNamespace(basemap_layer=layer, frame_basemaps=bases, project=Mock())
+    with pytest.raises(RuntimeError, match='normalize inset basemap: map_inset') as error:
+        exporter._inset_basemap_with_native_dpi(ctx, 'map_inset')
+    assert ctx.frame_basemaps == bases and ctx.basemap_layer is layer
+    assert layer.source_updates == [] and not hasattr(ctx, 'inset_tile_scaling')
+    ctx.project.addMapLayer.assert_not_called()
+    assert 'fake-token' not in str(error.value) + capsys.readouterr().out
+
+
+@pytest.mark.parametrize('live', [True, False])
+@pytest.mark.parametrize('private_frames', [True, False])
+def test_both_insets_normalize_without_changing_bounds_styles_crs_or_dpi(
+    monkeypatch, native_tile_fakes, tmp_path, live, private_frames,
+):
+    from modules.map_export.editor_model import validate_options, validate_map_styles
+    exporter = _load_exporter_module(monkeypatch)
+    source = urlencode({'type': 'xyz', 'url': 'https://tiles.invalid/{z}/{x}/{y}.png'})
+    main = native_tile_fakes.Layer(source)
+    upper, lower = native_tile_fakes.Layer(source, opacity=0.4), native_tile_fakes.Layer(source, opacity=0.8)
+    configure = Mock(side_effect=[object(), object()])
+    monkeypatch.setattr(exporter, '_configure_inset_map', configure)
+    states = {'map_inset': object(), 'map_inset_2': object()}
+    monkeypatch.setattr(exporter, '_saved_map_extent', lambda ctx, key, **kw: states[key])
+    make_crs = lambda value: SimpleNamespace(authid=lambda: value)
+    options = validate_options({'inset_dpi': 800, 'pdf_dpi': 450, 'preview_dpi': 300,
+                                'boundary_crs': 'EPSG:4326', 'overview_crs': 'EPSG:4326'})
+    ctx = SimpleNamespace(
+        qgis=SimpleNamespace(QgsLayoutItemPicture=object, QgsCoordinateReferenceSystem=make_crs),
+        layout=object(), project=Mock(), package_dir=tmp_path, basemap_layer=main, merged_layer=object(),
+        target_crs=make_crs('EPSG:32651'), boundary_inset_bounds_wgs84={}, overview_bounds_wgs84={},
+        live_insets=live, render_options=options,
+    )
+    if private_frames:
+        ctx.frame_basemaps = {'map_frame': main, 'map_inset': upper, 'map_inset_2': lower}
+        ctx.map_styles = validate_map_styles({})
+        ctx.frame_overlays = {}
+    exporter._configure_insets(ctx)
+    for call, key, base in zip(configure.call_args_list, states, [upper, lower] if private_frames else [main, main]):
+        kwargs = call.kwargs
+        layer = kwargs['basemap_layer']
+        assert layer is ctx.frame_basemaps[key] and layer is not main
+        assert layer.opacity() == base.opacity()
+        assert kwargs['extent_override'] is states[key]
+        assert kwargs['target_crs'].authid() == 'EPSG:4326'
+        assert kwargs['live'] == live and kwargs['inset_dpi'] == 800
+        assert kwargs['overlay_style'] == (ctx.map_styles[key] if private_frames else None)
+    assert ctx.frame_basemaps['map_inset'] is not ctx.frame_basemaps['map_inset_2']
+    assert exporter._frame_basemap(ctx, 'map_frame') is main
+    assert main.source() == source and main.source_updates == []
+    assert ctx.render_options == options and options['pdf_dpi'] == 450 and options['preview_dpi'] == 300
+    assert set(ctx.inset_tile_scaling) == set(states)
+
+
+@pytest.mark.parametrize('output_dpi', [96, 300, 450, 800])
+@pytest.mark.parametrize('ratio', [1, 2])
+def test_native_tile_resolution_compensates_for_output_dpi(monkeypatch, native_tile_fakes, output_dpi, ratio):
+    exporter = _load_exporter_module(monkeypatch)
+    suffix = '@2x.png' if ratio == 2 else '.png'
+    layer = native_tile_fakes.Layer(urlencode({'type': 'xyz', 'url': 'https://tiles.invalid/{z}/{x}/{y}' + suffix}))
+    ctx = SimpleNamespace(basemap_layer=layer, project=Mock())
+    exporter._inset_basemap_with_native_dpi(ctx, 'map_inset')
+    # QGIS 3.34 provider draw(): physical extent/pixels * output DPI/source DPI.
+    span, width_mm = 10000, 100
+    pixel_width = width_mm * output_dpi / 25.4
+    tile_resolution = span / pixel_width * output_dpi / ctx.inset_tile_scaling['map_inset']['source_dpi']
+    reference = span / (width_mm * 96 / 25.4) / ratio
+    assert tile_resolution == pytest.approx(reference)
+
+
+@pytest.mark.parametrize('dpi', [300, 800])
+def test_inset_background_export_keeps_selected_dpi_and_normalized_layer(monkeypatch, native_tile_fakes, dpi):
+    exporter = _load_exporter_module(monkeypatch)
+    source = urlencode({'type': 'xyz', 'url': 'https://tiles.invalid/{z}/{x}/{y}.png'})
+    ctx = SimpleNamespace(basemap_layer=native_tile_fakes.Layer(source), project=Mock())
+    layer = exporter._inset_basemap_with_native_dpi(ctx, 'map_inset')
+    layout, item, renderer = Mock(), Mock(), Mock()
+    core = native_tile_fakes.core
+    core.QgsPrintLayout = Mock(return_value=layout)
+    core.QgsLayoutItemMap = Mock(return_value=item)
+    core.QgsLayoutPoint, core.QgsLayoutSize = Mock(), Mock()
+    core.QgsUnitTypes = SimpleNamespace(LayoutMillimeters='mm')
+
+    class LayoutExporter:
+        Success = 0
+        ImageExportSettings = SimpleNamespace
+
+        def __new__(cls, value):
+            assert value is layout
+            return renderer
+
+    core.QgsLayoutExporter = LayoutExporter
+    run_export = Mock(side_effect=lambda **kw: kw['export_callable']('fake-image-output'))
+    monkeypatch.setattr(exporter, '_run_layout_export', run_export)
+    output, extent, crs = Mock(), object(), object()
+    exporter._render_inset_basemap_image(
+        project=ctx.project, basemap_layer=layer, target_crs=crs, extent=extent,
+        output_path=output, width_mm=100, height_mm=60, dpi=dpi,
+    )
+    # output is a fake boundary: no real deletion, image file, or GIS execution.
+    output.unlink.assert_called_once_with(missing_ok=True)
+    item.setLayers.assert_called_once_with([layer])
+    item.zoomToExtent.assert_called_once_with(extent)
+    item.setCrs.assert_called_once_with(crs)
+    settings = renderer.exportToImage.call_args.args[1]
+    assert settings.dpi == dpi
+    assert ctx.inset_tile_scaling['map_inset']['source_dpi'] == 96
 
 
 def test_export_builds_crs_dependent_layout_text_after_crs_is_computed(
@@ -185,7 +412,7 @@ def test_boundary_inset_uses_buffer_or_fixed_bounds(
         layout=layout,
         project=object(),
         package_dir=tmp_path,
-        basemap_layer=object(),
+        basemap_layer=SimpleNamespace(providerType=lambda: 'gdal'),
         boundary_layer=object(),
         target_crs=object(),
         QgsLayoutItemPicture=object,
@@ -338,7 +565,7 @@ def test_configure_insets_uses_independent_bounds_and_zoom(
         layout=object(),
         project=object(),
         package_dir=Path('unused'),
-        basemap_layer=object(),
+        basemap_layer=SimpleNamespace(providerType=lambda: 'gdal'),
         merged_layer=object(),
         target_crs=object(),
         overview_bounds_wgs84=configured_bounds,
@@ -392,7 +619,7 @@ def test_upper_inset_batch_marker_is_configurable_and_recorded(monkeypatch, conf
     ctx = SimpleNamespace(
         qgis=SimpleNamespace(QgsLayoutItemPicture=object, QgsCoordinateReferenceSystem=object),
         layout=object(), project=object(), package_dir=Path('unused'),
-        basemap_layer=object(), merged_layer=object(), target_crs=object(),
+        basemap_layer=SimpleNamespace(providerType=lambda: 'gdal'), merged_layer=object(), target_crs=object(),
         overview_bounds_wgs84={}, boundary_inset_bounds_wgs84=None, live_insets=live,
         paper_size='A3', selected_map_scale=2500, scale_mode='manual',
     )
@@ -428,7 +655,7 @@ def test_only_lower_inset_receives_selected_crs(monkeypatch, live, configured):
     ctx = SimpleNamespace(
         qgis=SimpleNamespace(QgsLayoutItemPicture=object, QgsCoordinateReferenceSystem=make_crs),
         layout=object(), project=object(), package_dir=Path('unused'),
-        basemap_layer=object(), merged_layer=object(), target_crs=target,
+        basemap_layer=SimpleNamespace(providerType=lambda: 'gdal'), merged_layer=object(), target_crs=target,
         overview_bounds_wgs84={}, boundary_inset_bounds_wgs84=None,
         render_options=validate_options({'overview_crs': configured}), live_insets=live,
     )
@@ -1158,6 +1385,7 @@ def test_print_metadata_records_scale_decision_and_grid_interval(monkeypatch):
         paper_size='A3',
         dpi=400,
         logo_path=None,
+        inset_tile_scaling={'map_inset': {'mode': 'native_dpi', 'tile_pixel_ratio': 1, 'source_dpi': 96}},
     )
 
     metadata = exporter._build_print_layout_metadata(
@@ -1173,3 +1401,4 @@ def test_print_metadata_records_scale_decision_and_grid_interval(monkeypatch):
     assert metadata['extent_source'] == 'orthomosaic'
     assert metadata['grid_interval_degrees'] == 0.001
     assert metadata['paper_size'] == 'A3'
+    assert metadata['inset_tile_scaling'] == ctx.inset_tile_scaling

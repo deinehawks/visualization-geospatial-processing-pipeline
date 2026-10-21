@@ -32,7 +32,7 @@ def main(argv=None):
     app.initQgis()
     from modules.map_export.editor_window import create_window_class
     window = create_window_class()()
-    window.show()
+    window.showMaximized()
     try:
         if args.design:
             from modules.map_export.editor_model import load_design

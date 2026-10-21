@@ -6,6 +6,7 @@ from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Callable
+from urllib.parse import urlsplit
 import json, math, os, time
 from osgeo import gdal
 
@@ -710,7 +711,7 @@ def _configure_insets(ctx: ExportContext) -> None:
         layout=ctx.layout,
         project=ctx.project,
         package_dir=getattr(ctx, 'output_dir', ctx.package_dir),
-        basemap_layer=_frame_basemap(ctx, 'map_inset'),
+        basemap_layer=_inset_basemap_with_native_dpi(ctx, 'map_inset'),
         boundary_layer=ctx.merged_layer,
         target_crs=upper_crs,
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
@@ -738,7 +739,7 @@ def _configure_insets(ctx: ExportContext) -> None:
         layout=ctx.layout,
         project=ctx.project,
         package_dir=getattr(ctx, 'output_dir', ctx.package_dir),
-        basemap_layer=_frame_basemap(ctx, 'map_inset_2'),
+        basemap_layer=_inset_basemap_with_native_dpi(ctx, 'map_inset_2'),
         boundary_layer=ctx.merged_layer,
         target_crs=overview_crs,
         QgsLayoutItemPicture=q.QgsLayoutItemPicture,
@@ -780,6 +781,7 @@ def _build_print_layout_metadata(
         'dpi': ctx.dpi,
         'logo': str(ctx.logo_path) if ctx.logo_path else None,
         'render_options': _resolved_render_options(ctx),
+        'inset_tile_scaling': getattr(ctx, 'inset_tile_scaling', {}),
     }
 
 
@@ -1875,7 +1877,49 @@ def _frame_style(ctx, key):
 
 def _frame_basemap(ctx, key):
     layers = getattr(ctx, 'frame_basemaps', None)
-    return layers[key] if layers is not None else ctx.basemap_layer
+    if layers is not None and key in layers:
+        return layers[key]
+    return ctx.basemap_layer
+
+
+def _inset_basemap_with_native_dpi(ctx, key):
+    """Normalize private XYZ inset layers without changing geography/output DPI.
+
+    QGIS 3.34 scales tiled requests by output DPI only when tilePixelRatio is
+    known. An undefined ratio selects finer zooms at print DPI and shrinks text.
+    """
+    layer = _frame_basemap(ctx, key)
+    if layer is None or layer.providerType() != 'wms':
+        return layer
+
+    from qgis.core import QgsDataSourceUri
+
+    uri = QgsDataSourceUri()
+    uri.setEncodedUri(layer.source())
+    if uri.param('type').lower() != 'xyz':
+        return layer
+    ratio = uri.param('tilePixelRatio')
+    if ratio not in ('1', '2'):
+        ratio = '2' if '@2x' in urlsplit(uri.param('url')).path else '1'
+
+    if uri.params('tilePixelRatio') != [ratio]:
+        uri.removeParam('tilePixelRatio')  # setParam appends; never leave duplicates.
+        uri.setParam('tilePixelRatio', ratio)
+        candidate = layer.clone()
+        candidate.setDataSource(bytes(uri.encodedUri()).decode('utf-8'), layer.name(), 'wms')
+        if not candidate.isValid():
+            raise RuntimeError(f'Failed to normalize inset basemap: {key}')
+        candidate.setOpacity(layer.opacity())
+        ctx.project.addMapLayer(candidate, False)
+        ctx.frame_basemaps = dict(getattr(ctx, 'frame_basemaps', None) or {})
+        ctx.frame_basemaps[key] = candidate
+        layer = candidate
+
+    settings = {'mode': 'native_dpi', 'tile_pixel_ratio': int(ratio), 'source_dpi': 96 * int(ratio)}
+    ctx.inset_tile_scaling = dict(getattr(ctx, 'inset_tile_scaling', None) or {})
+    ctx.inset_tile_scaling[key] = settings
+    print(f'Inset {key}: native XYZ tile scaling ({settings["source_dpi"]} source DPI)', flush=True)
+    return layer
 
 
 def _apply_boundary_style(layer, style):

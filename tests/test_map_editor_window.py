@@ -14,8 +14,11 @@ from modules.map_export.editor_window import create_window_class
 def window(monkeypatch, tmp_path):
     import modules.map_export.editor_generator_page as generator_page
     monkeypatch.setattr(generator_page, 'REPO_ROOT', tmp_path)
+    created_widgets = []
     class Widget:
         def __init__(self, *_args):
+            self.arguments = _args
+            created_widgets.append(self)
             self.currentIndex = Mock(return_value=0)
             self.setCurrentIndex = Mock(side_effect=lambda value: setattr(self.currentIndex, 'return_value', value))
             self.isActive = Mock(return_value=False)
@@ -26,6 +29,7 @@ def window(monkeypatch, tmp_path):
             self.setCurrentRow = Mock(side_effect=lambda value: setattr(self.currentRow, 'return_value', value))
             self.toPlainText = Mock(return_value='')
             self.text = Mock(return_value='')
+            self.transform = Mock(return_value=SimpleNamespace(m11=Mock(return_value=1.0)))
         def __getattr__(self, key):
             value = Mock()
             setattr(self, key, value)
@@ -34,6 +38,13 @@ def window(monkeypatch, tmp_path):
         def drawForeground(self, *_args):
             pass
 
+        def focusOutEvent(self, *_args):
+            pass
+
+    class FormLayout(Widget):
+        WrapLongRows = 1
+        AllNonFixedFieldsGrow = 2
+
     widgets = ModuleType('qgis.PyQt.QtWidgets')
     for name in ('QMainWindow', 'QWidget', 'QSplitter', 'QVBoxLayout', 'QFormLayout',
                  'QHBoxLayout', 'QPushButton', 'QComboBox', 'QDoubleSpinBox', 'QSpinBox',
@@ -41,12 +52,16 @@ def window(monkeypatch, tmp_path):
                  'QColorDialog', 'QFileDialog', 'QScrollArea', 'QGroupBox',
                  'QTabWidget', 'QListWidget', 'QProgressBar', 'QInputDialog'):
         setattr(widgets, name, Widget)
+    widgets.QFormLayout = FormLayout
+    widgets.QComboBox.AdjustToMinimumContentsLengthWithIcon = 3
     widgets.QMessageBox = SimpleNamespace(
         Save=1, Discard=2, Cancel=4, Yes=8, No=16, question=Mock(return_value=4),
         critical=Mock(), warning=Mock(),
     )
     core = ModuleType('qgis.PyQt.QtCore')
-    core.Qt = SimpleNamespace(LeftButton=1, NoBrush=0)
+    core.Qt = SimpleNamespace(LeftButton=1, MiddleButton=4, NoBrush=0, ControlModifier=0x04000000,
+                              Key_Space=32, ArrowCursor=0, OpenHandCursor=17, ClosedHandCursor=18,
+                              StrongFocus=11, KeepAspectRatio=1)
     core.QUrl = SimpleNamespace(fromLocalFile=Mock())
     core.QTimer = Widget
     core.QTimer.singleShot = Mock()
@@ -66,6 +81,8 @@ def window(monkeypatch, tmp_path):
     result = create_window_class()()
     result.qt_messages = widgets.QMessageBox
     result.qt_process_environment = core.QProcessEnvironment.systemEnvironment.return_value
+    result.qt_forms = [widget for widget in created_widgets if isinstance(widget, FormLayout)]
+    result.qt_widgets = created_widgets
     return result
 
 
@@ -97,6 +114,7 @@ def test_mouse_wheel_zooms_selected_map_without_moving_frames(window):
     window.session._map.return_value.sceneBoundingRect.return_value.contains.return_value = True
     event = Mock()
     event.angleDelta.return_value.y.return_value = 120
+    event.modifiers.return_value = 0
     window.view.wheelEvent(event)
     window.session.zoom.assert_called_once_with('map_inset', 1 / 1.2)
     assert window.dirty
@@ -248,9 +266,237 @@ def test_page_zoom_and_fit_never_change_map_extent_or_dirty_state(window):
     window.zoom_page(1.2)
     window.fit_page()
     window.view.scale.assert_called_once_with(1.2, 1.2)
-    window.view.zoomFull.assert_called_once_with()
+    window.view.fitInView.assert_called_once_with(
+        window.session.ctx.layout.pageCollection().page(0).sceneBoundingRect().adjusted(-4, -4, 4, 4),
+        sys.modules['qgis.PyQt.QtCore'].Qt.KeepAspectRatio)
     window.session.set_extent.assert_not_called()
     assert not window.dirty
+
+
+def point(x, y):
+    return SimpleNamespace(x=lambda: x, y=lambda: y)
+
+
+@pytest.mark.parametrize('gesture', ['control', 'blank', 'space'])
+def test_canvas_wheel_zoom_never_edits_maps_or_selection(window, tmp_path, gesture):
+    history_session(window, tmp_path)
+    window.hit_item = Mock(return_value=None if gesture == 'blank' else 'map_inset')
+    window.zoom_page = Mock()
+    window.view.space_down = gesture == 'space'
+    event = Mock()
+    event.modifiers.return_value = 0x04000000 if gesture == 'control' else 0
+    event.angleDelta.return_value.y.return_value = 120
+    window.view.wheelEvent(event)
+    window.zoom_page.assert_called_once_with(1.2, anchor=event.pos())
+    window.session.zoom.assert_not_called()
+    window.session.pan.assert_not_called()
+    assert not window.dirty and window.selected_id == 'map_frame'
+    assert not window.history.undo_steps
+
+
+def test_canvas_zoom_keeps_scene_point_under_pointer(window, tmp_path):
+    history_session(window, tmp_path)
+    window.view.mapToScene.side_effect = [point(25, 40), point(20, 35), point(100, 80)]
+    anchor = object()
+    window.zoom_page(1.2, anchor=anchor)
+    window.view.scale.assert_called_once_with(1.2, 1.2)
+    window.view.centerOn.assert_called_once_with(105, 85)
+    window.view.emitZoomLevelChanged.assert_called_once()
+    assert not window.dirty and not window.history.undo_steps
+    window.session.zoom.assert_not_called()
+    window.session.set_extent.assert_not_called()
+
+
+@pytest.mark.parametrize('factor', [0, -1, float('nan'), float('inf')])
+def test_canvas_zoom_ignores_invalid_factors(window, factor):
+    window.session = fake_session()
+    window.zoom_page(factor)
+    window.view.scale.assert_not_called()
+    assert not window.dirty
+
+
+@pytest.mark.parametrize(('current', 'factor', 'expected'), [(25, 4, 2), (0.2, 0.01, 0.5)])
+def test_canvas_zoom_is_bounded(window, current, factor, expected):
+    window.session = fake_session()
+    window.view.transform.return_value.m11.return_value = current
+    window.zoom_page(factor)
+    window.view.scale.assert_called_once_with(expected, expected)
+    window.session.zoom.assert_not_called()
+
+
+@pytest.mark.parametrize('pixel_delta', [0, 30])
+def test_canvas_wheel_supports_trackpad_and_ignores_zero_delta(window, pixel_delta):
+    window.session = fake_session()
+    window.hit_item = Mock(return_value=None)
+    window.zoom_page = Mock()
+    event = Mock()
+    event.angleDelta.return_value.y.return_value = 0
+    event.pixelDelta.return_value.y.return_value = pixel_delta
+    event.modifiers.return_value = 0
+    window.view.wheelEvent(event)
+    if pixel_delta:
+        window.zoom_page.assert_called_once_with(1.2 ** 0.25, anchor=event.pos())
+    else:
+        window.zoom_page.assert_not_called()
+    window.session.zoom.assert_not_called()
+    event.accept.assert_called_once()
+
+
+@pytest.mark.parametrize('space_drag', [False, True])
+def test_canvas_hand_drag_pans_scrollbars_not_map_contents(window, tmp_path, space_drag):
+    history_session(window, tmp_path)
+    window.hit_item = Mock()
+    window.view.space_down = space_drag
+    window.view.horizontalScrollBar.return_value.value.return_value = 100
+    window.view.verticalScrollBar.return_value.value.return_value = 200
+    press, move, release = Mock(), Mock(), Mock()
+    press.button.return_value = release.button.return_value = 1 if space_drag else 4
+    press.pos.return_value = point(10, 20)
+    move.pos.return_value = point(30, 50)
+    window.view.mousePressEvent(press)
+    window.view.mouseMoveEvent(move)
+    window.view.mouseReleaseEvent(release)
+    window.view.horizontalScrollBar.return_value.setValue.assert_called_once_with(80)
+    window.view.verticalScrollBar.return_value.setValue.assert_called_once_with(170)
+    assert window.view.canvas_anchor is None and window.view.anchor is None
+    window.session.pan.assert_not_called()
+    window.hit_item.assert_not_called()
+    assert not window.dirty and not window.history.undo_steps
+
+
+def test_space_hand_mode_resets_on_release_and_focus_loss(window):
+    window.session = fake_session()
+    press, release = Mock(), Mock()
+    press.key.return_value = release.key.return_value = 32
+    release.isAutoRepeat.return_value = True
+    window.view.keyPressEvent(press)
+    assert window.view.space_down
+    window.view.keyReleaseEvent(release)
+    assert window.view.space_down  # Auto-repeat must not end a held space gesture.
+    release.isAutoRepeat.return_value = False
+    window.view.keyReleaseEvent(release)
+    assert not window.view.space_down
+    window.view.keyPressEvent(press)
+    window.view.canvas_anchor = point(1, 2)
+    window.view.focusOutEvent(Mock())
+    assert not window.view.space_down and window.view.canvas_anchor is None
+    window.view.setCursor.assert_called_with(0)
+
+
+def test_canvas_focus_toggle_restores_panels_and_refits_only_view(window, tmp_path):
+    history_session(window, tmp_path)
+    window.toggle_canvas_focus()
+    assert window.canvas_focus
+    window.object_panel.setVisible.assert_called_with(False)
+    window.tabs.setVisible.assert_called_with(False)
+    window.actions['focus_canvas'].setChecked.assert_called_with(True)
+    callback = sys.modules['qgis.PyQt.QtCore'].QTimer.singleShot.call_args.args[1]
+    callback()
+    window.view.fitInView.assert_called_once()
+    window.toggle_canvas_focus()
+    assert not window.canvas_focus
+    window.object_panel.setVisible.assert_called_with(True)
+    window.tabs.setVisible.assert_called_with(True)
+    window.canvas_buttons['focus_canvas'].setChecked.assert_called_with(False)
+    assert not window.dirty and not window.history.undo_steps
+    window.session.set_extent.assert_not_called()
+
+
+def test_canvas_controls_are_visible_and_disabled_without_a_design(window):
+    assert set(window.canvas_buttons) == {'in', 'out', 'fit', 'width', 'actual', 'focus_canvas'}
+    for button in window.canvas_buttons.values():
+        button.setEnabled.assert_called_with(False)
+    window.actions['canvas_in'].setShortcuts.assert_called_with(['Ctrl+=', 'Ctrl++'])
+    window.actions['canvas_out'].setShortcut.assert_called_with('Ctrl+-')
+    window.actions['focus_canvas'].setShortcut.assert_called_with('F11')
+    window.editor_splitter.setSizes.assert_called_once_with([170, 1100, 400])
+    window.tabs.setMinimumWidth.assert_called_once_with(300)
+    window.tabs.setMaximumWidth.assert_not_called()
+    window.session = fake_session()
+    window.update_actions()
+    for button in window.canvas_buttons.values():
+        button.setEnabled.assert_called_with(True)
+
+
+@pytest.mark.parametrize('group', ['Map framing', 'Text — updates as you type',
+                                  'Selected map style', 'Main-map coordinates and grid',
+                                  'Page and export'])
+def test_property_forms_wrap_fields_in_narrow_sidebar(window, group):
+    form, = [form for form in window.qt_forms
+             if form.arguments and form.arguments[0].arguments == (group,)]
+    form.setRowWrapPolicy.assert_called_once_with(form.WrapLongRows)
+    form.setFieldGrowthPolicy.assert_called_once_with(form.AllNonFixedFieldsGrow)
+
+
+@pytest.mark.parametrize('field', ['map_choice', 'overlay', 'overview_crs', 'preset_choice',
+                                  'text_choice', 'font_family', 'paper'])
+def test_long_choice_names_do_not_force_sidebar_width(window, field):
+    choice = getattr(window, field)
+    choice.setMinimumContentsLength.assert_called_once_with(12)
+    choice.setSizeAdjustPolicy.assert_called_once_with(3)
+
+
+def test_sidebar_hint_wraps_instead_of_widening_scroll_contents(window):
+    hint, = [widget for widget in window.qt_widgets if widget.arguments == (
+        'Drag/wheel over a map edits its contents. Ctrl+wheel zooms the canvas.',)]
+    hint.setWordWrap.assert_called_once_with(True)
+
+
+def test_full_width_map_buttons_keep_original_actions(window):
+    form, = [form for form in window.qt_forms
+             if form.arguments and form.arguments[0].arguments == ('Map framing',)]
+    window.session = fake_session()
+    window.perform = Mock(side_effect=lambda action: action())
+    window.map_choice.currentIndex.return_value = 1
+    window.scale.value.return_value = 2500
+    assert ('Scale', window.scale) in [call.args for call in form.addRow.call_args_list]
+    for label in ('Apply 1:scale', 'Reset map'):
+        button, = [widget for widget in window.qt_widgets if widget.arguments == (label,)]
+        assert (button,) in [call.args for call in form.addRow.call_args_list]
+        button.clicked.connect.call_args.args[0]()
+    window.session.set_scale.assert_called_once_with('map_inset', 2500)
+    window.session.reset_map.assert_called_once_with('map_inset')
+    assert window.perform.call_count == 2
+
+
+def test_canvas_width_actual_size_and_missing_page_fallback_are_view_only(window, tmp_path):
+    history_session(window, tmp_path)
+    window.fit_page_width()
+    window.actual_page_size()
+    window.view.zoomWidth.assert_called_once()
+    window.view.zoomActual.assert_called_once()
+    window.session.ctx.layout.pageCollection.return_value.page.return_value = None
+    window.fit_page()
+    window.view.zoomFull.assert_called_once()
+    assert not window.dirty and not window.history.undo_steps
+    window.session.set_extent.assert_not_called()
+
+
+@pytest.mark.parametrize('launch_input', ['none', 'package', 'design'])
+def test_editor_launches_maximized_and_retains_launch_inputs(window, tmp_path, monkeypatch, launch_input):
+    import map_editor
+    import modules.map_export.editor_model as model
+    import modules.map_export.editor_window as module
+    core = ModuleType('qgis.core')
+    application = Mock()
+    application.exec_.return_value = 0
+    core.QgsApplication = Mock(return_value=application)
+    monkeypatch.setitem(sys.modules, 'qgis.core', core)
+    monkeypatch.setenv('QGIS_PREFIX_PATH', str(tmp_path / 'fake-qgis'))
+    display = Mock()
+    monkeypatch.setattr(module, 'create_window_class', lambda: lambda: display)
+    loader = Mock(return_value=object())
+    monkeypatch.setattr(model, 'load_design', loader)
+    path = tmp_path / 'fake-input'
+    args = [] if launch_input == 'none' else ['--' + launch_input, str(path)]
+    assert map_editor.main(args) == 0
+    display.showMaximized.assert_called_once()
+    display.show.assert_not_called()
+    if launch_input == 'package':
+        display.load_package.assert_called_once_with(path)
+    elif launch_input == 'design':
+        display.install_design.assert_called_once_with(loader.return_value, path)
+    application.exitQgis.assert_called_once()
 
 
 def test_text_timer_groups_typing_into_one_undo_and_tracks_saved_state(window, tmp_path):
