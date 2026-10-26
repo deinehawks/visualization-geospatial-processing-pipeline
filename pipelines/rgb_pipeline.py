@@ -56,6 +56,11 @@ from shared.raw_input_recovery import (
     recover_missing_raw_inputs,
     validate_raw_input_recovery_request,
 )
+from shared.qgis_refresh import (
+    QGISRefreshError, acknowledge_refresh, reject_pending_refresh,
+    validate_refresh_request,
+)
+from pipelines.rgb_helpers.qgis_refresh import RGBQGISRefreshMixin
 from shared.raster_metadata import (
     build_raster_manifest_record,
     inspect_raster_metadata,
@@ -79,6 +84,7 @@ from typing import Any
 
 
 class RGBPipeline(
+    RGBQGISRefreshMixin,
     RGBTaskNamingMixin,
     RGBOrthomosaicSelectionMixin,
     RGBUploadCacheMixin,
@@ -4002,6 +4008,12 @@ class RGBPipeline(
         return target_folder
 
     def stage_qgis(self, *, resume: bool = False) -> Dict[str, Any]:
+        if getattr(self, '_qgis_refresh', None):
+            return self._stage_qgis_refresh()
+        try:
+            reject_pending_refresh(self.workspace_layout.root)
+        except QGISRefreshError as exc:
+            raise StageRequiresRecovery(str(exc)) from exc
         logger = self.loggers["qgis"]
         logger.info("Stage: QGIS Processing (selected orthomosaic clip + tiles)")
         create_run_workspace(self.workspace_layout)
@@ -5399,9 +5411,41 @@ class RGBPipeline(
         ] = None,
         missing_webodm_task_recovery: Optional[Mapping[str, Any]] = None,
         qgis_tile_rebuild: Optional[Mapping[str, Any]] = None,
+        qgis_refresh: Optional[Mapping[str, Any]] = None,
         raw_input_recovery: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
         force_stages = force_stages or set()
+        self._qgis_refresh = None
+        # Guard even a normal resume which would otherwise skip completed QGIS.
+        try:
+            reject_pending_refresh(self.workspace_layout.root)
+        except QGISRefreshError as exc:
+            raise StageRequiresRecovery(str(exc)) from exc
+        if (self.workspace_layout.root / 'qgis-refresh').exists():
+            # Never let a later ordinary resume clean retained refresh evidence.
+            keep_workspace = True
+        if qgis_refresh is not None:
+            if (not resume or force_stages - {'qgis'} or raw_input_recovery
+                    or qgis_tile_rebuild or empty_webodm_recovery or missing_webodm_project_recovery
+                    or missing_webodm_task_recovery or publication_confirmation
+                    or selected_stages not in (None, {'qgis'})):
+                raise ValueError('Fresh QGIS refresh requires resume and cannot combine other operations')
+            self._qgis_refresh = validate_refresh_request(dict(qgis_refresh), self.run_id)
+            for prerequisite in ('data_segregation', 'kml_boundary', 'webodm', 'webodm_task4'):
+                latest = self.repo.get_latest_stage(self.run_id, prerequisite)
+                if not latest or latest.get('status') != 'completed':
+                    raise ValueError('Fresh QGIS refresh requires completed ' + prerequisite)
+            for saved in ('data_segregation', 'cross_run_filter', 'kml_boundary', 'webodm', 'quality_gate', 'qgis'):
+                value = self.repo.get_latest_stage_output(self.run_id, saved)
+                if value is not None:
+                    self.state[saved] = value
+            self._hydrate_from_state()
+            if self.execution is not None:
+                self.execution.require_exclusive()
+            selected_stages = {'qgis'}
+            force_stages = {'qgis'}
+            keep_workspace = True
+            self.enable_hotkeys = False
         if raw_input_recovery is not None:
             if not resume:
                 raise ValueError("Raw-input recovery requires resume=True")
@@ -5734,6 +5778,8 @@ class RGBPipeline(
                     runner_kwargs["retry_attempts"] = step["retry_attempts"]
                 if "retry_delay_seconds" in step:
                     runner_kwargs["retry_delay_seconds"] = step["retry_delay_seconds"]
+                if stage_name == 'qgis' and self._qgis_refresh:
+                    runner_kwargs.update(retry_attempts=1, retry_delay_seconds=0)
                 if stage_name == "webodm":
                     runner_kwargs["result_status"] = lambda result: (
                         "partially_completed"
@@ -5761,6 +5807,13 @@ class RGBPipeline(
                         self._force_webodm_operations = set()
                 try:
                     self.runner.run(stage_name, step["fn"], **runner_kwargs)
+                    if stage_name == 'qgis' and self._qgis_refresh:
+                        # Only acknowledge publication after the stage result is durably saved.
+                        try:
+                            acknowledge_refresh(self.state['qgis']['qgis_refresh']['manifest_path'])
+                        except Exception as exc:
+                            raise StageRequiresRecovery('Fresh QGIS completion receipt could not be saved',
+                                output={'qgis_refresh': self.state['qgis']['qgis_refresh']}) from exc
                 finally:
                     if stage_name == "webodm" and hasattr(
                         self, "_force_webodm_operations"

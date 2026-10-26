@@ -174,6 +174,7 @@ def build_storage_preflight(
     include_published_outputs: bool = True,
     include_raw_input_recovery: bool = False,
     include_task4_all_assets_zip: bool = False,
+    include_qgis_refresh: bool = False,
     min_free_gb: int = 10,
     min_free_percent: int = 5,
     published_min_free_gb: int = 10,
@@ -214,6 +215,11 @@ def build_storage_preflight(
     raw_input_recovery_bytes = (
         source_bytes if include_raw_input_recovery else 0
     )
+    if include_qgis_refresh:
+        # Fresh generation plus pending publication copies; old backups stay on disk.
+        qgis_staging_bytes = max(qgis_staging_bytes, 6 * source_bytes)
+        workspace_bytes = max(workspace_bytes, 20 * GIB, 6 * source_bytes)
+        published_bytes = max(published_bytes, 4 * source_bytes)
     report = inspect_storage_requirements(
         [
             StorageRequirement('pipeline_database', Path(database_path)),
@@ -267,6 +273,7 @@ def build_storage_preflight(
             'include_workspace': bool(include_workspace),
             'include_published_outputs': bool(include_published_outputs),
             'include_raw_input_recovery': bool(include_raw_input_recovery),
+            'include_qgis_refresh': bool(include_qgis_refresh),
             'include_task4_all_assets_zip': bool(
                 include_task4_all_assets_zip
             ),

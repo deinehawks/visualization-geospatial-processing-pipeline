@@ -21,6 +21,7 @@ from shared.db.repo import PipelineRepo
 from shared.paths import db_path
 from shared.artifacts import RUN_WORKSPACE_OWNERSHIP_NAME
 from shared.qgis_tile_recovery import qgis_tile_rebuild_confirmation
+from shared.qgis_refresh import refresh_confirmation
 from shared.raw_input_recovery import raw_input_recovery_confirmation
 from shared.storage_preflight import (
     StorageCapacityError,
@@ -522,6 +523,11 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         ),
     )
 
+    parser.add_argument('--refresh-qgis', choices=['task4'], default=None,
+                        help='Explicitly rebuild completed Task 4 clip and tiles from a fresh generation.')
+    parser.add_argument('--qgis-refresh-confirmation', default=None,
+                        help='Exact phrase: REFRESH QGIS task4 FOR RUN <run-id>.')
+
     # WebODM task mode: mutually exclusive flags
     task_group = parser.add_mutually_exclusive_group()
     task_group.add_argument(
@@ -544,6 +550,19 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
 
     if args.resume and not args.run_id:
         parser.error("--run-id is required when using --resume")
+    if args.qgis_refresh_confirmation and not args.refresh_qgis:
+        parser.error('--qgis-refresh-confirmation requires --refresh-qgis')
+    if args.refresh_qgis:
+        if not args.resume:
+            parser.error('--refresh-qgis requires --resume')
+        if args.qgis_refresh_confirmation != refresh_confirmation(args.run_id):
+            parser.error('--qgis-refresh-confirmation must exactly match: ' + repr(refresh_confirmation(args.run_id)))
+        if (set(args.force_stage or []) - {'qgis'} or args.task2 or args.both_tasks
+                or args.rebuild_qgis_tiles or args.recover_missing_raw or args.activate_publication
+                or args.rebind_source_dir or args.rebind_workspace_to_configured_root
+                or args.recover_empty_webodm_project or args.recover_missing_webodm_project
+                or args.recover_missing_webodm_task):
+            parser.error('--refresh-qgis cannot combine other task modes, forced stages or recovery operations')
     if args.activate_publication and not args.publication_confirmation:
         parser.error("--publication-confirmation is required when using --activate-publication")
     if args.publication_confirmation and not args.activate_publication:
@@ -778,6 +797,10 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             parser.error(
                 '--rebuild-qgis-tiles requires a failed or incomplete QGIS stage'
             )
+    if args.refresh_qgis:
+        for prerequisite in ('data_segregation', 'kml_boundary', 'webodm', 'webodm_task4'):
+            if latest_stage_statuses.get(prerequisite) != 'completed':
+                parser.error('--refresh-qgis requires completed ' + prerequisite)
     if (
         args.recover_missing_raw
         and latest_stage_statuses.get("data_segregation") != "completed"
@@ -859,6 +882,9 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         force_stages=set(args.force_stage or []),
         qgis_enabled=bool((config.get("qgis") or {}).get("enabled", True)),
     )
+    if args.refresh_qgis:
+        storage_stage_needs = dict(include_upload_cache=False, include_qgis_staging=True,
+                                   include_workspace=True, include_published_outputs=True)
     exports_config = config.get("exports") or {}
     task4_all_assets_zip_enabled = bool(
         storage_stage_needs["include_upload_cache"]
@@ -883,6 +909,7 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         **storage_stage_needs,
         include_raw_input_recovery=args.recover_missing_raw,
         include_task4_all_assets_zip=task4_all_assets_zip_enabled,
+        **({'include_qgis_refresh': True} if args.refresh_qgis else {}),
         min_free_gb=int(storage_config.get("min_free_gb", 10)),
         min_free_percent=int(storage_config.get("min_free_percent", 5)),
         published_min_free_gb=int(
@@ -909,7 +936,8 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         'exclusive': bool(args.force_stage or args.activate_publication or args.rebind_source_dir
                           or args.rebind_workspace_to_configured_root or args.recover_missing_raw
                           or args.rebuild_qgis_tiles or args.recover_empty_webodm_project
-                          or args.recover_missing_webodm_project or args.recover_missing_webodm_task),
+                          or args.recover_missing_webodm_project or args.recover_missing_webodm_task
+                          or args.refresh_qgis),
     }
     if observer is not None:
         observer(preflight)
@@ -937,6 +965,9 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             'QGIS tile rebuild: '
             f'{args.rebuild_qgis_tiles} ({action})'
         )
+    if args.refresh_qgis:
+        print('Fresh QGIS refresh: task4 (' + ('PLAN ONLY - outputs unchanged'
+              if args.storage_preflight_only else 'AUTHORIZED - fresh generation; previous outputs retained') + ')')
     if args.recover_missing_raw:
         action = (
             "PLAN ONLY - no files copied"
@@ -1043,6 +1074,8 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             result = pipeline.run(
                 resume=args.resume,
                 force_stages=set(args.force_stage or []),
+                **({'qgis_refresh': {'task_key': args.refresh_qgis,
+                     'confirmation': args.qgis_refresh_confirmation}} if args.refresh_qgis else {}),
                 empty_webodm_recovery=(
                     {
                         "operation": args.recover_empty_webodm_project,
