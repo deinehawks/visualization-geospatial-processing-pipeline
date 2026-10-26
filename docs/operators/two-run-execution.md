@@ -1,6 +1,16 @@
 # Safe two-run execution
 
+## Three-slot follow-up (2026-10-23)
+
+The [three-run opt-in](three-run-execution.md) supersedes only this guide's upper
+limit of two slots. The original two-slot behavior, one-slot default, idle-only
+activation, resource limits and exclusive recovery rules below remain valid.
+
 ## Rollout boundary
+
+Finished records blocked by an inaccessible reused PID now have a
+[negative-only CIM verification fallback](pid-reuse-verification.md). Native
+claims/controls, child ownership and unresolved remote-outcome guards remain.
 
 Implemented for one Windows workstation and one installed repository. The default
 is still **one** local run. The agent has not read/changed the live policy or

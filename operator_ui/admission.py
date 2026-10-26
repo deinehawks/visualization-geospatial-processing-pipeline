@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .identities import overlaps, remote_key
+from .process_identity import observed_owner
 
 
 class AdmissionMixin:
@@ -10,7 +11,7 @@ class AdmissionMixin:
         from .storage import read_json, ConsoleError
         path = self.root / 'execution-policy.json'
         value = read_json(path) if path.exists() else {'version': 1, 'max_runs': 1}
-        if value != {'version': 1, 'max_runs': value.get('max_runs')} or type(value.get('max_runs')) is not int or value['max_runs'] not in (1, 2):
+        if value != {'version': 1, 'max_runs': value.get('max_runs')} or type(value.get('max_runs')) is not int or value['max_runs'] not in (1, 2, 3):
             raise ConsoleError('Invalid execution policy; refusing admission', 'INVALID_POLICY')
         return value
 
@@ -18,7 +19,7 @@ class AdmissionMixin:
         from .storage import read_json, TERMINAL
         values = []
         for value in self.operations():
-            live = self.processes.identity(value['pid']) if value.get('pid') else None
+            live = observed_owner(self.processes, value.get('pid'), value.get('birth'))
             children = self.processes.job_active(value['job_name'])
             present = live == 'unknown' or (live is not None and (not value.get('birth') or live == value['birth']))
             intent = self.directory(value['operation_id']) / 'restart-intent.json'
@@ -44,8 +45,8 @@ class AdmissionMixin:
 
     def configure(self, maximum, *, database=None):
         from .storage import ConsoleError, atomic_json
-        if type(maximum) is not int or maximum not in (1, 2):
-            raise ConsoleError('Only one or two local slots are supported', 'INVALID_INPUT')
+        if type(maximum) is not int or maximum not in (1, 2, 3):
+            raise ConsoleError('Only one, two, or three local slots are supported', 'INVALID_INPUT')
         with self.lock():
             self.ensure()
             if self.occupants():
@@ -145,8 +146,8 @@ class AdmissionMixin:
         allocation = self.inherited_allocation(request.get('run_id')) if request['kind'] != 'preflight' else None
         if identity is not None:
             identity = self.apply_allocation(identity, report, allocation)
-        if policy['max_runs'] == 2 and request['kind'] != 'preflight' and identity is None:
-            raise ConsoleError('Two-run execution requires resolved identity/storage evidence', 'IDENTITY_REQUIRED')
+        if policy['max_runs'] > 1 and request['kind'] != 'preflight' and identity is None:
+            raise ConsoleError('Multi-run execution requires resolved identity/storage evidence', 'IDENTITY_REQUIRED')
         if identity is not None and request['kind'] != 'preflight':
             self.check_identity(identity, request.get('run_id'))
         budgets = self.commitments(report['report']) if report and request['kind'] != 'preflight' else {}

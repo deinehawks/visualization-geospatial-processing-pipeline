@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from .admission import AdmissionMixin
 from .identities import canonical_path, volume_identity
+from .process_identity import observed_owner
 
 
 class ConsoleError(RuntimeError):
@@ -89,6 +90,15 @@ class WindowsMutex:
 
 class WindowsProcesses:
     """Verified PID creation times and named job membership, never PID-only liveness."""
+    def __init__(self, *, cim_runner=None, system_directory=None):
+        self.cim_runner = cim_runner
+        self.system_directory = system_directory
+
+    def owner_identity(self, pid, birth):
+        from .process_identity import owner_identity
+        return owner_identity(pid, birth, identity=self.identity,
+                              runner=self.cim_runner, directory=self.system_directory)
+
     def _kernel(self):
         if os.name != 'nt':
             raise ConsoleError('Process verification requires Windows', 'UNSUPPORTED_HOST')
@@ -217,7 +227,7 @@ class ConsoleStore(AdmissionMixin):
     def occupied(self):
         for value in self.operations():
             pid, birth = value.get('pid'), value.get('birth')
-            live = self.processes.identity(pid) if pid else None
+            live = observed_owner(self.processes, pid, birth)
             children = self.processes.job_active(value['job_name'])
             owner_present = live == 'unknown' or (live is not None and (birth is None or live == birth))
             intent = self.directory(value['operation_id']) / 'restart-intent.json'
@@ -273,7 +283,7 @@ class ConsoleStore(AdmissionMixin):
             if confirmation != f'RECONCILE {operation_id}':
                 raise ConsoleError('Exact reconciliation confirmation required', 'CONFIRMATION_REQUIRED')
             if value.get('pid'):
-                live = self.processes.identity(value['pid'])
+                live = observed_owner(self.processes, value['pid'], value.get('birth'))
                 if live == 'unknown' or (live is not None and (not value.get('birth') or live == value['birth'])):
                     raise ConsoleError('Runner identity is live or cannot be verified')
             if self.processes.job_active(value['job_name']) != 0:

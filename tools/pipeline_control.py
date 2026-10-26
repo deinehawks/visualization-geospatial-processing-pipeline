@@ -19,7 +19,7 @@ def main(argv=None, *, store=None, database=None, inventory=None, ups_inspector=
     commands = parser.add_subparsers(dest='command', required=True)
     commands.add_parser('status')
     configure = commands.add_parser('configure')
-    configure.add_argument('--max-runs', type=int, choices=(1, 2), required=True)
+    configure.add_argument('--max-runs', type=int, choices=(1, 2, 3), required=True)
     legacy = commands.add_parser('reconcile-legacy', help='Preview one historical record; explicit confirmation applies a local-only receipt')
     legacy.add_argument('--run-id', required=True)
     legacy.add_argument('--confirmation', default=None)

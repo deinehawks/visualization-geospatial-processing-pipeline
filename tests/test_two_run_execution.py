@@ -1,4 +1,4 @@
-"""Two-run policy under pytest-owned paths and injected process/lock adapters."""
+"""Multi-run policy under pytest-owned paths and injected process/lock adapters."""
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -21,11 +21,11 @@ from shared.db.repo import PipelineRepo, _CommitRetry
 from tools.pipeline_control import main as control_main
 
 
-@pytest.fixture
-def parallel(console):
+@pytest.fixture(params=(2, 3), ids=('two-slots', 'three-slots'))
+def parallel(console, request):
     console.store.path_identity = lambda path: str(Path(path).resolve()).replace('\\', '/').rstrip('/').casefold()
     console.store.volume_identity = lambda _: 'owned-test-volume'
-    console.store.configure(2, database=console.reader.database)
+    console.store.configure(request.param, database=console.reader.database)
     return console
 
 
@@ -73,18 +73,22 @@ def test_default_remains_one_without_creating_policy(console):
         reserve(console, '002')
 
 
-def test_two_updated_cli_and_browser_requests_share_limit(parallel):
+def test_updated_cli_and_browser_requests_share_limit(parallel):
+    limit = parallel.store.policy()['max_runs']
     first = reserve(parallel, '001')
     run(parallel, first, 101)
     reserve(parallel, '002', kind='run')
-    assert parallel.execution_status()['occupied'] == 2
-    with pytest.raises(ConsoleError) as failure:
+    if limit == 3:
         reserve(parallel, '003')
+    assert parallel.execution_status()['occupied'] == limit
+    with pytest.raises(ConsoleError) as failure:
+        reserve(parallel, '004')
     assert failure.value.code == 'BUSY'
 
 
-def test_atomic_cross_tab_start_race_only_two_admitted(parallel):
-    barrier = threading.Barrier(3)
+def test_atomic_cross_tab_start_race_respects_configured_limit(parallel):
+    limit = parallel.store.policy()['max_runs']
+    barrier = threading.Barrier(limit + 1)
     def start(name):
         barrier.wait()
         try:
@@ -92,10 +96,10 @@ def test_atomic_cross_tab_start_race_only_two_admitted(parallel):
             return 'accepted'
         except ConsoleError as exc:
             return exc.code
-    with ThreadPoolExecutor(3) as pool:
-        answers = list(pool.map(start, ('001', '002', '003')))
-    assert answers.count('accepted') == 2 and answers.count('BUSY') == 1
-    assert parallel.store.capacity()['occupied'] == 2
+    with ThreadPoolExecutor(limit + 1) as pool:
+        answers = list(pool.map(start, (f'{index:03d}' for index in range(limit + 1))))
+    assert answers.count('accepted') == limit and answers.count('BUSY') == 1
+    assert parallel.store.capacity()['occupied'] == limit
 
 
 @pytest.mark.parametrize('conflict', ['run', 'survey', 'source', 'nested_source', 'workspace', 'output'])
@@ -467,7 +471,7 @@ def test_returned_task_identity_survives_missing_binding(parallel):
     assert parallel.store.status(first.operation_id)['pending_creation']
     first.binding_committed(548, 'exact-returned-task')
     assert parallel.store.status(first.operation_id)['pending_creation'] is None
-    assert parallel.store.capacity()['available'] == 2
+    assert parallel.store.capacity()['available'] == parallel.store.policy()['max_runs']
 
 
 def test_quality_restart_escalation_is_atomic_and_exclusive(parallel):

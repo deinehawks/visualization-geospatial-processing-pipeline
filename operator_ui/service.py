@@ -9,6 +9,7 @@ import uuid
 from .models import RunInput
 from .projections import ReadModel, redact
 from .storage import ConsoleError, ConsoleStore, TERMINAL, atomic_json, identifier, now, read_json
+from .process_identity import observed_owner
 
 
 class ConsoleService:
@@ -147,7 +148,7 @@ class ConsoleService:
             if self.store.processes.identity(process['pid']) is None:
                 value = {**value, 'observed_state': 'requires_reconciliation',
                          'error': 'Helper exited before recording ownership. Inspect the retained helper log; no command will be replayed.'}
-        live = self.store.processes.identity(value['pid']) if value.get('pid') else None
+        live = observed_owner(self.store.processes, value.get('pid'), value.get('birth'))
         verified = value.get('birth') is not None and live == value['birth']
         value['owner_verified'] = verified
         value['resource_busy'] = value['state'] not in TERMINAL or verified or live == 'unknown' or self.store.processes.job_active(value['job_name']) != 0

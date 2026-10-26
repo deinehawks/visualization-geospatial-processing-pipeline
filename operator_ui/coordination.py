@@ -16,7 +16,8 @@ class Execution:
 
     @property
     def two_runs(self):
-        return self.store.status(self.operation_id).get('max_runs', 1) == 2
+        """Compatibility name: any multi-slot invocation disables global hooks."""
+        return self.store.status(self.operation_id).get('max_runs', 1) > 1
 
     @property
     def run_id(self):
