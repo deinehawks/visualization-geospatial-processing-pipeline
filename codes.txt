@@ -1,40 +1,31 @@
+FIX BUGS:
+
+Point cloud survey problem
+should a survey can only have a point cloud or a orthomosaic?
+
+big hectarage clipped ortho have no metadata please fix
 
 
 Queue:
 
 
-Running: 
-python main.py --survey "MCS_311_19Ha_M3C_80m_85f75s_6mps" --year 2026 --task4 --resume --run-id cda65f84-df50-4b25-a400-4083a9339558
-
-Run Later:
-python main.py --survey "TLW-001_6.3Ha_A2S_80m_85f75s_5mps" --year 2026 --task4 --resume --run-id 25dc5134-1631-464b-ab47-8efc2b7c574a --force-stage quality_gate
-
-Done:
-python main.py --survey "MCS_302_5Ha_M3C_50m_85f75s_4mps" --year 2026 --task4
-python main.py --survey "TLW-001_6.3Ha_M3C_50m_85f75s_4mps" --year 2026 --task4
-python main.py --survey "BCO-107_5Ha_M3C_60m_85f75s_5mps" --year 2026 --resume --run-id 6827b4ea-1649-4bc2-8a6e-c6b45ff19ae5
-python main.py --survey "MCS_301_23.7Ha_A2S_100m_85f75s_7mps" --year 2026 --resume --run-id 9eab110c-38fb-4b6f-a2f9-9feae7c3664d --force-stage quality_gate
-python main.py --survey "BCO-102_32Ha_M3C_100m_85f75s_8mps_p30" --year 2026 --resume --run-id e8f153ea-e1a4-4273-9ad3-bfe6dd02e400 --force-stage quality_gate
+Running:
+python main.py --survey "DNG-511_5Ha_M3M_40m_85f75s_3mps" --year 2026 --survey-id "AH-026141" --rgb --uav M3M_B
+python main.py --survey "MCS-101_5Ha_A2S_60m_85f75s_4mps_p30" --year 2026 --survey-id "AH-026142" --both-tasks --resume --run-id 4e391dcf-aa51-45a9-803f-feb830b00abf
+python main.py --survey "MCS-002_11Ha_M3C_80m_85f75s_6mps_p30" --year 2026 --survey-id "AH-026143" --task4 --node-id 5
+python main.py --survey "MCS-001_11Ha_M3C_80m_85f75s_6mps_p30" --year 2026 --survey-id "AH-026144" --task4 --node-id 3 --resume --run-id 21d6e70b-a162-4d20-968b-f015289e48c0
+python main.py --survey "MCS-201_19.6Ha_M3C_80m_85f75s_6mps" --year 2026 --survey-id "AH-026146" --task4 --node-id 3
+python main.py --survey "DNG-501_42Ha_M3M_70m_85f75s_5mps" --year 2026 --survey-id "AH-026147" --task4 --node-id 5 --resume --run-id 785a1b4a-0864-4063-b478-63093c137406
+python main.py --survey "BSG-001-11.13Ha_M3C_100m_85f75s_8mps" --year 2026 --survey-id "AH-026140" --task2 --node-id 3 --resume --run-id 791cccb3-9ec6-46f3-8a29-cb4f44b2cedd
 
 command for generating maps
 
 ex:
 python map.py --survey "BCO-101_33.8Ha_A2S_100m_85f75s_7mps,BCO-102_32Ha_A2S_100m_85f75s_7mps,BCO-200_26.5Ha_M3C_100m_85f75s_8mps" --name "barbco-overall-map" --title "BARBCO Overall Survey Boundary Map" --export-print --logo "assets/logo.png"
+python main.py --survey "BCO-131_9.9Ha_M3M_70m_85f75s_5mps" --year 2026 --survey-id "AH-026084" --rgb --uav M3M_B --node-id 1
 
 
-
-
-
-
-Apr 13, 2026 - BCO-102_32Ha_M3C_100m_85f75s_8mps_p30
-Apr 13, 2026 - BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30
-
-Apr 14, 2026 - BCO-102_32Ha_M3C_100m_85f75s_8mps_p30
-Apr 14, 2026 - BCO-101_33.8Ha_M3C_100m_85f75s_8mps_p30 
-
-Apr 15, 2026 - BCO-200_26.5Ha_M3C_100m_85f75s_8mps_p30
-Apr 16, 2026 - BCO-200_26.5Ha_M3C_100m_85f75s_8mps_p45
-
-
+.\start_pipeline_sheet_sync.bat --state data\sheet-sync\test-correct.json --dry-run
+.\start_pipeline_sheet_sync.bat --state data\sheet-sync\test-correct.json --interval 30
 
 
