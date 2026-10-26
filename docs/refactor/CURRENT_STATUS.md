@@ -1,5 +1,129 @@
 # Refactor Current Status
 
+## All named page objects movable (2026-10-26)
+
+Implemented the user's expanded positioning request for all 13 named template
+objects. Move Objects toggles frame dragging versus default map-content pan;
+non-map objects drag in either mode. Layout provides selected-object X/Y in mm.
+Selection respects stacking and permits grabbing the selected covered object.
+One drag is one undoable action, with page-contained movement and failure rollback.
+Sizes, extents, CRS, wording and styles remain independent of positioning.
+
+Reuse optional V2 layout settings, recovery and immutable export handoff. Relative
+positions survive paper/CRS rebuilds. Legacy logo-only settings remain compatible
+across Undo/Redo; final inset backgrounds now have unique frame-derived IDs and
+follow their own moved frame. No independent background editing or resize mode.
+
+Validation: 55 new cases plus 38 furniture cases pass on 3.10; 513 focused and
+all 1449 safe tests pass on 3.13; 1449 safely collected. Six Python files compile
+in memory on 3.10; scoped tracked/new-file whitespace checks pass. Four runtime
+modules and existing UI tests updated, one test module added, operator guide
+and three refactor records updated. No files moved/deleted, dependencies/schema,
+production/source/runtime access, real GIS execution, existing design/export
+mutation, commit or push. Prior local changes remain intact. Windows/QGIS drag,
+display scaling and preview-to-export alignment remain a separately authorized
+operator check. Exact commands/acceptance evidence: `docs/operators/map-editor.md`.
+
+## Editable map furniture and logo positioning (2026-10-26)
+
+Implemented the requested Layout controls for scale/CRS font size, scale-bar
+font size/height and logo position. Page-object selection and preview-only
+outlines include these items; logo-only dragging is one undoable action. Other
+positions/map frames stay fixed. Values/extents stay automatic and synchronized.
+Sparse, validated optional V2 settings preserve legacy appearance and survive
+save/reopen, recovery, paper/CRS rebuilds and immutable export snapshots/metadata.
+Page-relative logo positions reflow with paper, print sizes remain physical.
+
+Validation: 38 new mocked cases pass on 3.10; 458 focused and all 1394 safe tests
+pass on 3.13; 1394 safely collected. Seven Python files compile in memory on
+3.10; scoped tracked/new-file whitespace checks pass. Five runtime modules
+modified, one runtime module and one test module created; operator guide and
+three refactor records updated. No files moved/deleted, dependency/schema change,
+production/source/runtime access, actual GIS execution, existing export/design
+mutation, commit or push. Earlier local changes/deleted BATs preserved.
+Real Windows/QGIS typography/dragging and preview/PDF alignment remain an
+operator check; commands and acceptance coverage: `docs/operators/map-editor.md`.
+
+## 4 x 8 ft tarpaulin paper support (2026-10-26)
+
+Implemented the requested `4X8FT` landscape preset beside A3/A4, with exact
+2438.4 x 1219.2 mm geometry and 300-DPI PNG/PDF/insets. Paper/DPI selection is
+one undoable edit; saves, presets, package metadata and immutable helper exports
+preserve it. New output metadata records physical dimensions. A4/A3 defaults
+remain unchanged; text/style sizes stay physical and editable, not silently
+restyled. Large-page UI/renderer caps at 300 DPI, with lower drafts allowed and
+a bounded 25-DPI live cache independent of final output resolution.
+
+Validation: 32 new cases pass under Python 3.10; 420 focused and all 1356 safe
+tests pass under 3.13, with 1356 safely collected. Six Python files compile in
+memory on 3.10; scoped/new-file whitespace checks pass. Four runtime modules and
+one test modified, one test module added, operator guide/three refactor records
+updated; no files moved/deleted. No dependencies, schema/frontend/launcher
+changes, production/source storage/credentials/database access, GIS invocation,
+full-size image allocation, existing map overwrite, commit or push. Prior local
+changes/deleted BATs preserved. Real Windows/QGIS/print-size validation remains
+operator work. Commands, usage and limits: `docs/operators/map-editor.md`.
+
+## Finished-owner PID reuse verification (2026-10-24)
+
+Added a negative-only local CIM fallback for old owners whose native PID identity
+is unknown. Two stable PID-scoped creation samples and a final native check can
+prove a clearly newer process, with conservative precision handling. Existing
+child/remote/nonterminal guards still decide capacity. No positive claims,
+controls or reconnection are authorized by CIM, and no historical journal is
+rewritten to resolve a finished record. Native fast paths stay unchanged.
+
+Validation: 87 new plus nine native adapter cases pass on Python 3.10; 411 focused
+and all 1322 safe tests pass on 3.13, with 1322 safely collected. Five Python files
+compile in memory on 3.10; scoped/new-file whitespace checks pass. Three runtime
+files modified, helper/test/guide added, two-run guide and three refactor records
+updated; no moves/deletions, dependencies, schema/frontend changes or global
+test-guard changes. Prior local changes and deleted BATs remain untouched.
+No production/runtime data, process, credentials, survey storage, GIS/WebODM,
+reconciliation, commit or push was used/performed. Real Windows/CIM smoke remains
+operator work. Commands/limits: `docs/operators/pid-reuse-verification.md`.
+
+## Guarded fresh Task 4 QGIS refresh (2026-10-24)
+
+Implemented `--refresh-qgis task4` and exact run-bound confirmation for completed
+Task 4 clips/tiles. Existing resume/force and corrupt-tile recovery defaults stay
+unchanged. Refresh runs only QGIS, uses unique generations, verifies inputs/copies,
+retains old outputs, preserves Task 2 and installs merged metadata last. Exclusive
+admission, publication lock and storage checks remain required. Uncertain journal,
+rollback or state-persistence failures block replay and preserve evidence.
+Authoritative publication.json sets are deliberately refused, not partly updated.
+
+Validation: 48 new cases pass under Python 3.10; 237 focused and all 1235 safe
+defaults pass under Python 3.13, with 1235 safely collected. Eight scoped Python
+files compile in memory on 3.10; scoped diff and new-file whitespace checks pass.
+No schema/dependency/frontend changes. Three runtime files modified, two helpers,
+three test modules and one operator guide added, and these three refactor records
+updated; no files moved/deleted. Unrelated edits/deleted BATs are preserved.
+No production DB, credentials, source/network storage, GIS/WebODM execution,
+real output mutation, commit or push occurred during implementation. Real
+AH-026125/Windows/network/GIS verification remains separately authorized work.
+Commands, limitations and failure recovery: `docs/operators/qgis-fresh-refresh.md`.
+
+## Three-slot support with guarded activation (2026-10-23)
+
+Implemented the requested explicit 1/2/3-slot policy and CLI option. Default stays
+one, existing policies/journals retain version 1, and any multi-slot invocation
+requires resolved identity/storage evidence and disables global hotkeys. The
+compatibility property `Execution.two_runs` covers both two and three. Exclusive
+maintenance/recovery, unknown ownership, one compute/transfer permit, per-run
+controls, storage aggregation and all remote/child/process safety guards remain.
+No schema/dependency/default changes, queue, worker or automatic node routing.
+
+Validation: 40 new cases pass under Python 3.10; 147 focused and all 1187 defaults
+pass under Python 3.13, with 1187 safely collected. Six changed Python files compile
+in memory under 3.10. Frontend's 13 contracts, typecheck and static build pass.
+An unchanged 3.10 test's missing `sqlite3.SQLITE_BUSY` and absent optional API
+dependencies are documented, not suppressed. Commands and remaining real
+Windows/NodeODM/GIS smoke checks are in the new three-run guide. Implementation
+does not authorize policy changes while a local owner is active, restart running
+jobs, or complete the broader concurrency rollout. Unrelated operator changes
+and deleted BAT files remain untouched.
+
 ## Two-run implementation and gated rollout (2026-10-21)
 
 Receipt identity correction: native Windows full volume/file IDs now produce the

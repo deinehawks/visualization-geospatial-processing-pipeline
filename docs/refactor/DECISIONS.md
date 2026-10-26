@@ -1,5 +1,128 @@
 # Architectural Decision Log
 
+## Movable page objects supersede fixed-position policy (2026-10-26)
+
+At the user's explicit request, extend the logo-only exception to all named
+template objects. Keep object sizing separate. Add Move Objects as explicit
+view state, not design history: map dragging otherwise retains content-pan
+behavior. Non-map items are draggable directly; wheel in Move Objects mode
+zooms only the page. Selected-object millimeter X/Y controls are always in Layout.
+One drag uses the existing grouped history/rollback. Stacking-aware selection
+plus selected-item priority in Move Objects supports covered objects.
+
+Reuse optional V2 `layout_settings.object_positions`, keyed by whitelisted
+template IDs with finite page fractions. Keep old logo-only fields readable;
+prevent competing positions for one logo and restore the original template
+origin through history. Save/recovery/helper snapshots/metadata share this state.
+Moves preserve map extents and geometry; paper changes reuse relative positions.
+Keep source packages and prior export attempts immutable. Preset scope unchanged.
+
+Each exported inset background receives a unique `<frame-id>_basemap` ID and
+follows its map's position, including Undo. It remains an internal companion;
+labels, logo and north arrow remain independently positioned user objects.
+Use QGIS 3.34 [unit-aware item movement](https://api.qgis.org/api/3.34/classQgsLayoutItem.html)
+with top-left millimeter anchors, verified against the existing template. No
+general resize/rotation/z-order designer, dependencies, workers or DB migration.
+Rollback uses Undo/saved design copies; actual Windows/QGIS/export alignment
+requires separate operator validation. This supersedes only the fixed-position
+and logo-only restrictions in earlier V2/furniture decisions, retaining history.
+
+## Explicit page-furniture edits (2026-10-26)
+
+Accept a narrow exception to the earlier fixed-layout V2 policy at the user's
+request: allow moving the existing logo, scale/CRS font size, scale-bar label
+size and bar height. Keep map/other element positions locked and keep generated
+scale/CRS wording automatic. Use a contextual Layout tab and preview-only
+selection; route edits through existing history/rollback, with one logo drag
+per history step. No general layout designer or new workers/dependencies.
+
+Persist sparse optional `layout_settings` in V2 designs, recovery, immutable
+export snapshots and additive metadata. Empty settings leave old appearance
+untouched. Remember unmodified template values per layout for incremental Undo;
+reapply overrides after adaptive scale updates. Store logo top-left position as
+page fractions, expose millimeters, and validate full-logo containment. Print
+sizes stay physical across paper/CRS rebuilds. Preserve existing preset scope.
+Rollback through Undo or an earlier design copy; no source/pipeline DB migration.
+
+Use QGIS 3.34 [scale-bar text-format and height setters](https://api.qgis.org/api/3.34/classQgsLayoutItemScaleBar.html),
+preserving the inherited font/color while editing size. Unit-aware logo moves
+use the existing template's millimeter/top-left geometry. Mocked tests establish
+state/argument behavior; actual typography and print alignment need a separate
+operator check. See `docs/operators/map-editor.md`.
+
+## 4 x 8 ft map-editor paper preset (2026-10-26)
+
+Accept the requested tarpaulin size as 8 ft wide x 4 ft high landscape, using a
+shared Qt/GIS-free paper registry: `4X8FT` = 2438.4 x 1219.2 mm. Selecting it
+sets PNG/PDF/inset DPI to 300 together, with one history step; saved explicit
+lower draft DPI stays exact. Limit this preset to 300 DPI to constrain huge
+allocations, leaving all A4/A3 defaults/ranges unchanged. Reuse the existing
+fixed layout/frame fitting, styles, V2 JSON and unique helper export workflow.
+Do not silently scale wording/fonts/symbol print sizes or refit geography.
+
+Bound live editing cache to about 2400 pixels wide (25 DPI for 4X8FT), independent
+of final resolution. Add exact physical dimensions to output metadata and validate
+large-page DPI before rendering/output mutation. No dependency, data/schema,
+worker or broad layout redesign. Real large-image memory/render/print behavior
+requires separately authorized operator validation. Roll back via Undo or an
+A4/A3 design copy; older code need not recognize the new enum. Preserve sources,
+earlier exports and failure evidence. See `docs/operators/map-editor.md`.
+
+## Negative-only CIM proof for inaccessible reused PIDs (2026-10-24)
+
+When native owner identity is unknown, allow a bounded, fixed local CIM helper
+to prove only that the recorded PID now belongs to a clearly newer process.
+Require two agreeing snapshots with explicit UTC conversion, valid native birth,
+strict parsing, final native recheck and a conservative one-second ambiguity
+window. Never treat CIM absence/precision differences as exit or positive owner
+identity. Claims, controls, helper adoption and UPS verification stay native.
+
+Use the proof consistently for old-owner admission, legacy occupied/reconcile
+checks and operation projections. Terminal records may cease occupying capacity
+only through the existing zero-child/no-remote-uncertainty rules. Nonterminal or
+recovery-required records do not auto-resolve. Preserve journals, statuses,
+receipts, capacities and database schemas; no bypass/whitelist, cache, worker or
+dependency. All expected probe failures remain unknown with safe diagnostics.
+Real process/CIM checks remain separately authorized; rollback restores the old
+conservative block without changing persistent evidence. See the PID-reuse guide.
+
+## Explicit fresh Task 4 QGIS generations (2026-10-24)
+
+Add `--refresh-qgis task4` with an exact run-bound confirmation. Unlike ordinary
+resume/force or corrupt-tile recovery, this explicitly recomputes the clip and
+tiles without replaying WebODM or Task 2. Require completed prerequisites,
+matching durable binding, original identity/storage revalidation and exclusive
+admission. Keep all existing defaults and schemas unchanged.
+
+Use unique run-workspace generations and retained same-parent backups, verified
+pending copies, existing publication locking and metadata-last activation. A
+journal separates render/copy, rename intent, published-but-uncommitted data and
+durable completion. Roll back known failures without deletion; uncertain crashes,
+external changes and persistence failures fail closed and never replay GIS.
+Preserve evidence on later resumes. Authoritative publication.json sets remain
+outside this legacy-manifest-only operation rather than partially mutating them.
+No dependencies, cleanup tool, forced remote restart or migration is introduced.
+See `docs/operators/qgis-fresh-refresh.md` for exact commands and recovery limits.
+
+## Three-run opt-in - accepted bounded extension (2026-10-23)
+
+The operator explicitly requested a maximum of three. Supersede only the two-slot
+ceiling, retaining the one-slot default and version 1 policies/journals. Keep the
+existing host mutex and N-owner identity/storage checks; do not introduce queues,
+workers, dependencies, schema migrations or automatic WebODM node reassignment.
+Every non-preflight invocation under any multi-slot policy requires identity and
+storage evidence. Preserve `Execution.two_runs` as a compatibility property meaning
+multi-slot, so existing CLI callers disable global hooks at both two and three.
+
+Do not weaken exclusive maintenance/recovery or uncertain-owner blocking to make
+a third run start. Retain one compute and one bulk-transfer permit, conservative
+aggregate storage, exact-ID controls, descendant/remote-outcome checks and safe
+transaction semantics. Change live policy only after safe idle/reconciliation;
+restart already-imported console code before it reads a three-slot policy.
+Rollback to one/two while idle before reverting source; preserve all evidence.
+Hermetic validation is not authorization or proof of real three-run/GIS capacity.
+See `docs/operators/three-run-execution.md` for evidence and compatibility limits.
+
 ## Two-run opt-in - accepted extension (2026-10-21)
 
 Cross-interpreter receipt correction accepted: supersede only `os.stat()` as the

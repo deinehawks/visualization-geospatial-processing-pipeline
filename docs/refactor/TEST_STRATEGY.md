@@ -1,5 +1,110 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## General page-object positioning (2026-10-26)
+
+Add 55 isolated cases covering all 13 named objects and extend the existing
+click-only selection test through release, asserting it does not move anything
+or dirty the design. Use fake Qt/GIS/process and pytest-owned small packages.
+Assert unchanged map content/CRS/size/text; one grouped drag, exact numeric moves,
+page bounds, stacking/covered selection, mode-only state and wheel page zoom.
+Verify template IDs/units, malformed and missing objects, partial Qt rollback,
+original logo history, paper/CRS rebuilds, both inset-background IDs/alignment,
+save/reopen, metadata/recovery and immutable successful/failed helper snapshots
+with earlier files preserved. No new guards, modes or production access.
+
+Validation: 55 new plus 38 furniture tests on 3.10; 513 focused and all 1449 safe
+tests on 3.13, with 1449 safely collected. Six scoped Python files compile in
+memory on 3.10; tracked/new-file whitespace checks pass. Exact commands are in
+the map-editor operator guide. A separate authorized Windows/QGIS check must
+verify drag/display scaling and preview/PNG/PDF alignment; fakes do not prove it.
+
+## Furniture editing coverage (2026-10-26)
+
+Add 38 isolated cases for editable generated-information font size, scale-bar
+format/height, and logo-only movement. Qt/GIS/process boundaries remain fake;
+tiny package/save/recovery/export files remain pytest-owned. No new test runner
+modes or production guard exceptions. Assert old appearance remains unchanged,
+style edits preserve geography/wording/font attributes, full-logo containment,
+single-drag history, failures without partial state/history, physical sizes and
+relative logo position across paper/CRS rebuilds, V1/V2 compatibility, recovery,
+read-back metadata, exact immutable helper snapshots and prior-file preservation.
+Also verify late shared-builder application and invalid settings before GIS
+bootstrap, read-only UI refresh, selection, page wheel zoom and template IDs/units.
+
+Validation: 38 new tests on 3.10, 458 focused and 1394 safe defaults on 3.13;
+1394 safely collected. Seven Python files compile in memory on 3.10, and scoped
+tracked/new-file whitespace checks pass. Exact commands are in the operator
+guide. This does not establish real QGIS/Windows text or PDF appearance; manual
+checking remains separately authorized, with production datasets/state untouched.
+
+## Tarpaulin map-editor coverage (2026-10-26)
+
+Add 32 cases with fake Qt/GIS/process and in-memory final image-export boundaries;
+extend two existing paper/geometry cases. Test 2438.4 x 1219.2 mm / 28800 x 14400
+pixels at 300 DPI, all output settings, both inset DPIs, metadata, draft reopening,
+literal BAT import, presets, one-step undo/redo, bounded editing cache, UI ranges,
+unchanged A4/A3 defaults, and isolated snapshot/failure preservation. No large
+image is allocated; tiny packages remain pytest-owned and safety guards unchanged.
+
+Validation: 32 new cases pass on 3.10, 420 focused and 1356 defaults pass on 3.13,
+with 1356 safely collected. Six scoped Python files compile in memory on 3.10;
+tracked/untracked whitespace checks pass. Exact commands are in the map-editor
+guide. No frontend build applies; real QGIS/Windows/print-size visual validation
+remains separately authorized operator work, not established by fake rendering.
+
+## Inaccessible reused-PID fallback (2026-10-24)
+
+New isolated cases inject native identities, trusted system-directory lookup,
+CIM runner and clock. No real process/API/PowerShell boundary executes. Cover
+coarse timestamps, the reported October case, changed samples and native races,
+absence/failure, PID/JSON validation, path/command constraints, diagnostics,
+import safety, exact old-journal preservation, one/two/three-slot capacity,
+controls/reconnection refusal, surviving/unknown children and remote uncertainty.
+Temporary SQLite/journals and all existing safety guards remain unchanged.
+
+Results/commands are in `docs/operators/pid-reuse-verification.md`: 87 new plus
+nine native cases pass on 3.10, 411 focused and 1322 defaults pass on 3.13, with
+1322 safely collected. Five files compile in memory under 3.10; scoped/new-file
+whitespace checks pass. No frontend/schema/dependency change or real smoke check.
+
+## Fresh QGIS refresh isolation (2026-10-24)
+
+Three new modules exercise fresh generation/publication, pipeline integration and
+CLI/storage contracts using pytest-owned paths/SQLite and mocked QGIS/WebODM.
+They cover exact confirmation, completed-stage refresh, no remote/review calls,
+Task 2/cache isolation, source mutation, capacity rejection, PNG corruption,
+copy verification, rollback/evidence, uncertain journals, durable-state failure
+without replay, receipt failure, and report-only behavior without writable DBs
+or execution admission. Existing global safety guards remain unchanged.
+
+Results: 48 new cases pass on Python 3.10, 237 focused cases and all 1235 safe
+defaults pass on Python 3.13, with 1235 safely collected. Eight scoped Python
+files compile in memory on 3.10. Scoped tracked/new-file whitespace checks pass.
+
+Run commands and non-production boundaries are in the fresh-refresh operator
+guide. Native GIS, network publication/rename and real-survey checks remain
+separately authorized operator work; this validation does not perform them.
+
+## Three-slot extension coverage (2026-10-23)
+
+Parameterize existing coordination fixtures at two and three slots without
+removing assertions. Forty additional isolated cases cover CLI policy/rollback,
+strict invalid-value rejection, missing identity, a preflight consuming the third
+slot, third-run conflicts against either owner, aggregate storage, live switch
+rejection, exclusivity escalation, independent third-run controls, two cancellable
+resource waiters, three-way survey allocation and end-to-end CLI hotkey suppression.
+Add three-slot API and frontend fixtures; keep all process/service/GIS/network/
+credential/database/deletion guards and test levels unchanged.
+
+Results: 40 new cases passed on Python 3.10; 147 focused and 1187 full safe cases
+passed on Python 3.13, and 1187 collected safely. All six changed Python files
+compile in memory on 3.10. An unchanged existing 3.10 test references the unavailable
+`sqlite3.SQLITE_BUSY` constant; optional API dependencies are also absent in that
+runtime environment. The failure/skip is retained and documented, not bypassed.
+Frontend's 13 contract cases, typecheck and static build passed. Exact commands
+and real-smoke limits are recorded in `docs/operators/three-run-execution.md`;
+no dependency installation was performed.
+
 ## Two-run coordination coverage (2026-10-21)
 
 Cross-version identity coverage: 23 new mocked native/receipt cases plus one
