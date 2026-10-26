@@ -14,6 +14,11 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[2]
 MAP_IDS = ('map_frame', 'map_inset', 'map_inset_2')
 TEXT_IDS = ('map_title', 'map_location', 'label_inset', 'label_inset_2', 'map_disclaimer')
+TARPAULIN_PAPER_SIZE = '4X8FT'
+TARPAULIN_DPI = 300
+PAPER_SIZES_MM = {'A4': (297.0, 210.0), 'A3': (420.0, 297.0),
+                  TARPAULIN_PAPER_SIZE: (2438.4, 1219.2)}
+EDITOR_PAPER_CHOICES = ('A3', 'A4', TARPAULIN_PAPER_SIZE)
 DEFAULT_OPTIONS = {
     'paper_size': 'A3', 'preview_dpi': 300, 'pdf_dpi': 450, 'inset_dpi': 800,
     'grid_font_size': 6.0,
@@ -113,9 +118,13 @@ def validate_options(values):
         raise ValueError(f'Unknown render settings: {sorted(unknown)}')
     result = copy.deepcopy(DEFAULT_OPTIONS)
     result.update(copy.deepcopy(values))
-    result['paper_size'] = str(result['paper_size']).upper()
-    if result['paper_size'] not in ('A4', 'A3'):
-        raise ValueError('Paper size must be A4 or A3')
+    result['paper_size'] = str(result['paper_size']).strip().upper()
+    if result['paper_size'] not in PAPER_SIZES_MM:
+        raise ValueError('Paper size must be A4, A3 or 4X8FT')
+    if result['paper_size'] == TARPAULIN_PAPER_SIZE:
+        for key in ('preview_dpi', 'pdf_dpi', 'inset_dpi'):
+            if key not in values:
+                result[key] = TARPAULIN_DPI
     for key in ('overview_crs', 'boundary_crs'):
         crs = str(result[key]).strip()
         result[key] = 'project' if crs.lower() == 'project' else crs.upper()
@@ -128,6 +137,8 @@ def validate_options(values):
         number = finite_number(result[key], minimum=1)
         if not number.is_integer() or number > 2400:
             raise ValueError(f'{key} must be a whole number from 1 to 2400')
+        if result['paper_size'] == TARPAULIN_PAPER_SIZE and number > TARPAULIN_DPI:
+            raise ValueError(f'4X8FT {key} must be at most 300 DPI; use a lower DPI for draft exports')
         result[key] = int(number)
     for key in ('main_buffer', 'boundary_buffer', 'auto_scale_multiplier', 'boundary_zoom', 'overview_zoom'):
         result[key] = finite_number(result[key], minimum=0 if key.endswith('buffer') else 1)
@@ -157,8 +168,11 @@ class EditorDesign:
     map_styles: dict = field(default_factory=dict)
     grid_style: dict = field(default_factory=dict)
     source_version: int = field(default=2, compare=False)
+    layout_settings: dict = field(default_factory=dict)
 
     def validate(self):
+        from .editor_furniture import validate_layout_settings
+        self.layout_settings = validate_layout_settings(self.layout_settings)
         self.options = validate_options(self.options)
         self.map_styles = validate_map_styles(self.map_styles)
         self.grid_style = validate_style(self.grid_style, grid=True)
@@ -207,6 +221,9 @@ def design_from_package(package_dir):
     layout = metadata.get('layout') or {}
     printed = metadata.get('print_layout') or {}
     options = copy.deepcopy(DEFAULT_OPTIONS)
+    paper = printed.get('paper_size', (printed.get('render_options') or {}).get('paper_size', options['paper_size']))
+    if str(paper).strip().upper() == TARPAULIN_PAPER_SIZE:
+        options.update(preview_dpi=TARPAULIN_DPI, pdf_dpi=TARPAULIN_DPI, inset_dpi=TARPAULIN_DPI)
     options.update(printed.get('render_options') or {})
     options['paper_size'] = printed.get('paper_size', options['paper_size'])
     if 'render_options' not in printed:
@@ -223,7 +240,8 @@ def design_from_package(package_dir):
     return EditorDesign(package, options, copy.deepcopy(state.get('maps', {})),
                         texts, copy.deepcopy(state.get('text_styles', {})),
                         copy.deepcopy(state.get('map_styles', {})),
-                        copy.deepcopy(state.get('grid_style', {}))).validate()
+                        copy.deepcopy(state.get('grid_style', {})),
+                        layout_settings=copy.deepcopy(state.get('layout_settings', printed.get('layout_settings', {})))).validate()
 
 
 def import_bat_settings(path):
@@ -272,6 +290,10 @@ def import_bat_settings(path):
 def apply_bat_settings(design, path):
     options, texts, warnings = import_bat_settings(path)
     updated = copy.deepcopy(design)
+    if str(options.get('paper_size', '')).strip().upper() == TARPAULIN_PAPER_SIZE:
+        for key in ('preview_dpi', 'pdf_dpi', 'inset_dpi'):
+            if key not in options:
+                updated.options[key] = TARPAULIN_DPI
     updated.options.update(options)
     updated.texts.update(texts)
     updated.texts['label_inset'] = updated.options['boundary_label'] or updated.texts.get('map_location', '')
@@ -289,7 +311,8 @@ def design_payload(design, relative_to):
     return {'version': 2, 'package': reference, 'options': copy.deepcopy(design.options),
             'maps': copy.deepcopy(design.maps), 'texts': copy.deepcopy(design.texts),
             'text_styles': copy.deepcopy(design.text_styles),
-            'map_styles': copy.deepcopy(design.map_styles), 'grid_style': copy.deepcopy(design.grid_style)}
+            'map_styles': copy.deepcopy(design.map_styles), 'grid_style': copy.deepcopy(design.grid_style),
+            'layout_settings': copy.deepcopy(design.layout_settings)}
 
 
 def atomic_json(path, value):
@@ -334,7 +357,8 @@ def load_design(path):
         if state.get('crs'):
             options['overview_crs'] = 'EPSG:4326' if state['crs'] == 'EPSG:4326' else 'project'
     return EditorDesign(package, options, data['maps'], data['texts'], data['text_styles'],
-                        data.get('map_styles', {}), data.get('grid_style', {}), data['version']).validate()
+                        data.get('map_styles', {}), data.get('grid_style', {}), data['version'],
+                        layout_settings=data.get('layout_settings', {})).validate()
 
 
 def create_export_attempt(design, workspace):

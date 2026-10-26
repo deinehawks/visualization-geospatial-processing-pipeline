@@ -4,7 +4,10 @@ from __future__ import annotations
 import copy
 from pathlib import Path
 
-from .editor_model import MAP_IDS, TEXT_IDS, EditorDesign, parse_bounds
+from .editor_model import (
+    MAP_IDS, TEXT_IDS, EditorDesign, parse_bounds, PAPER_SIZES_MM,
+    TARPAULIN_PAPER_SIZE, TARPAULIN_DPI,
+)
 
 
 def export_qt_platform(platform_name):
@@ -30,13 +33,16 @@ class EditorSession:
             live_insets=True, map_states=copy.deepcopy(self.design.maps),
             text_values=self.design.texts, text_styles=self.design.text_styles,
             map_styles=copy.deepcopy(self.design.map_styles), grid_style=copy.deepcopy(self.design.grid_style),
+            layout_settings=copy.deepcopy(self.design.layout_settings),
         )
         for key in MAP_IDS:
             if candidate.layout.itemById(key) is None:
                 raise ValueError(f'The template is missing a required map: {key}')
         self._previous_ctx = self.ctx  # Keep the old scene alive until its view is detached.
         self.ctx = candidate
-        self.ctx.layout.renderContext().setDpi(96)
+        # Bound editing caches, not the independent final PNG/PDF export DPI.
+        width, height = PAPER_SIZES_MM[self.design.options['paper_size']]
+        self.ctx.layout.renderContext().setDpi(min(96, max(1, int(2400 * 25.4 / max(width, height)))))
 
     def snapshot(self):
         result = copy.deepcopy(self.design)
@@ -144,6 +150,59 @@ class EditorSession:
         self.renderer.apply_editor_text(self.ctx, {key: value}, {key: style})
         self.design = trial
 
+    def set_layout_setting(self, key, value):
+        trial = copy.deepcopy(self.design)
+        trial.layout_settings[key] = copy.deepcopy(value)
+        trial.validate()
+        self.renderer.apply_layout_settings(self.ctx, trial.layout_settings)
+        self.design = trial
+
+    def logo_position(self):
+        from .editor_furniture import furniture_values
+        values = furniture_values(self.ctx)
+        return values['logo_x_mm'], values['logo_y_mm']
+
+    def move_logo(self, x_mm, y_mm, *, clamp=False):
+        if 'map_logo' in self.design.layout_settings.get('object_positions', {}):
+            return self.move_object('map_logo', x_mm, y_mm, clamp=clamp)
+        from .editor_model import finite_number
+        from .editor_furniture import furniture_values
+        x_mm = finite_number(x_mm, minimum=-1e15)
+        y_mm = finite_number(y_mm, minimum=-1e15)
+        width, height = PAPER_SIZES_MM[self.design.options['paper_size']]
+        if clamp:
+            values = furniture_values(self.ctx)
+            x_mm = min(values['logo_max_x_mm'], max(0, x_mm))
+            y_mm = min(values['logo_max_y_mm'], max(0, y_mm))
+        self.set_layout_setting('logo_position', {'x_fraction': x_mm / width, 'y_fraction': y_mm / height})
+
+    def object_position(self, key):
+        from .editor_furniture import object_position_values
+        values = object_position_values(self.ctx, key)
+        return values['x_mm'], values['y_mm']
+
+    def move_object(self, key, x_mm, y_mm, *, clamp=False):
+        from .editor_furniture import object_position_values
+        from .editor_model import finite_number
+        values = object_position_values(self.ctx, key)
+        x_mm = finite_number(x_mm, minimum=-1e15)
+        y_mm = finite_number(y_mm, minimum=-1e15)
+        if clamp:
+            x_mm = min(values['max_x_mm'], max(0, x_mm))
+            y_mm = min(values['max_y_mm'], max(0, y_mm))
+        if not 0 <= x_mm <= values['max_x_mm'] + 1e-6 or not 0 <= y_mm <= values['max_y_mm'] + 1e-6:
+            raise ValueError('Keep the entire object inside the page')
+        width, height = PAPER_SIZES_MM[self.design.options['paper_size']]
+        trial = copy.deepcopy(self.design)
+        if key == 'map_logo':
+            trial.layout_settings.pop('logo_position', None)
+        trial.layout_settings.setdefault('object_positions', {})[key] = {
+            'x_fraction': x_mm / width, 'y_fraction': y_mm / height,
+        }
+        trial.validate()
+        self.renderer.apply_layout_settings(self.ctx, trial.layout_settings)
+        self.design = trial
+
     def set_overlay(self, key, mode):
         if key not in ('map_inset', 'map_inset_2') or mode not in ('boundary', 'pin'):
             raise ValueError('Choose an inset and boundary or pin')
@@ -170,6 +229,9 @@ class EditorSession:
 
     def set_paper(self, paper):
         trial = self.snapshot()
+        paper = str(paper).strip().upper()
+        if paper == TARPAULIN_PAPER_SIZE and trial.options['paper_size'] != paper:
+            trial.options.update(preview_dpi=TARPAULIN_DPI, pdf_dpi=TARPAULIN_DPI, inset_dpi=TARPAULIN_DPI)
         trial.options['paper_size'] = paper
         self.design = trial.validate()
         self.rebuild()
@@ -221,6 +283,7 @@ class EditorSession:
                 self.set_extent(key, trial.maps[key]['extent'])
         self.renderer.apply_editor_text(self.ctx, trial.texts, trial.text_styles)
         self.renderer.refresh_main_map_furniture(self.ctx)
+        self.renderer.apply_layout_settings(self.ctx, trial.layout_settings)
         self.design = trial
 
     def restore(self, design, *, force=False):
@@ -291,10 +354,12 @@ def run_snapshot_export(snapshot_path: Path, renderer=None):
             map_states=design.maps, text_values=design.texts, text_styles=design.text_styles,
             output_dir=attempt,
             map_styles=design.map_styles, grid_style=design.grid_style,
+            layout_settings=design.layout_settings,
         )
         ctx.metadata_path = attempt / 'map_metadata.json'
         ctx.editor_state = {'maps': design.maps, 'texts': design.texts, 'text_styles': design.text_styles,
-                            'map_styles': design.map_styles, 'grid_style': design.grid_style}
+                            'map_styles': design.map_styles, 'grid_style': design.grid_style,
+                            'layout_settings': design.layout_settings}
         result = renderer._export_print_outputs(ctx)
         atomic_json(marker, {'version': 1, 'status': 'complete', 'outputs': result})
         print(f'Export complete: {attempt}', flush=True)

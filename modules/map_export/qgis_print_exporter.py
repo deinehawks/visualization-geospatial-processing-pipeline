@@ -9,6 +9,7 @@ from typing import Any, Callable
 from urllib.parse import urlsplit
 import json, math, os, time
 from osgeo import gdal
+from modules.map_export.editor_model import PAPER_SIZES_MM, TARPAULIN_PAPER_SIZE, TARPAULIN_DPI
 
 
 def _quiet_gdal_error_handler(err_class, err_num, err_msg):
@@ -36,10 +37,6 @@ STANDARD_SCALE_MANTISSAS = (1.0, 1.25, 1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 7.5, 10.0)
 GRID_LINE_WIDTH_MM = 0.25
 GRID_LINE_COLOR_RGBA = (90, 90, 90, 153)
 DEFAULT_PAPER_SIZE = 'A4'
-PAPER_SIZES_MM = {
-    'A4': (297.0, 210.0),
-    'A3': (420.0, 297.0),
-}
 
 
 # Shared pipeline state
@@ -304,6 +301,11 @@ def _load_metadata_config(ctx: ExportContext) -> None:
         ctx.boundary_inset_bounds_wgs84 = options['boundary_bounds']
         ctx.overview_label = options['overview_label']
         ctx.overview_bounds_wgs84 = options['overview_bounds']
+    if ctx.paper_size == TARPAULIN_PAPER_SIZE:
+        for key, env, default in (('preview_dpi', 'MAP_EXPORT_PREVIEW_DPI', 120),
+                                  ('pdf_dpi', 'MAP_EXPORT_PDF_DPI', 300),
+                                  ('inset_dpi', 'MAP_EXPORT_INSET_DPI', 800)):
+            _output_dpi(ctx, key, env, default)
     if not ctx.layout_template_path:
         ctx.layout_template_path = Path(__file__).resolve().parents[2] / 'assets/qgis_layouts/client_boundary_map-v6.qpt'
     elif not ctx.layout_template_path.is_absolute():
@@ -728,7 +730,7 @@ def _configure_insets(ctx: ExportContext) -> None:
         extent_override=_saved_map_extent(ctx, 'map_inset', target_crs=upper_crs),
         overlay_style=_frame_style(ctx, 'map_inset'),
         buffer_factor=_render_option(ctx, 'boundary_buffer', lambda: _read_nonnegative_float_env('MAP_EXPORT_BOUNDARY_INSET_BUFFER', 4.0)),
-        inset_dpi=_render_option(ctx, 'inset_dpi', lambda: _read_int_env('MAP_EXPORT_INSET_DPI', 800)),
+        inset_dpi=_output_dpi(ctx, 'inset_dpi', 'MAP_EXPORT_INSET_DPI', 800),
     )
 
     # Inset 2: fixed configurable overview, with a boundary or locator pin.
@@ -753,7 +755,7 @@ def _configure_insets(ctx: ExportContext) -> None:
         live=getattr(ctx, 'live_insets', False),
         extent_override=_saved_map_extent(ctx, 'map_inset_2', target_crs=overview_crs),
         overlay_style=_frame_style(ctx, 'map_inset_2'),
-        inset_dpi=_render_option(ctx, 'inset_dpi', lambda: _read_int_env('MAP_EXPORT_INSET_DPI', 800)),
+        inset_dpi=_output_dpi(ctx, 'inset_dpi', 'MAP_EXPORT_INSET_DPI', 800),
     )
     if getattr(ctx, 'map_styles', None) is not None:
         ctx.frame_overlays.update(map_inset=upper_overlay, map_inset_2=lower_overlay)
@@ -778,10 +780,13 @@ def _build_print_layout_metadata(
         'grid_interval_degrees': ctx.grid_interval_degrees,
         'paper_size': ctx.paper_size,
         'orientation': 'landscape',
-        'dpi': ctx.dpi,
+        'page_size_mm': {'width': PAPER_SIZES_MM[ctx.paper_size][0], 'height': PAPER_SIZES_MM[ctx.paper_size][1]},
+        'dpi': (_output_dpi(ctx, 'pdf_dpi', 'MAP_EXPORT_PDF_DPI', 300)
+                if ctx.paper_size == TARPAULIN_PAPER_SIZE else ctx.dpi),
         'logo': str(ctx.logo_path) if ctx.logo_path else None,
         'render_options': _resolved_render_options(ctx),
         'inset_tile_scaling': getattr(ctx, 'inset_tile_scaling', {}),
+        'layout_settings': dict(getattr(ctx, 'layout_settings', {})),
     }
 
 
@@ -794,6 +799,9 @@ def _export_print_outputs(ctx: ExportContext) -> dict[str, str]:
     png_path = output_dir / "preview.png"
     pdf_temp_path = output_dir / "print_map_tmp.pdf"
     png_temp_path = output_dir / "preview_tmp.png"
+    # Validate the large-page allocation before touching any existing output.
+    preview_dpi = _output_dpi(ctx, 'preview_dpi', 'MAP_EXPORT_PREVIEW_DPI', 120)
+    pdf_dpi = _output_dpi(ctx, 'pdf_dpi', 'MAP_EXPORT_PDF_DPI', 300)
 
     for path in (pdf_path, png_path, pdf_temp_path, png_temp_path):
         path.unlink(missing_ok=True)
@@ -812,9 +820,6 @@ def _export_print_outputs(ctx: ExportContext) -> dict[str, str]:
     # -----------------------------
 
     exporter = q.QgsLayoutExporter(ctx.layout)
-
-    preview_dpi = _render_option(ctx, 'preview_dpi', lambda: _read_int_env("MAP_EXPORT_PREVIEW_DPI", 120))
-    pdf_dpi = _render_option(ctx, 'pdf_dpi', lambda: _read_int_env("MAP_EXPORT_PDF_DPI", 300))
 
     # Export preview first so we can verify layout before PDF.
     image_settings = q.QgsLayoutExporter.ImageExportSettings()
@@ -893,6 +898,7 @@ def build_qgis_print_layout(
     map_states: dict[str, Any] | None = None, text_values: dict[str, str] | None = None,
     text_styles: dict[str, Any] | None = None, output_dir: Path | None = None,
     map_styles: dict[str, Any] | None = None, grid_style: dict[str, Any] | None = None,
+    layout_settings: dict[str, Any] | None = None,
 ) -> ExportContext:
     """
     Build a shared layout; live insets do not write images or final outputs.
@@ -906,6 +912,9 @@ def build_qgis_print_layout(
     if render_options is not None:
         from .editor_model import validate_options
         render_options = validate_options(render_options)
+    if layout_settings is not None:
+        from .editor_furniture import validate_layout_settings
+        layout_settings = validate_layout_settings(layout_settings)
     qgis_classes = _load_qgis_classes()
     _init_qgis_application(qgis_classes.QgsApplication)
     if render_options is not None and not live_insets:
@@ -946,12 +955,23 @@ def build_qgis_print_layout(
     _apply_layout_variables(ctx)
     _configure_insets(ctx)
     apply_editor_text(ctx, text_values or {}, text_styles or {})
+    if layout_settings:
+        apply_layout_settings(ctx, layout_settings)
     return ctx
 
 
 def _render_option(ctx, name, legacy_default):
     options = getattr(ctx, 'render_options', None)
     return options[name] if options is not None else legacy_default()
+
+
+def _output_dpi(ctx, key, env_name, legacy_default):
+    large = getattr(ctx, 'paper_size', DEFAULT_PAPER_SIZE) == TARPAULIN_PAPER_SIZE
+    value = _render_option(ctx, key, lambda: _read_int_env(env_name, TARPAULIN_DPI if large else legacy_default))
+    if large and (isinstance(value, bool) or not isinstance(value, (int, float))
+                  or not math.isfinite(value) or not float(value).is_integer() or not 1 <= value <= TARPAULIN_DPI):
+        raise ValueError(f'4X8FT {key} must be a whole number from 1 to 300 DPI')
+    return value
 
 
 def _require_export_fonts():
@@ -990,9 +1010,9 @@ def _resolved_render_options(ctx):
     return {
         'paper_size': ctx.paper_size,
         'grid_font_size': 6.0,
-        'preview_dpi': _read_int_env('MAP_EXPORT_PREVIEW_DPI', 120),
-        'pdf_dpi': _read_int_env('MAP_EXPORT_PDF_DPI', 300),
-        'inset_dpi': _read_int_env('MAP_EXPORT_INSET_DPI', 800),
+        'preview_dpi': _output_dpi(ctx, 'preview_dpi', 'MAP_EXPORT_PREVIEW_DPI', 120),
+        'pdf_dpi': _output_dpi(ctx, 'pdf_dpi', 'MAP_EXPORT_PDF_DPI', 300),
+        'inset_dpi': _output_dpi(ctx, 'inset_dpi', 'MAP_EXPORT_INSET_DPI', 800),
         'main_buffer': _read_nonnegative_float_env('MAP_EXPORT_MAIN_BUFFER', 0.08),
         'auto_scale_multiplier': _read_float_env_at_least('MAP_EXPORT_AUTO_SCALE_MULTIPLIER', 2.5, minimum=1),
         'manual_scale': ctx.selected_map_scale if ctx.scale_mode == 'manual' else None,
@@ -1028,6 +1048,11 @@ def apply_editor_text(ctx, values, styles):
         item.refresh()
 
 
+def apply_layout_settings(ctx, settings):
+    from .editor_furniture import apply_layout_settings as apply
+    apply(ctx, settings)
+
+
 def refresh_main_map_furniture(ctx):
     """Update furniture from the current extent without fitting or snapping scale."""
     q = ctx.qgis
@@ -1048,6 +1073,8 @@ def refresh_main_map_furniture(ctx):
         info.setText(f'Scale 1:{ctx.map_scale:,}\nProjection: {_utm_label_from_epsg(ctx.target_epsg)} '
                      f'(EPSG:{ctx.target_epsg})\nGrid: {ctx.grid_label}')
         info.refresh()
+    if getattr(ctx, 'layout_settings', None):
+        apply_layout_settings(ctx, ctx.layout_settings)
 
 
 _QGIS_APP = None
@@ -1756,7 +1783,7 @@ def _add_inset_basemap_picture(
     QgsLayoutItemPicture: Any,
 ) -> None:
     picture = QgsLayoutItemPicture(layout)
-    picture.setId("map_inset_basemap")
+    picture.setId(inset_item.id() + '_basemap')
     picture.setPicturePath(str(image_path))
 
     try:

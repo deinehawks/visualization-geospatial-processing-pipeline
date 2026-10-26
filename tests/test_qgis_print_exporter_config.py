@@ -878,6 +878,7 @@ def test_boundary_inset_config_defaults_when_unset(monkeypatch):
     (
         ('A4', 'A4'),
         ('a3', 'A3'),
+        ('4x8ft', '4X8FT'),
         ('', 'A4'),
         ('letter', 'A4'),
     ),
@@ -893,7 +894,8 @@ def test_paper_size_config_accepts_a4_or_a3_and_falls_back(
     assert exporter._read_paper_size_env() == expected
 
 
-def test_a3_layout_proportionally_resizes_page_and_items(monkeypatch):
+@pytest.mark.parametrize('paper,width,height', [('A3', 420, 297), ('4X8FT', 2438.4, 1219.2)])
+def test_a3_layout_proportionally_resizes_page_and_items(monkeypatch, paper, width, height):
     exporter = _load_exporter_module(monkeypatch)
 
     class FakeMeasurement:
@@ -964,17 +966,17 @@ def test_a3_layout_proportionally_resizes_page_and_items(monkeypatch):
     ctx = SimpleNamespace(
         qgis=qgis,
         layout=layout,
-        paper_size='A3',
+        paper_size=paper,
     )
 
     exporter._configure_layout_paper_size(ctx)
 
-    assert page.size.width() == 420
-    assert page.size.height() == 297
-    assert item.position.x() == pytest.approx(10 * 420 / 297)
-    assert item.position.y() == pytest.approx(20 * 297 / 210)
-    assert item.size.width() == pytest.approx(100 * 420 / 297)
-    assert item.size.height() == pytest.approx(50 * 297 / 210)
+    assert page.size.width() == width
+    assert page.size.height() == height
+    assert item.position.x() == pytest.approx(10 * width / 297)
+    assert item.position.y() == pytest.approx(20 * height / 210)
+    assert item.size.width() == pytest.approx(100 * width / 297)
+    assert item.size.height() == pytest.approx(50 * height / 210)
     assert refreshed == [True]
 
 

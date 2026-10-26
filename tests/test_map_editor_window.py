@@ -249,7 +249,10 @@ def test_click_selects_label_and_opens_text_tab_without_dirtying_design(window):
     window.text_choice.setCurrentIndex.assert_called_with(0)
     window.tabs.setCurrentIndex.assert_called_with(1)
     assert window.selected_id == 'map_title'
+    assert not window.dirty  # A press only prepares a possible object drag.
+    window.view.mouseReleaseEvent(event)
     assert not window.dirty and window.view.anchor is None
+    window.session.move_object.assert_not_called()
 
 
 def test_selection_outline_is_view_only_and_does_not_change_layout(window):

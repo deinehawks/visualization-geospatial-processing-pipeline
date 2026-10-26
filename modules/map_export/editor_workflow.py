@@ -224,4 +224,5 @@ class RecoveryStore:
         from .editor_model import validate_package
         validate_package(package)
         return EditorDesign(package, value['options'], value['maps'], value['texts'],
-                            value['text_styles'], value['map_styles'], value['grid_style']).validate()
+                            value['text_styles'], value['map_styles'], value['grid_style'],
+                            layout_settings=value.get('layout_settings', {})).validate()

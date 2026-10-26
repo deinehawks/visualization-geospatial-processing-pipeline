@@ -1,5 +1,236 @@
 # Desktop Map Editor V2
 
+## Move any page object (2026-10-26)
+
+Save current edits, close the editor and restart `run_map_editor.bat`, then open
+your saved design. All 13 named template objects can now be repositioned:
+the main map, both insets, title, location, both inset labels, disclaimer,
+scale/CRS information, scale bar, logo, north arrow and basemap attribution.
+
+1. Click **Move Objects** above the canvas to enable frame movement.
+2. Select an object in **Page Objects**, then drag it on the page. Selecting it
+   in the list also lets you grab an object covered by another frame.
+3. For precise placement, open **Layout > Selected object position** and enter
+   **X / Y (mm)** from the page's top-left corner. Movement stays within the page.
+4. Turn **Move Objects** off to resume dragging inside a map to pan its contents
+   and using the wheel over a map to change map scale. Labels and pictures can
+   be dragged in either mode. In Move Objects mode, wheel zoom changes only the
+   page view; Ctrl+wheel and middle/Space-drag retain their canvas behavior.
+5. Save and export normally. One complete drag is one Undo/Redo step. Moving an
+   object preserves its size, map view/CRS, text and styling. Sizes are still
+   controlled through the existing Text/Style/Layout controls.
+
+Objects move independently, so arrange the north arrow and labels separately
+when shifting a map frame. Grid annotations and location pins stay with their
+map contents. Each final inset background moves together with its frame, keeping
+the exported basemap aligned with the boundary/pin. Generated background pictures
+are not independent user objects. Review overlap/clipping after text growth.
+
+Positions use optional `layout_settings.object_positions` in existing V2 designs,
+recovery, immutable helper snapshots and additive output metadata. Relative page
+positions survive A4/A3/4X8FT or CRS changes; original files without overrides
+keep template positions. Original logo-only saved positions/controls remain
+compatible. Location/style presets retain their scope and do not carry positions.
+No package regeneration or source copying is required.
+
+Validation: 55 new isolated positioning cases plus the existing 38 furniture cases
+pass on Python 3.10. The 513 focused regressions and all 1449 safe tests pass on
+3.13; 1449 safely collected. Six changed Python files compile in memory on 3.10.
+Fake Qt/GIS/process boundaries cover every object, one-drag history, unchanged
+map content/sizes, stacked selection, numeric placement, invalid/missing objects,
+partial setter rollback, legacy logo Undo, both inset backgrounds, paper/CRS,
+save/metadata/recovery, exact helper snapshots and earlier-file preservation.
+No real GIS, production database, credentials, source drives, runtime state or
+existing maps/designs were accessed or changed. No dependencies/schema changes,
+commits, pushes, file moves or deletions. Earlier local edits remain intact.
+
+Commands executed for this update:
+
+```powershell
+py -3.13 -m pytest tests/test_map_editor_positions.py tests/test_map_editor_furniture.py tests/test_map_editor_window.py -q --tb=short
+py -3.13 -m pytest tests/test_map_editor_positions.py tests/test_map_editor_furniture.py tests/test_map_editor_tarpaulin.py tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_qgis_print_exporter_config.py tests/test_map_editor_generator.py tests/test_map_export_manifest_resolution.py tests/test_map_export_multi_root.py -q --tb=short
+.\.venv310\Scripts\python.exe -m pytest tests/test_map_editor_positions.py tests/test_map_editor_furniture.py -q --tb=short
+py -3.13 -m pytest -q --tb=short
+py -3.13 -m pytest --collect-only -q | Select-Object -Last 3
+$probe = @'
+from pathlib import Path
+paths = ['modules/map_export/editor_furniture.py', 'modules/map_export/editor_session.py', 'modules/map_export/editor_window.py', 'modules/map_export/qgis_print_exporter.py', 'tests/test_map_editor_positions.py', 'tests/test_map_editor_window.py']
+for name in paths:
+    compile(Path(name).read_text(encoding='utf-8-sig'), name, 'exec')
+print('Python 3.10 syntax OK:', len(paths), 'files; no imports or bytecode writes')
+'@
+py -3.10 -B -c $probe
+git diff --check -- modules/map_export/editor_session.py modules/map_export/editor_window.py modules/map_export/qgis_print_exporter.py tests/test_map_editor_window.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+git diff --no-index --check -- NUL modules/map_export/editor_furniture.py
+git diff --no-index --check -- NUL tests/test_map_editor_positions.py
+```
+
+Real Windows/QGIS checking remains separately authorized: drag each object at
+display scaling, verify mode switching and overlaps, save/reopen, and compare
+both inset basemaps/overlays and object positions in preview/PNG/PDF. Automated
+fakes do not establish those visual results. Roll back an edit with Undo or
+reopen a saved design copy; sources and earlier exports remain untouched.
+
+## Editable scale information, scale bar and logo (2026-10-26)
+
+Save any current edits, close the editor, and reopen `run_map_editor.bat`.
+Open the saved design; regeneration is unnecessary. The new **Layout** tab
+controls physical print sizes on A4, A3 and 4X8FT:
+
+1. Select **Scale / CRS information** in Page Objects (or click it on the page).
+   Increase **Scale / CRS font (pt)**. The generated scale, projection and grid
+   wording remains automatic. The label grows to fit larger text.
+2. Select **Scale bar**. Increase **Scale-bar font (pt)** for its numbers/unit
+   and **Bar height (mm)** for thicker boxes. Distances remain linked to the
+   main map and update after navigation, without automatic reframing.
+3. Select **Logo**. Drag its frame on the page, or enter **Logo X / Y (mm)**
+   measured from the page's top-left corner. Dragging stays inside the page;
+   invalid numeric positions are rejected. Ctrl+wheel still zooms the canvas.
+4. Save the design, then export normally into a new export attempt. Font sizes
+   remain physical points across paper changes; the logo keeps its relative
+   page position. Inspect the preview for overlap after increasing sizes.
+
+Font sizes accept 1-1000 pt; scale-bar height accepts 0.5-100 mm. An entire logo
+drag is one Undo step. Numeric changes also support Undo/Redo. Position editing
+now covers all named objects through Move Objects and Layout, as described above.
+Existing designs/CLI/BAT calls retain template appearance until explicitly
+edited. Optional `layout_settings` in V2 JSON, recovery snapshots, export
+snapshots and output metadata preserve these settings; old V1/V2 files still
+open without overrides. Location/style presets keep their existing scope and
+do not carry these layout overrides.
+
+Validation uses tiny pytest-owned packages and fake Qt/GIS/process boundaries:
+38 new cases pass on Python 3.10; 458 focused regressions and all 1394 safe tests
+pass on 3.13, with 1394 safely collected. Tests cover sizing without changing
+wording/extents, template restoration, single-drag history, invalid/missing
+items, setter failure rollback, paper/CRS rebuilds, old designs, save/reopen,
+metadata/recovery, immutable helper snapshots and preservation on failure.
+Seven scoped Python files compile in memory on 3.10. Commands executed:
+
+```powershell
+py -3.13 -m pytest tests/test_map_editor_furniture.py -q --tb=short
+py -3.13 -m pytest tests/test_map_editor_furniture.py tests/test_map_editor_tarpaulin.py tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_qgis_print_exporter_config.py tests/test_map_editor_generator.py tests/test_map_export_manifest_resolution.py tests/test_map_export_multi_root.py -q --tb=short
+.\.venv310\Scripts\python.exe -m pytest tests/test_map_editor_furniture.py -q --tb=short
+py -3.13 -m pytest -q --tb=short
+py -3.13 -m pytest --collect-only -q | Select-Object -Last 3
+$probe = @'
+from pathlib import Path
+paths = ['modules/map_export/editor_furniture.py', 'modules/map_export/editor_model.py', 'modules/map_export/editor_session.py', 'modules/map_export/editor_window.py', 'modules/map_export/editor_workflow.py', 'modules/map_export/qgis_print_exporter.py', 'tests/test_map_editor_furniture.py']
+for name in paths:
+    compile(Path(name).read_text(encoding='utf-8-sig'), name, 'exec')
+print('Python 3.10 syntax OK:', len(paths), 'files; no imports or bytecode writes')
+'@
+py -3.10 -B -c $probe
+git diff --check -- modules/map_export/editor_model.py modules/map_export/editor_session.py modules/map_export/editor_window.py modules/map_export/editor_workflow.py modules/map_export/qgis_print_exporter.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+git diff --no-index --check -- NUL modules/map_export/editor_furniture.py
+git diff --no-index --check -- NUL tests/test_map_editor_furniture.py
+```
+
+No source surveys, production database, credentials, real GIS tools, existing
+designs/maps or runtime state were accessed or changed. No dependencies,
+schema changes, commits or pushes. Before print production, separately authorize
+a Windows/QGIS check: logo dragging at display scaling, enlarged text/bar with
+no overlap/clipping, paper switching, Save/reopen, and matching preview/PDF.
+
+## 4 x 8 ft tarpaulin printing (2026-10-26)
+
+The **Page** tab now offers **4X8FT** alongside A3 and A4. This is landscape:
+**8 ft wide x 4 ft high**, exactly **2438.4 x 1219.2 mm** (96 x 48 inches).
+At 300 DPI the full PNG is **28,800 x 14,400 pixels**. The PDF page uses the
+same physical dimensions; this is not an A3 image with an enlarged print setting.
+
+1. Reopen `run_map_editor.bat` to load the updated code, then open your package
+   or saved design normally. No regeneration or TIFF copying is needed.
+2. In **Editor > Page > Landscape paper**, choose **4X8FT**.
+3. PNG, PDF and inset DPI switch together to **300** in one undoable edit. Save
+   the design separately with **Save As** if you want to retain your A3 design.
+4. Review the wider page with **Fit Page** and canvas zoom. Map framing follows
+   existing QGIS frame fitting; a new frame aspect ratio can expand visible
+   coverage around the saved view. No automatic Auto-fit/scale rounding runs.
+5. Use **Export PDF + PNG**, then give the print shop the PDF at **actual size /
+   100%**, 8 ft wide x 4 ft high. Do not request A4/A3 fitting. Bleed, hems,
+   eyelets, printer color profiles and crop marks are not added by this preset.
+
+Font sizes, colors, pins, grid styling, wording and map locations are not
+silently enlarged/restyled. Adjust editable text in **Text**, coordinates in
+**Map**, and pins/grid/boundaries in **Style** for the intended viewing distance.
+Check scale-bar/info text, logos and north arrow on the new page as well.
+
+Large-format exports are deliberately limited to **1-300 DPI** for each output;
+lower values are available for drafts. The old 450/800-DPI defaults do not carry
+into this preset. A single 300-DPI full-page RGBA buffer is about 1.55 GiB, and
+rendering may require several buffers plus source imagery and inset images.
+Even at 300 DPI, success depends on available RAM and the real source data.
+Failed/cancelled export attempts retain their existing isolated evidence; they
+never replace earlier exports. No full-size real render was run during coding.
+
+The live editor uses a bounded 25-DPI large-page cache (about 2400 pixels wide),
+not a full 300-DPI canvas. This affects editing preview only; saved output DPI
+and export snapshots stay at 300. A3/A4 editing stays at 96 DPI and their normal
+new-design defaults remain PNG 300 / PDF 450 / inset 800. Switching back to A3/A4
+keeps your currently selected DPI; Undo restores the entire previous page/DPI
+state. Those smaller papers still allow the existing 1-2400-DPI range.
+
+Version-2 designs, style presets, recovery and export snapshots retain the new
+paper value and exact selected DPI. Package metadata adds `page_size_mm`, and
+large-page metadata reports the selected PDF DPI. Older A4/A3 V1/V2 designs are
+unchanged. Before reverting to older editor code, save an A4/A3 copy rather than
+expecting that code to recognize `4X8FT`. Original source packages stay read-only.
+
+Literal BAT import also recognizes `MAP_EXPORT_PAPER_SIZE=4X8FT`. Explicitly
+supplied larger DPI settings are rejected, not silently reduced. If using the
+shared BAT/CLI renderer, set all three DPI variables to 300 (or lower); its
+existing A4 default and old A4/A3 export settings remain unchanged.
+
+### Tarpaulin validation
+
+Automated tests use fake Qt/QGIS/GDAL/process boundaries and pytest-owned tiny
+packages. The final PNG/PDF settings test uses in-memory paths and does not
+allocate a 414.72-megapixel image. Coverage includes dimensions, both insets,
+300-DPI export settings/metadata, bounded preview, larger-DPI rejection before
+output mutation, controls, history/undo, save/reopen, metadata fallback, literal
+BAT import, presets, exact helper snapshots and source/prior-export preservation
+on failure. Existing renderer geometry assertions now also cover 4X8FT.
+
+Commands executed:
+
+```powershell
+py -3.13 -m pytest tests/test_map_editor_tarpaulin.py tests/test_map_editor_model.py tests/test_map_editor_session.py tests/test_map_editor_window.py tests/test_map_editor_v2_workflow.py tests/test_qgis_print_exporter_config.py tests/test_map_editor_generator.py tests/test_map_export_manifest_resolution.py tests/test_map_export_multi_root.py -q --tb=short
+.\.venv310\Scripts\python.exe -m pytest tests/test_map_editor_tarpaulin.py -q --tb=short
+py -3.13 -m pytest -q --tb=short
+py -3.13 -m pytest --collect-only -q | Select-Object -Last 3
+git diff --check -- modules/map_export/editor_model.py modules/map_export/editor_session.py modules/map_export/editor_window.py modules/map_export/qgis_print_exporter.py tests/test_qgis_print_exporter_config.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+```
+
+Results: 32 new cases pass on Python 3.10; 420 focused and all 1356 safe default
+tests pass on Python 3.13, with 1356 safely collected. Two existing parameterized
+renderer cases additionally cover the new size. Six Python files compile in
+memory on 3.10; scoped whitespace and explicit new-file EOF checks pass. The
+syntax probe, passed to `py -3.10 -B -c`, was:
+
+```python
+from pathlib import Path
+files = ('modules/map_export/editor_model.py', 'modules/map_export/editor_session.py', 'modules/map_export/editor_window.py', 'modules/map_export/qgis_print_exporter.py', 'tests/test_qgis_print_exporter_config.py', 'tests/test_map_editor_tarpaulin.py')
+for name in files:
+    compile(Path(name).read_text(encoding='utf-8-sig'), name, 'exec')
+name = 'tests/test_map_editor_tarpaulin.py'
+value = Path(name).read_text(encoding='utf-8-sig')
+assert value.endswith('\n') and not value.endswith('\n\n'), name
+assert all(line == line.rstrip() for line in value.splitlines()), name
+```
+
+Four application modules and one existing test modified, one test module added,
+and this guide plus three refactor records updated. No dependencies, schema,
+frontend, launcher or production changes; no moves/deletions, source-drive/
+credential/database access, GIS execution, existing map overwrite, commit or
+push. Prior unrelated local edits and deleted BAT files are preserved.
+
+Real QGIS/Windows/full-size export validation remains separately authorized:
+check page appearance, font/pin legibility, logo proportions, basemap alignment,
+preview/PDF consistency, actual PDF dimensions, PNG dimensions/DPI and memory
+behavior using an explicitly selected package and new output folder. Mocked
+tests are not proof of a successful full-size print render.
+
 Launch from the repository in PowerShell:
 
 ```powershell
@@ -203,7 +434,8 @@ The earlier local atomic-save fix and unrelated local edits remain untouched.
 The editor now opens maximized. The center preview gets the expandable share of
 the workspace, with slimmer/resizable side panels. **Fit Page** fits the actual
 paper with a small margin instead of the whole layout scene's empty workspace.
-The fixed print frame geometry and exported page size are not changed.
+Canvas zoom does not resize print frames or change the exported page size.
+Use the separate Move Objects control to change frame positions.
 
 A navigation bar stays directly above the preview, outside the property tabs:
 **- / +**, **Fit Page**, **Fit Width**, **100%**, and **Focus Canvas**.
@@ -300,9 +532,10 @@ Qt pixel geometry was not tested by the mocked suite.
 
 Restart the editor with the same launcher to use V2. The light interface has a
 page-object list on the left, page preview in the center, and Map / Text / Style /
-Page tabs on the right. Click an editable map or label to select it. The blue
-selection outline is drawn only in the view and is never exported. Positions,
-frame sizes, logo, and page composition remain locked.
+Page / Layout tabs on the right. Click an editable map, label or page-furniture
+item to select it. The blue selection outline is drawn only in the view and is
+never exported. Use Move Objects to reposition frames; Layout provides X/Y
+controls for every object, together with the scale-furniture sizing controls.
 
 Drag inside a map to pan its contents; scroll over a map to zoom that map.
 **Fit Page** and the Page tab's page-view zoom buttons change only your view of
@@ -364,8 +597,9 @@ text, and styles, not later edits, selection outlines, or automatic reframing.
    also be applied directly. Bounds use `min_lon,min_lat,max_lon,max_lat`.
    Frame proportions can require extra surrounding area.
 4. Select a label and type. Font family, point size, bold, and color update live.
-   Frames, label positions, logo, and other layout elements stay fixed.
-5. Choose A4/A3 landscape and output DPI. Each inset can use a boundary or pin.
+   Use Move Objects for dragging frames or Layout for precise X/Y placement.
+   Layout also controls generated scale/CRS font size and scale-bar font/height.
+5. Choose A4/A3/4X8FT landscape and output DPI. Each inset can use a boundary or pin.
    The main map's coordinate grid, scale text, and scale bar follow navigation.
    Only **Auto-fit main map** reapplies standard automatic scale selection.
    **Main-map coordinates (pt)** changes the coordinate-label font size live

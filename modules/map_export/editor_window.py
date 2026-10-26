@@ -8,13 +8,17 @@ import sys
 from .editor_model import (
     MAP_IDS, TEXT_IDS, REPO_ROOT, apply_bat_settings, design_from_package,
     load_design, save_design,
+    EDITOR_PAPER_CHOICES, TARPAULIN_PAPER_SIZE, TARPAULIN_DPI,
 )
 from .editor_session import EditorSession, ExportJob, export_qt_platform
+from .editor_furniture import FURNITURE_IDS, MOVABLE_IDS, furniture_values, object_position_values
 from .editor_generator import HelperGate
 from .editor_generator_page import create_generator_page
 from .editor_workflow import (
     DesignHistory, RecoveryStore, load_presets, location_preset, style_preset, save_preset,
 )
+
+OBJECT_IDS = MOVABLE_IDS
 
 
 def create_window_class():
@@ -35,6 +39,7 @@ def create_window_class():
             self.owner = owner
             self.anchor = None
             self.drag_map = None
+            self.drag_object = False
             self.pending = [0.0, 0.0]
             self.canvas_anchor = None
             self.canvas_button = None
@@ -49,6 +54,7 @@ def create_window_class():
             if self.anchor is not None and self.owner.history is not None:
                 self.owner.history.end_group()
             self.anchor = None
+            self.drag_object = False
             self.pending = [0.0, 0.0]
             self.canvas_anchor = self.canvas_button = None
             self.setCursor(Qt.OpenHandCursor if self.space_down else Qt.ArrowCursor)
@@ -57,7 +63,13 @@ def create_window_class():
             dx, dy = self.pending
             self.pending = [0.0, 0.0]
             if dx or dy:
-                self.owner.perform(lambda: self.owner.session.pan(self.drag_map, dx, dy), grouped=True)
+                if self.drag_object:
+                    def move():
+                        x, y = self.owner.session.object_position(self.drag_map)
+                        self.owner.session.move_object(self.drag_map, x + dx, y + dy, clamp=True)
+                    self.owner.perform(move, grouped=True)
+                else:
+                    self.owner.perform(lambda: self.owner.session.pan(self.drag_map, dx, dy), grouped=True)
 
         def _point(self, event):
             return self.mapToScene(event.pos())
@@ -77,9 +89,10 @@ def create_window_class():
                 key = self.owner.hit_item(point)
                 if key:
                     self.owner.select_item(key)
-                if key in MAP_IDS:
+                if key in OBJECT_IDS:
                     self.anchor = point
                     self.drag_map = key
+                    self.drag_object = self.owner.move_objects or key not in MAP_IDS
                     if self.owner.history is not None:
                         self.owner.history.begin_group()
             event.accept()
@@ -94,9 +107,10 @@ def create_window_class():
                 vertical.setValue(vertical.value() - dy)
             elif self.anchor is not None:
                 point = self._point(event)
-                item = self.owner.session._map(self.drag_map)
-                dx = (point.x() - self.anchor.x()) / item.rect().width()
-                dy = (point.y() - self.anchor.y()) / item.rect().height()
+                dx, dy = point.x() - self.anchor.x(), point.y() - self.anchor.y()
+                if not self.drag_object:
+                    item = self.owner.session._map(self.drag_map)
+                    dx, dy = dx / item.rect().width(), dy / item.rect().height()
                 self.anchor = point
                 self.pending[0] += dx
                 self.pending[1] += dy
@@ -130,7 +144,7 @@ def create_window_class():
             self.cancel_drag()
             if self.owner.session:
                 key = self.owner.hit_item(self._point(event))
-                if self.space_down or event.modifiers() & Qt.ControlModifier or key not in MAP_IDS:
+                if self.owner.move_objects or self.space_down or event.modifiers() & Qt.ControlModifier or key not in MAP_IDS:
                     factor = 1.2 ** max(-4, min(4, delta / 120))
                     self.owner.zoom_page(factor, anchor=event.pos())
                 else:
@@ -194,6 +208,7 @@ def create_window_class():
             self.recovery = None
             self.recovered_paths = []
             self.selected_id = 'map_frame'
+            self.move_objects = False
             self.export_outputs = {}
             self.presets = []
             self.canvas_focus = False
@@ -257,10 +272,14 @@ def create_window_class():
             object_layout.addWidget(QLabel('PAGE OBJECTS'))
             self.object_list = QListWidget()
             self.object_list.addItems(['Main Map', 'Upper Inset', 'Lower Inset', 'Title', 'Location',
-                                       'Upper inset label', 'Lower inset label', 'Disclaimer'])
+                                       'Upper inset label', 'Lower inset label', 'Disclaimer',
+                                       'Scale / CRS information', 'Scale bar', 'Logo',
+                                       'North arrow', 'Basemap attribution'])
             self.object_list.currentRowChanged.connect(self.select_row)
             object_layout.addWidget(self.object_list)
-            object_layout.addWidget(QLabel('Layout positions and logo are locked.'))
+            locked_hint = QLabel('Drag labels and pictures to move them. Use Move Objects for map frames.')
+            locked_hint.setWordWrap(True)
+            object_layout.addWidget(locked_hint)
             splitter.addWidget(objects)
             self.view = MapView(self)
             self.view.setBackgroundBrush(QColor('#e2e8f0'))
@@ -270,6 +289,10 @@ def create_window_class():
             canvas_layout = QVBoxLayout(canvas)
             canvas_layout.setContentsMargins(0, 0, 0, 0)
             navigation = QHBoxLayout()
+            self.move_button = QPushButton('Move Objects')
+            self.move_button.setCheckable(True)
+            self.move_button.toggled.connect(self.change_move_mode)
+            navigation.addWidget(self.move_button)
             self.canvas_buttons = {}
             for key, label, handler in (
                 ('out', '-', lambda: self.zoom_page(1 / 1.2)),
@@ -287,13 +310,13 @@ def create_window_class():
                 self.canvas_buttons[key] = button
             navigation.addStretch()
             canvas_layout.addLayout(navigation)
-            canvas_layout.addWidget(QLabel('Ctrl+wheel: canvas zoom | Middle/Space-drag: pan canvas'))
+            canvas_layout.addWidget(QLabel('Move Objects: reposition frames | Ctrl+wheel: canvas zoom | Middle/Space-drag: pan canvas'))
             canvas_layout.addWidget(self.view, 1)
             splitter.addWidget(canvas)
             self.tabs = QTabWidget()
             self.tabs.setMinimumWidth(300)
             tab_layouts = []
-            for title in ('Map', 'Text', 'Style', 'Page'):
+            for title in ('Map', 'Text', 'Style', 'Page', 'Layout'):
                 scroll = QScrollArea()
                 scroll.setWidgetResizable(True)
                 controls = QWidget()
@@ -459,7 +482,7 @@ def create_window_class():
             form.setRowWrapPolicy(QFormLayout.WrapLongRows)
             form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
             self.paper = QComboBox()
-            self.paper.addItems(['A3', 'A4'])
+            self.paper.addItems(list(EDITOR_PAPER_CHOICES))
             self.paper.currentTextChanged.connect(self.change_paper)
             form.addRow('Landscape paper', self.paper)
             self.dpi = {}
@@ -470,6 +493,9 @@ def create_window_class():
                 self.dpi[key] = control
                 form.addRow(label, control)
             panel.addWidget(output)
+            self.paper_hint = QLabel('')
+            self.paper_hint.setWordWrap(True)
+            panel.addWidget(self.paper_hint)
             page_zoom = QGroupBox('Page view — does not change map scale')
             form = QHBoxLayout(page_zoom)
             for label, handler in (('−', lambda: self.zoom_page(1 / 1.2)), ('Fit Page', self.fit_page),
@@ -492,6 +518,50 @@ def create_window_class():
                 panel.addWidget(action)
                 self.actions['output_' + kind] = action
             panel.addStretch()
+            panel = tab_layouts[4]
+            hint = QLabel('Print sizes in points / millimeters. Scale and CRS values stay automatic. '
+                          'Select any page object to edit its top-left position. Use Move Objects to drag map frames.')
+            hint.setWordWrap(True)
+            panel.addWidget(hint)
+            positioning = QGroupBox('Selected object position')
+            form = QFormLayout(positioning)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            self.position_label = QLabel('')
+            self.position_label.setWordWrap(True)
+            form.addRow(self.position_label)
+            self.position_controls = {}
+            for axis in ('x', 'y'):
+                control = QDoubleSpinBox()
+                control.setRange(0, 3000)
+                control.setDecimals(2)
+                control.setKeyboardTracking(False)
+                control.valueChanged.connect(lambda value, a=axis: self.change_object_position(a, value))
+                self.position_controls[axis] = control
+                form.addRow(axis.upper() + ' (mm)', control)
+            panel.addWidget(positioning)
+            furniture = QGroupBox('Page furniture')
+            form = QFormLayout(furniture)
+            form.setRowWrapPolicy(QFormLayout.WrapLongRows)
+            form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+            self.furniture_controls = {}
+            for key, label, minimum, maximum in (
+                ('info_font_size', 'Scale / CRS font (pt)', 1, 1000),
+                ('scale_font_size', 'Scale-bar font (pt)', 1, 1000),
+                ('scale_height_mm', 'Bar height (mm)', 0.5, 100),
+                ('logo_x_mm', 'Logo X (mm)', 0, 3000),
+                ('logo_y_mm', 'Logo Y (mm)', 0, 1500),
+            ):
+                control = QDoubleSpinBox()
+                control.setRange(minimum, maximum)
+                control.setDecimals(2)
+                control.setKeyboardTracking(False)
+                control.valueChanged.connect(lambda value, k=key: self.change_furniture(k, value))
+                self.furniture_controls[key] = control
+                form.addRow(label, control)
+            panel.addWidget(furniture)
+            panel.addStretch()
+            self.tabs.currentChanged.connect(self.show_layout_controls)
             # Long preset/font names must not force a scroll tab wider than its
             # viewport. Keep a useful field hint and let forms wrap narrow rows.
             for choice in (self.map_choice, self.overlay, self.overview_crs,
@@ -530,15 +600,29 @@ def create_window_class():
 
         def hit_item(self, point):
             if self.session:
-                for key in TEXT_IDS + MAP_IDS:
+                hits = []
+                for key in OBJECT_IDS:
                     item = self.session.ctx.layout.itemById(key)
-                    if item is not None and item.sceneBoundingRect().contains(point):
-                        return key
+                    if item is not None and item.isVisible() and item.sceneBoundingRect().contains(point):
+                        if self.move_objects and key == self.selected_id:
+                            return key
+                        hits.append((key, item))
+                if hits:
+                    return max(hits, key=lambda pair: pair[1].zValue())[0]
             return None
 
+        def change_move_mode(self, enabled):
+            self.view.flush_pan()
+            self.view.cancel_drag()
+            self.finish_text_group()
+            self.move_objects = bool(enabled)
+            if self.session and self.move_objects:
+                self.tabs.setCurrentIndex(4)
+                self.refresh_controls()
+
         def select_row(self, row):
-            if 0 <= row < len(MAP_IDS + TEXT_IDS):
-                self.select_item((MAP_IDS + TEXT_IDS)[row])
+            if 0 <= row < len(OBJECT_IDS):
+                self.select_item(OBJECT_IDS[row])
 
         def select_map(self, index):
             if 0 <= index < len(MAP_IDS):
@@ -549,20 +633,24 @@ def create_window_class():
                 self.select_item(TEXT_IDS[index])
 
         def select_item(self, key):
-            if self.loading or key not in MAP_IDS + TEXT_IDS:
+            if self.loading or key not in OBJECT_IDS:
                 return
             self.finish_text_group()
             self.selected_id = key
             self.loading = True
             try:
-                self.object_list.setCurrentRow((MAP_IDS + TEXT_IDS).index(key))
+                self.object_list.setCurrentRow(OBJECT_IDS.index(key))
                 if key in MAP_IDS:
                     self.map_choice.setCurrentIndex(MAP_IDS.index(key))
-                    if self.tabs.currentIndex() != 2:
+                    if self.move_objects:
+                        self.tabs.setCurrentIndex(4)
+                    elif self.tabs.currentIndex() != 2:
                         self.tabs.setCurrentIndex(0)
-                else:
+                elif key in TEXT_IDS:
                     self.text_choice.setCurrentIndex(TEXT_IDS.index(key))
-                    self.tabs.setCurrentIndex(1)
+                    self.tabs.setCurrentIndex(4 if self.move_objects else 1)
+                else:
+                    self.tabs.setCurrentIndex(4)
             finally:
                 self.loading = False
             self.refresh_controls()
@@ -865,7 +953,13 @@ def create_window_class():
                 self.auto_multiplier.setValue(self.session.design.options['auto_scale_multiplier'])
                 self.grid_font_size.setValue(self.session.design.options['grid_font_size'])
                 for key, control in self.dpi.items():
+                    control.setMaximum(TARPAULIN_DPI if self.session.design.options['paper_size'] == TARPAULIN_PAPER_SIZE else 2400)
                     control.setValue(self.session.design.options[key])
+                self.paper_hint.setText(
+                    '4X8FT: 8 ft wide x 4 ft high (2438.4 x 1219.2 mm). '
+                    '300 DPI: 28,800 x 14,400 pixels. Large exports need substantial RAM. '
+                    'Fonts, pins and grid sizes remain physical print sizes; adjust them in Text / Style / Layout.'
+                    if self.session.design.options['paper_size'] == TARPAULIN_PAPER_SIZE else '')
                 style = self.session.design.map_styles[self.map_id()]
                 for key, control in self.style_controls.items():
                     control.setValue(style[key] * (100 if key.endswith('_opacity') else 1))
@@ -881,8 +975,40 @@ def create_window_class():
                 self.grid_opacity.setValue(grid['opacity'] * 100)
                 self.grid_color = grid['color']
                 self.grid_color_button.setStyleSheet(f'color: {self.grid_color}')
+                if self.selected_id not in MAP_IDS + TEXT_IDS or self.tabs.currentIndex() == 4:
+                    values = furniture_values(self.session.ctx)
+                    for axis in ('x', 'y'):
+                        self.furniture_controls[f'logo_{axis}_mm'].setMaximum(values[f'logo_max_{axis}_mm'])
+                    for key, control in self.furniture_controls.items():
+                        control.setValue(values[key])
+                    values = object_position_values(self.session.ctx, self.selected_id)
+                    self.position_label.setText(self.object_list.currentItem().text())
+                    for axis, control in self.position_controls.items():
+                        control.setMaximum(values[f'max_{axis}_mm'])
+                        control.setValue(values[f'{axis}_mm'])
             finally:
                 self.loading = False
+
+        def show_layout_controls(self, index):
+            if index == 4 and not self.loading:
+                self.refresh_controls()
+
+        def change_object_position(self, axis, value):
+            def action():
+                x, y = self.session.object_position(self.selected_id)
+                self.session.move_object(self.selected_id, value if axis == 'x' else x,
+                                         value if axis == 'y' else y)
+            self.perform(action)
+
+        def change_furniture(self, key, value):
+            def action():
+                if key in ('logo_x_mm', 'logo_y_mm'):
+                    x, y = self.session.logo_position()
+                    self.session.move_logo(value if key == 'logo_x_mm' else x,
+                                           value if key == 'logo_y_mm' else y)
+                else:
+                    self.session.set_layout_setting(key, value)
+            self.perform(action)
 
         def change_text(self, *_args):
             if self.loading or not self.session:
