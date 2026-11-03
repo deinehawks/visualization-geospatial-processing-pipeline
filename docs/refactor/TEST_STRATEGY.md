@@ -1,5 +1,20 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Requested tarpaulin sizes (2026-10-27)
+
+Add 11 isolated default-profile cases; strengthen existing fake labels so font
+attributes survive rendering/restoration and snapshots. Update prior paper
+assertions for the explicit new 4X8FT defaults while retaining preservation
+checks. Cover each numeric size, template font attributes, positions/views/text,
+one-step paper/action history, setter failure rollback, saved custom sizes,
+same-paper selection, CRS, other paper defaults and immutable helper arguments.
+No new production dependency, test switches or safety-guard changes.
+
+Validation: 11 new cases on 3.10; 237 focused and 1460 safe tests on 3.13;
+1460 safely collected. Eight Python paths compile in memory on 3.10; scoped
+whitespace checks pass. Fake Qt/GIS/process only, files pytest-owned. Real QGIS
+text overlap and preview/PDF sizing remain separate operator validation.
+
 ## General page-object positioning (2026-10-26)
 
 Add 55 isolated cases covering all 13 named objects and extend the existing

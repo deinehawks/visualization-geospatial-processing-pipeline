@@ -1,5 +1,22 @@
 # Refactor Current Status
 
+## Operator-requested tarpaulin size profile (2026-10-27)
+
+Implemented the user's 4X8FT defaults: title 85 pt, address 55 pt, inset titles
+45 pt, pins 10 mm, coordinates 30 pt, scale info 41 pt, scale-bar labels 40 pt,
+bar height 5 mm and disclaimer 40 pt. Entering the paper applies the profile
+with 300 DPI in one history step; Page also offers explicit reapplication.
+Saved/custom sizes, positions, wording, geographic views and A4/A3 defaults stay
+preserved. No automatic profile reapplication during reopen/CRS/export.
+
+Validation: 11 new cases on 3.10, 237 focused and all 1460 safe tests on 3.13;
+1460 safely collected. Eight Python files compile in memory on 3.10; scoped
+whitespace checks pass. Three runtime/four existing test modules updated, one
+test module added, operator guide/three refactor records updated. No files
+moved/deleted, dependencies/schema, production/source/runtime changes, real GIS
+execution or commits/pushes. User note edits preserved. Real typography/export
+inspection remains operator work; commands are in the map-editor guide.
+
 ## All named page objects movable (2026-10-26)
 
 Implemented the user's expanded positioning request for all 13 named template

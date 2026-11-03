@@ -95,6 +95,8 @@ def test_positions_survive_paper_and_crs_rebuilds_with_unchanged_extents(positio
         s.move_object(key, 30, 25)
     settings, maps = copy.deepcopy(s.design.layout_settings), s.snapshot().maps
     s.set_paper(paper)
+    if paper == '4X8FT':
+        settings.update(info_font_size=41, scale_font_size=40, scale_height_mm=5)
     width, height = PAPER_SIZES_MM[paper]
     for key in MOVABLE_IDS:
         assert s.object_position(key) == pytest.approx((30 / 420 * width, 25 / 297 * height))

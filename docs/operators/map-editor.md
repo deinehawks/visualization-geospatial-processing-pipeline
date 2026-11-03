@@ -1,5 +1,58 @@
 # Desktop Map Editor V2
 
+## Requested 4X8FT size defaults (2026-10-27)
+
+Choosing 4X8FT from another paper size now applies these sizes together with
+the existing 300-DPI settings in one undoable edit:
+
+| Object | Default print size |
+| --- | --- |
+| Title | 85 pt |
+| Address/location | 55 pt |
+| Both inset titles | 45 pt |
+| Both inset pins | 10 mm |
+| Main-map coordinate labels | 30 pt |
+| Scale/projection information | 41 pt |
+| Scale-bar labels | 40 pt |
+| Scale-bar height | 5 mm |
+| Disclaimer | 40 pt |
+
+Save current edits and restart the launcher. On an already-opened 4X8FT design,
+use **Page > Apply 4 x 8 ft defaults**. This button changes only these sizes;
+it preserves wording, fonts/colors/bold, object positions, map views, overlay
+modes, other styling and manually selected draft DPI. Review text overlap after
+applying. Reopening a saved design, switching CRS, or reselecting the same paper
+does not reset later custom sizes. Existing A4/A3 defaults and CLI/BAT behavior
+remain unchanged. Returning to A4/A3 preserves edited physical sizes; Undo can
+restore the complete earlier paper/design state.
+
+Validation: 11 new cases pass on Python 3.10; 237 focused editor cases and all
+1460 safe tests pass on 3.13, with 1460 safely collected. Eight scoped Python
+files compile in memory on 3.10. Existing font fakes now retain applied font
+attributes, so snapshots verify actual requested sizes. Prior paper-change
+assertions explicitly account for the newly requested profile. Tests cover all
+sizes, style/position/geographic preservation, exact helper snapshots, saved
+custom sizes, unchanged A4/A3 defaults, one-step Undo and failure rollback.
+
+```powershell
+py -3.13 -m pytest tests/test_map_editor_tarpaulin_defaults.py tests/test_map_editor_tarpaulin.py tests/test_map_editor_furniture.py tests/test_map_editor_positions.py tests/test_map_editor_session.py tests/test_map_editor_window.py -q --tb=short
+.\.venv310\Scripts\python.exe -m pytest tests/test_map_editor_tarpaulin_defaults.py -q --tb=short
+py -3.13 -m pytest -q --tb=short
+py -3.13 -m pytest --collect-only -q | Select-Object -Last 3
+git diff --check -- modules/map_export/editor_model.py modules/map_export/editor_session.py modules/map_export/editor_window.py tests/test_map_editor_session.py tests/test_map_editor_tarpaulin.py tests/test_map_editor_furniture.py tests/test_map_editor_positions.py docs/operators/map-editor.md docs/refactor/CURRENT_STATUS.md docs/refactor/DECISIONS.md docs/refactor/TEST_STRATEGY.md
+git diff --no-index --check -- NUL tests/test_map_editor_tarpaulin_defaults.py
+```
+
+Syntax check used `py -3.10 -B -c` with in-memory `compile()` over those seven
+tracked Python paths plus `tests/test_map_editor_tarpaulin_defaults.py`, without
+imports/bytecode writes. Scoped whitespace checks pass. Three runtime modules
+and four existing test modules updated; one test module added; operator/refactor
+records updated. No source surveys, credentials, production database/runtime,
+existing designs/exports, dependencies or actual GIS commands touched. No files
+moved/deleted or Git commits/pushes. User edits to `codes.txt` were left alone.
+Real QGIS text appearance/overlap and preview-to-PDF sizing remain separately
+authorized operator checks.
+
 ## Move any page object (2026-10-26)
 
 Save current edits, close the editor and restart `run_map_editor.bat`, then open

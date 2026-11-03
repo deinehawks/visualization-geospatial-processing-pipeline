@@ -197,10 +197,12 @@ def test_paper_rebuild_preserves_print_sizes_and_relative_logo_position(furnitur
     width, height = PAPER_SIZES_MM[paper]
     assert values['logo_x_mm'] == pytest.approx(width * .55)
     assert values['logo_y_mm'] == pytest.approx(height * .7)
-    assert values['info_font_size'] == 72 and values['scale_height_mm'] == 12
+    assert values['info_font_size'] == (41 if paper == '4X8FT' else 72)
+    assert values['scale_height_mm'] == (5 if paper == '4X8FT' else 12)
     assert s.snapshot().maps == maps
+    expected = copy.deepcopy(s.design.layout_settings)
     s.set_inset_crs('map_inset', 'project')
-    assert s.design.layout_settings == SETTINGS and furniture_values(s.ctx) == values
+    assert s.design.layout_settings == expected and furniture_values(s.ctx) == values
 
 
 def test_save_reopen_metadata_and_recovery_keep_optional_settings(package, tmp_path):

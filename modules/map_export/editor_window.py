@@ -485,6 +485,9 @@ def create_window_class():
             self.paper.addItems(list(EDITOR_PAPER_CHOICES))
             self.paper.currentTextChanged.connect(self.change_paper)
             form.addRow('Landscape paper', self.paper)
+            self.tarpaulin_defaults_button = QPushButton('Apply 4 x 8 ft defaults')
+            self.tarpaulin_defaults_button.clicked.connect(self.apply_tarpaulin_defaults)
+            form.addRow(self.tarpaulin_defaults_button)
             self.dpi = {}
             for key, label in [('preview_dpi', 'PNG DPI'), ('pdf_dpi', 'PDF DPI'), ('inset_dpi', 'Inset DPI')]:
                 control = QSpinBox()
@@ -947,6 +950,7 @@ def create_window_class():
                 self.font_color = item.fontColor().name()
                 self.color_button.setStyleSheet(f'color: {self.font_color}')
                 self.paper.setCurrentText(self.session.design.options['paper_size'])
+                self.tarpaulin_defaults_button.setEnabled(self.session.design.options['paper_size'] == TARPAULIN_PAPER_SIZE)
                 crs_key = 'boundary_crs' if self.map_id() == 'map_inset' else 'overview_crs'
                 self.overview_crs.setEnabled(is_inset)
                 self.overview_crs.setCurrentIndex(self.overview_crs.findData(self.session.design.options[crs_key]))
@@ -1059,6 +1063,9 @@ def create_window_class():
                 return
             self.perform(lambda: self.session.set_paper(paper))
             self.fit_page()
+
+        def apply_tarpaulin_defaults(self, *_args):
+            self.perform(lambda: self.session.apply_tarpaulin_defaults())
 
         def change_overview_crs(self, *_args):
             if self.loading or not self.session:

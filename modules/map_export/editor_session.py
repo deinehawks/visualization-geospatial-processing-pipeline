@@ -7,6 +7,7 @@ from pathlib import Path
 from .editor_model import (
     MAP_IDS, TEXT_IDS, EditorDesign, parse_bounds, PAPER_SIZES_MM,
     TARPAULIN_PAPER_SIZE, TARPAULIN_DPI,
+    with_tarpaulin_defaults,
 )
 
 
@@ -230,11 +231,17 @@ class EditorSession:
     def set_paper(self, paper):
         trial = self.snapshot()
         paper = str(paper).strip().upper()
-        if paper == TARPAULIN_PAPER_SIZE and trial.options['paper_size'] != paper:
+        entering_tarpaulin = paper == TARPAULIN_PAPER_SIZE and trial.options['paper_size'] != paper
+        if entering_tarpaulin:
             trial.options.update(preview_dpi=TARPAULIN_DPI, pdf_dpi=TARPAULIN_DPI, inset_dpi=TARPAULIN_DPI)
         trial.options['paper_size'] = paper
+        if entering_tarpaulin:
+            trial = with_tarpaulin_defaults(trial)
         self.design = trial.validate()
         self.rebuild()
+
+    def apply_tarpaulin_defaults(self):
+        self.restore(with_tarpaulin_defaults(self.snapshot()))
 
     def set_overview_crs(self, crs):
         self.set_inset_crs('map_inset_2', crs)

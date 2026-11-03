@@ -54,10 +54,12 @@ class Map:
 class Label:
     def __init__(self):
         self.value = 'Label'
+        self.style = {'family': 'Arial', 'size': 12.0, 'bold': False, 'color': '#000000'}
     def text(self): return self.value
     def font(self):
-        return SimpleNamespace(family=lambda: 'Arial', pointSizeF=lambda: 12.0, bold=lambda: False)
-    def fontColor(self): return SimpleNamespace(name=lambda: '#000000')
+        return SimpleNamespace(family=lambda: self.style['family'], pointSizeF=lambda: self.style['size'],
+                               bold=lambda: self.style['bold'])
+    def fontColor(self): return SimpleNamespace(name=lambda: self.style['color'])
     def setText(self, value): self.value = value
     def refresh(self): pass
 
@@ -78,6 +80,8 @@ def session(tmp_path):
         items['map_inset'].auth_id = 'EPSG:32651' if upper_crs == 'project' else upper_crs
         for key, text in kwargs['text_values'].items():
             items[key].setText(text)
+        for key, style in kwargs['text_styles'].items():
+            items[key].style = copy.deepcopy(style)
         ctx = SimpleNamespace(
             layout=SimpleNamespace(itemById=items.get, renderContext=lambda: Mock()),
             target_crs=SimpleNamespace(authid=lambda: 'EPSG:32651'),
@@ -89,7 +93,12 @@ def session(tmp_path):
         renderer.builds.append(ctx)
         return ctx
     renderer.build_qgis_print_layout.side_effect = build
-    renderer.apply_editor_text.side_effect = lambda ctx, texts, styles: [ctx.layout.itemById(k).setText(v) for k, v in texts.items()]
+    def apply_text(ctx, texts, styles):
+        for key, value in texts.items():
+            ctx.layout.itemById(key).setText(value)
+        for key, value in styles.items():
+            ctx.layout.itemById(key).style = copy.deepcopy(value)
+    renderer.apply_editor_text.side_effect = apply_text
     renderer._prepare_fixed_extent.return_value = Rect(5, 6, 105, 66)
     return EditorSession(EditorDesign(tmp_path), renderer)
 

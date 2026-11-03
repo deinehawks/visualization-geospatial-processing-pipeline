@@ -1,5 +1,19 @@
 # Architectural Decision Log
 
+## Explicit tarpaulin print-size defaults (2026-10-27)
+
+Accept the user's requested 4X8FT size profile, superseding only the earlier
+choice to leave template print sizes unchanged when entering that preset.
+Apply once on paper selection and through an explicit Page action, using the
+resolved current font styles so family/color/bold survive. Keep profile data
+in existing text/map/layout settings and render options; no format or schema
+change. A saved design remains authoritative on reopen/export/CRS changes.
+Reselecting the same paper preserves custom sizes and draft DPI. Preserve
+existing A4/A3 defaults and physical sizes on subsequent paper changes, with
+full Undo/Redo restoration. No source, wording, geography or position changes.
+Mocked validation establishes state/handoff; actual typography needs an operator
+check. Exact values and commands: `docs/operators/map-editor.md`.
+
 ## Movable page objects supersede fixed-position policy (2026-10-26)
 
 At the user's explicit request, extend the logo-only exception to all named

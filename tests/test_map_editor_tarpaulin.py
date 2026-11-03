@@ -86,7 +86,9 @@ def test_paper_preset_is_one_undoable_edit_with_exact_dpi(session):
     assert after.options['paper_size'] == '4X8FT'
     assert (after.options['preview_dpi'], after.options['pdf_dpi'], after.options['inset_dpi']) == (300, 300, 300)
     assert after.maps == before.maps and after.texts == before.texts
-    assert after.text_styles == before.text_styles and after.map_styles == before.map_styles
+    assert after.text_styles['map_title']['size'] == 85
+    assert after.map_styles['map_inset']['pin_size_mm'] == after.map_styles['map_inset_2']['pin_size_mm'] == 10
+    assert after.options['grid_font_size'] == 30
     assert after.grid_style == before.grid_style
     session.renderer._configure_main_map.assert_not_called()
     history.undo()

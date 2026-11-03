@@ -16,6 +16,9 @@ MAP_IDS = ('map_frame', 'map_inset', 'map_inset_2')
 TEXT_IDS = ('map_title', 'map_location', 'label_inset', 'label_inset_2', 'map_disclaimer')
 TARPAULIN_PAPER_SIZE = '4X8FT'
 TARPAULIN_DPI = 300
+TARPAULIN_TEXT_SIZES = {'map_title': 85.0, 'map_location': 55.0,
+                        'label_inset': 45.0, 'label_inset_2': 45.0, 'map_disclaimer': 40.0}
+TARPAULIN_LAYOUT_DEFAULTS = {'info_font_size': 41.0, 'scale_font_size': 40.0, 'scale_height_mm': 5.0}
 PAPER_SIZES_MM = {'A4': (297.0, 210.0), 'A3': (420.0, 297.0),
                   TARPAULIN_PAPER_SIZE: (2438.4, 1219.2)}
 EDITOR_PAPER_CHOICES = ('A3', 'A4', TARPAULIN_PAPER_SIZE)
@@ -197,6 +200,22 @@ class EditorDesign:
             if not re.fullmatch(r'#[0-9a-fA-F]{6}', str(style['color'])):
                 raise ValueError('Font color must be #RRGGBB')
         return self
+
+
+def with_tarpaulin_defaults(design):
+    """Apply the operator's print sizes to resolved fonts, preserving other edits."""
+    result = copy.deepcopy(design).validate()
+    if result.options['paper_size'] != TARPAULIN_PAPER_SIZE:
+        raise ValueError('Tarpaulin defaults require a 4X8FT page')
+    for key, size in TARPAULIN_TEXT_SIZES.items():
+        if key not in result.text_styles:
+            raise ValueError('Resolve template fonts before applying tarpaulin defaults')
+        result.text_styles[key]['size'] = size
+    for key in ('map_inset', 'map_inset_2'):
+        result.map_styles[key]['pin_size_mm'] = 10.0
+    result.options['grid_font_size'] = 30.0
+    result.layout_settings.update(TARPAULIN_LAYOUT_DEFAULTS)
+    return result.validate()
 
 
 def validate_package(package_dir):
