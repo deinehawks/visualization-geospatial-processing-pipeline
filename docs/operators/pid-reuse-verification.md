@@ -32,7 +32,7 @@ The existing guards still decide admission:
   creation/restart evidence still block execution.
 - Nonterminal or `requires_recovery` records still require explicit supported
   reconciliation, even when PID reuse is proved. This patch does not perform it.
-- One/two/three-slot limits, identity/storage checks and exclusive maintenance
+- One/two-slot limits, identity/storage checks and exclusive maintenance
   remain unchanged. Fallback evidence is re-read, not cached or persisted.
 
 No database/schema migration, new dependency, queue, worker or process-termination

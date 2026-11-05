@@ -1,5 +1,15 @@
 # Architectural Decision Log
 
+## Three-run opt-in withdrawn; two-slot ceiling restored (2026-11-05)
+
+Supersede the 2026-10-23 three-run opt-in at the operator's request. Current
+source, CLI and active contracts support only one or two local slots. Remove the
+three-slot rollout guide and dedicated capacity tests, but retain the independent
+negative-only reused-PID verification and all identity, storage, exclusivity,
+resource-permit and recovery safeguards. Roll the live policy back to 2 through
+the guarded idle-only command before deploying this source. Preserve Git history;
+do not force-push or rewrite later commits.
+
 ## Processing-node failure diagnostics use an allowlist (2026-11-04)
 
 WebODM processing-node preflight errors must not serialize the raw API node
@@ -130,7 +140,10 @@ outside this legacy-manifest-only operation rather than partially mutating them.
 No dependencies, cleanup tool, forced remote restart or migration is introduced.
 See `docs/operators/qgis-fresh-refresh.md` for exact commands and recovery limits.
 
-## Three-run opt-in - accepted bounded extension (2026-10-23)
+## Three-run opt-in - superseded on 2026-11-05
+
+Superseded by **Three-run opt-in withdrawn; two-slot ceiling restored** above.
+The text below is retained as historical decision evidence.
 
 The operator explicitly requested a maximum of three. Supersede only the two-slot
 ceiling, retaining the one-slot default and version 1 policies/journals. Keep the
@@ -147,7 +160,7 @@ transaction semantics. Change live policy only after safe idle/reconciliation;
 restart already-imported console code before it reads a three-slot policy.
 Rollback to one/two while idle before reverting source; preserve all evidence.
 Hermetic validation is not authorization or proof of real three-run/GIS capacity.
-See `docs/operators/three-run-execution.md` for evidence and compatibility limits.
+Historical implementation evidence remains in Git commit `6ed6ae7`.
 
 ## Two-run opt-in - accepted extension (2026-10-21)
 

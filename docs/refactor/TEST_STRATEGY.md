@@ -88,7 +88,7 @@ New isolated cases inject native identities, trusted system-directory lookup,
 CIM runner and clock. No real process/API/PowerShell boundary executes. Cover
 coarse timestamps, the reported October case, changed samples and native races,
 absence/failure, PID/JSON validation, path/command constraints, diagnostics,
-import safety, exact old-journal preservation, one/two/three-slot capacity,
+import safety, exact old-journal preservation, one/two-slot capacity,
 controls/reconnection refusal, surviving/unknown children and remote uncertainty.
 Temporary SQLite/journals and all existing safety guards remain unchanged.
 
@@ -115,25 +115,21 @@ Run commands and non-production boundaries are in the fresh-refresh operator
 guide. Native GIS, network publication/rename and real-survey checks remain
 separately authorized operator work; this validation does not perform them.
 
-## Three-slot extension coverage (2026-10-23)
+## Three-slot removal coverage (2026-11-05)
 
-Parameterize existing coordination fixtures at two and three slots without
-removing assertions. Forty additional isolated cases cover CLI policy/rollback,
-strict invalid-value rejection, missing identity, a preflight consuming the third
-slot, third-run conflicts against either owner, aggregate storage, live switch
-rejection, exclusivity escalation, independent third-run controls, two cancellable
-resource waiters, three-way survey allocation and end-to-end CLI hotkey suppression.
-Add three-slot API and frontend fixtures; keep all process/service/GIS/network/
-credential/database/deletion guards and test levels unchanged.
+Restore coordination fixtures to two slots and assert that policy/API/CLI reject
+3 while preserving the existing one/two-slot admission, identity, storage,
+exclusive maintenance, resource permit and control behavior. Remove only the
+three-slot-specific Python/frontend cases. Keep reused-PID verification tests and
+all external-service, production-path and destructive-operation guards unchanged.
 
-Results: 40 new cases passed on Python 3.10; 147 focused and 1187 full safe cases
-passed on Python 3.13, and 1187 collected safely. All six changed Python files
-compile in memory on 3.10. An unchanged existing 3.10 test references the unavailable
-`sqlite3.SQLITE_BUSY` constant; optional API dependencies are also absent in that
-runtime environment. The failure/skip is retained and documented, not bypassed.
-Frontend's 13 contract cases, typecheck and static build passed. Exact commands
-and real-smoke limits are recorded in `docs/operators/three-run-execution.md`;
-no dependency installation was performed.
+Results: 156 focused cases pass on Python 3.13. Python 3.10 passes 135 focused
+cases with one optional-dependency skip and the unchanged `sqlite3.SQLITE_BUSY`
+compatibility case deselected after its expected failure was confirmed. All 1384
+safe defaults pass and collect on Python 3.13. Eleven frontend contracts pass;
+five changed Python files compile in memory and scoped `git diff --check` passes.
+No real pipeline, WebODM, GIS executable, production database or protected path
+was accessed.
 
 ## Two-run coordination coverage (2026-10-21)
 

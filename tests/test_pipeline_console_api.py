@@ -71,15 +71,14 @@ def test_capacity_api_is_authenticated_and_read_only(client, console):
     console.popen.assert_not_called()
 
 
-@pytest.mark.parametrize('limit', [2, 3])
-def test_capacity_api_reports_pending_slots(client, console, limit):
-    console.store.configure(limit, database=console.reader.database)
-    for index in range(limit):
-        console.store.reserve(uid(), {'kind': 'preflight', 'run_id': str(index)})
+def test_capacity_api_reports_two_pending_slots(client, console):
+    console.store.configure(2, database=console.reader.database)
+    console.store.reserve(uid(), {'kind': 'preflight', 'run_id': 'first'})
+    console.store.reserve(uid(), {'kind': 'preflight', 'run_id': 'second'})
     login(client)
     value = client.get('/api/execution').json()
-    assert value['max_runs'] == limit and value['occupied'] == limit and value['available'] == 0
-    assert len(value['holders']) == limit
+    assert value['max_runs'] == 2 and value['occupied'] == 2 and value['available'] == 0
+    assert len(value['holders']) == 2
 
 
 def test_legacy_receipt_is_reported_separately_without_changing_persisted_run(client, console):

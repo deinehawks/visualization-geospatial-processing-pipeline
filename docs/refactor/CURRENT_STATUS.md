@@ -1,24 +1,25 @@
 # Refactor Current Status
 
-## Three-slot/WebODM controlled rollout update (2026-11-05)
+## Three-slot execution capability withdrawn (2026-11-05)
 
-The execution policy is configured for three local slots, with two approved
-WebODM processing nodes. The first three-survey attempt failed safely before task
-creation because all nodes appeared offline. Operator diagnosis found the local
-WebODM `webapp` container had no Celery beat scheduler; starting it through
-`/webodm/worker.sh scheduler start` restored the scheduler process. Persistence
-across container/host restarts and a complete three-simultaneous-survey run are
-still unvalidated, so the rollout milestone remains open.
+The operator withdrew the three-slot rollout and requested complete removal of
+the active capability. Source policy and CLI validation again accept only one or
+two slots; three-slot-specific Python/frontend tests and the operator rollout
+guide were removed. The negative-only reused-PID verification remains because it
+protects ownership reconciliation independently of capacity. No schema,
+dependency, journal format or two-slot safety boundary changed.
 
-The live recovery exercise also confirmed owned-operation admission behavior.
-Interrupted operations retained `requires_recovery`, storage commitments remained
-blocking until exact review, and missing Task 2 ordinary resume failed closed when
-no durable UUID existed. For run `699df6a3-5237-4297-8c9a-83687896aec2`, completed
-Task 4 in project 562 was preserved; the explicitly authorized missing-Task-2
-recovery was admitted after the exact stopped holder was reconciled. It was still
-running at documentation time, so no Task 2 success or three-slot throughput
-claim is recorded. Operator procedures and incident evidence are in
-`docs/operators/webodm-resume.md` and `docs/operators/three-run-execution.md`.
+Deployment requires the existing live execution policy to be changed from 3 to
+2 through the guarded CLI while the coordinator is idle. Do not deploy source
+that rejects the saved three-slot policy before that rollback succeeds.
+
+Local removal validation: 156 focused cases pass on Python 3.13; Python 3.10
+passes 135 focused cases with one optional-dependency skip and the pre-existing
+`sqlite3.SQLITE_BUSY` compatibility case explicitly deselected. All 1384 safe
+defaults pass and collect on Python 3.13. The 11 frontend contracts pass, five
+changed Python files compile in memory, and scoped `git diff --check` passes.
+No live policy, production data, database, WebODM task or remote was changed by
+this validation; deployment remains gated on an idle coordinator.
 
 ## Processing-node preflight credential redaction (2026-11-04)
 
@@ -159,26 +160,6 @@ No production DB, credentials, source/network storage, GIS/WebODM execution,
 real output mutation, commit or push occurred during implementation. Real
 AH-026125/Windows/network/GIS verification remains separately authorized work.
 Commands, limitations and failure recovery: `docs/operators/qgis-fresh-refresh.md`.
-
-## Three-slot support with guarded activation (2026-10-23)
-
-Implemented the requested explicit 1/2/3-slot policy and CLI option. Default stays
-one, existing policies/journals retain version 1, and any multi-slot invocation
-requires resolved identity/storage evidence and disables global hotkeys. The
-compatibility property `Execution.two_runs` covers both two and three. Exclusive
-maintenance/recovery, unknown ownership, one compute/transfer permit, per-run
-controls, storage aggregation and all remote/child/process safety guards remain.
-No schema/dependency/default changes, queue, worker or automatic node routing.
-
-Validation: 40 new cases pass under Python 3.10; 147 focused and all 1187 defaults
-pass under Python 3.13, with 1187 safely collected. Six changed Python files compile
-in memory under 3.10. Frontend's 13 contracts, typecheck and static build pass.
-An unchanged 3.10 test's missing `sqlite3.SQLITE_BUSY` and absent optional API
-dependencies are documented, not suppressed. Commands and remaining real
-Windows/NodeODM/GIS smoke checks are in the new three-run guide. Implementation
-does not authorize policy changes while a local owner is active, restart running
-jobs, or complete the broader concurrency rollout. Unrelated operator changes
-and deleted BAT files remain untouched.
 
 ## Two-run implementation and gated rollout (2026-10-21)
 

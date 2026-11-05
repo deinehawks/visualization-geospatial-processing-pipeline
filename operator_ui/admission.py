@@ -11,7 +11,7 @@ class AdmissionMixin:
         from .storage import read_json, ConsoleError
         path = self.root / 'execution-policy.json'
         value = read_json(path) if path.exists() else {'version': 1, 'max_runs': 1}
-        if value != {'version': 1, 'max_runs': value.get('max_runs')} or type(value.get('max_runs')) is not int or value['max_runs'] not in (1, 2, 3):
+        if value != {'version': 1, 'max_runs': value.get('max_runs')} or type(value.get('max_runs')) is not int or value['max_runs'] not in (1, 2):
             raise ConsoleError('Invalid execution policy; refusing admission', 'INVALID_POLICY')
         return value
 
@@ -45,8 +45,8 @@ class AdmissionMixin:
 
     def configure(self, maximum, *, database=None):
         from .storage import ConsoleError, atomic_json
-        if type(maximum) is not int or maximum not in (1, 2, 3):
-            raise ConsoleError('Only one, two, or three local slots are supported', 'INVALID_INPUT')
+        if type(maximum) is not int or maximum not in (1, 2):
+            raise ConsoleError('Only one or two local slots are supported', 'INVALID_INPUT')
         with self.lock():
             self.ensure()
             if self.occupants():

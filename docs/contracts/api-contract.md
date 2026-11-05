@@ -1,18 +1,5 @@
 ﻿# API Contract
 
-## Three-slot capacity extension (2026-10-23)
-
-Supersede only the prior upper limit of two: an idle, reconciled installation can
-opt in to `max_runs` 3 using the operator CLI. Default remains one; one/two-slot
-policies and version 1 journals remain compatible. No API shape, browser write
-endpoint, database migration or command authorization change is introduced.
-`occupied`, `available`, `blocked` and holder/resource-wait semantics stay the
-same. Fourth requests fail closed; uncertain or exclusive owners still report
-zero availability even below the configured limit. Identity/storage validation
-and global-hotkey suppression apply whenever the invocation limit exceeds one.
-See [three-run operations](../operators/three-run-execution.md) for activation,
-rollback, validation and real-smoke boundaries.
-
 ## Two-run execution extension (2026-10-21)
 
 Follow-up additive field: `GET /api/execution` and `/api/operations.execution`

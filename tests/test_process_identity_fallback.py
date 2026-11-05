@@ -208,12 +208,11 @@ def test_finished_reused_pid_and_empty_job_no_longer_blocks_capacity(console, mo
     assert created and accepted['state'] == 'accepted'
 
 
-@pytest.mark.parametrize('maximum', [2, 3])
-def test_reused_finished_owner_does_not_consume_multi_run_slots(console, monkeypatch, probe, maximum):
+def test_reused_finished_owner_does_not_consume_second_run_slot(console, monkeypatch, probe):
     operation, _ = retired(console, monkeypatch, probe)
     before = (console.store.directory(operation) / 'status.json').read_bytes()
-    result = console.store.configure(maximum, database=console.reader.database)
-    assert result['occupied'] == 0 and result['available'] == maximum and not result['blocked']
+    result = console.store.configure(2, database=console.reader.database)
+    assert result['occupied'] == 0 and result['available'] == 2 and not result['blocked']
     assert (console.store.directory(operation) / 'status.json').read_bytes() == before
 
 

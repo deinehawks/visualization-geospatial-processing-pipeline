@@ -1,13 +1,5 @@
 # Local Pipeline Web Console V1
 
-## Three-slot follow-up (2026-10-23)
-
-The operator CLI now supports an idle-only three-slot opt-in as well as one/two.
-The console uses server-reported capacity; no new browser settings endpoint is
-added. Exclusive/uncertain owners still block new launches. Restart an old console
-server after updating source, once local invocations have safely exited. See
-[three-run operations](three-run-execution.md) for the guarded procedure and limits.
-
 ## Two-slot opt-in update (2026-10-21)
 
 The single-run descriptions below are the original V1/default behavior. The

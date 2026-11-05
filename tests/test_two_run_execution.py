@@ -1,4 +1,4 @@
-"""Multi-run policy under pytest-owned paths and injected process/lock adapters."""
+"""Two-run policy under pytest-owned paths and injected process/lock adapters."""
 from contextlib import contextmanager
 from concurrent.futures import ThreadPoolExecutor
 import logging
@@ -21,11 +21,11 @@ from shared.db.repo import PipelineRepo, _CommitRetry
 from tools.pipeline_control import main as control_main
 
 
-@pytest.fixture(params=(2, 3), ids=('two-slots', 'three-slots'))
-def parallel(console, request):
+@pytest.fixture
+def parallel(console):
     console.store.path_identity = lambda path: str(Path(path).resolve()).replace('\\', '/').rstrip('/').casefold()
     console.store.volume_identity = lambda _: 'owned-test-volume'
-    console.store.configure(request.param, database=console.reader.database)
+    console.store.configure(2, database=console.reader.database)
     return console
 
 
@@ -73,22 +73,40 @@ def test_default_remains_one_without_creating_policy(console):
         reserve(console, '002')
 
 
-def test_updated_cli_and_browser_requests_share_limit(parallel):
-    limit = parallel.store.policy()['max_runs']
+def test_removed_three_slot_value_is_rejected_by_store_and_cli(console):
+    with pytest.raises(ConsoleError) as failure:
+        console.store.configure(3, database=console.reader.database)
+    assert failure.value.code == 'INVALID_INPUT'
+    assert console.store.policy()['max_runs'] == 1
+    assert not (console.store.root / 'execution-policy.json').exists()
+
+    with pytest.raises(SystemExit) as failure:
+        control_main(['configure', '--max-runs', '3'], store=console.store,
+                     database=console.reader.database)
+    assert failure.value.code == 2
+
+
+def test_persisted_three_slot_policy_fails_closed(console):
+    console.store.ensure()
+    policy = console.store.root / 'execution-policy.json'
+    policy.write_text('{"version": 1, "max_runs": 3}\n', encoding='utf-8')
+    with pytest.raises(ConsoleError) as failure:
+        console.store.policy()
+    assert failure.value.code == 'INVALID_POLICY'
+
+
+def test_two_updated_cli_and_browser_requests_share_limit(parallel):
     first = reserve(parallel, '001')
     run(parallel, first, 101)
     reserve(parallel, '002', kind='run')
-    if limit == 3:
-        reserve(parallel, '003')
-    assert parallel.execution_status()['occupied'] == limit
+    assert parallel.execution_status()['occupied'] == 2
     with pytest.raises(ConsoleError) as failure:
-        reserve(parallel, '004')
+        reserve(parallel, '003')
     assert failure.value.code == 'BUSY'
 
 
-def test_atomic_cross_tab_start_race_respects_configured_limit(parallel):
-    limit = parallel.store.policy()['max_runs']
-    barrier = threading.Barrier(limit + 1)
+def test_atomic_cross_tab_start_race_only_two_admitted(parallel):
+    barrier = threading.Barrier(3)
     def start(name):
         barrier.wait()
         try:
@@ -96,10 +114,10 @@ def test_atomic_cross_tab_start_race_respects_configured_limit(parallel):
             return 'accepted'
         except ConsoleError as exc:
             return exc.code
-    with ThreadPoolExecutor(limit + 1) as pool:
-        answers = list(pool.map(start, (f'{index:03d}' for index in range(limit + 1))))
-    assert answers.count('accepted') == limit and answers.count('BUSY') == 1
-    assert parallel.store.capacity()['occupied'] == limit
+    with ThreadPoolExecutor(3) as pool:
+        answers = list(pool.map(start, ('001', '002', '003')))
+    assert answers.count('accepted') == 2 and answers.count('BUSY') == 1
+    assert parallel.store.capacity()['occupied'] == 2
 
 
 @pytest.mark.parametrize('conflict', ['run', 'survey', 'source', 'nested_source', 'workspace', 'output'])
@@ -471,7 +489,7 @@ def test_returned_task_identity_survives_missing_binding(parallel):
     assert parallel.store.status(first.operation_id)['pending_creation']
     first.binding_committed(548, 'exact-returned-task')
     assert parallel.store.status(first.operation_id)['pending_creation'] is None
-    assert parallel.store.capacity()['available'] == parallel.store.policy()['max_runs']
+    assert parallel.store.capacity()['available'] == 2
 
 
 def test_quality_restart_escalation_is_atomic_and_exclusive(parallel):
