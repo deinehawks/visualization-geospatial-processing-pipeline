@@ -1,5 +1,42 @@
 # Refactor Current Status
 
+## Three-slot/WebODM controlled rollout update (2026-11-05)
+
+The execution policy is configured for three local slots, with two approved
+WebODM processing nodes. The first three-survey attempt failed safely before task
+creation because all nodes appeared offline. Operator diagnosis found the local
+WebODM `webapp` container had no Celery beat scheduler; starting it through
+`/webodm/worker.sh scheduler start` restored the scheduler process. Persistence
+across container/host restarts and a complete three-simultaneous-survey run are
+still unvalidated, so the rollout milestone remains open.
+
+The live recovery exercise also confirmed owned-operation admission behavior.
+Interrupted operations retained `requires_recovery`, storage commitments remained
+blocking until exact review, and missing Task 2 ordinary resume failed closed when
+no durable UUID existed. For run `699df6a3-5237-4297-8c9a-83687896aec2`, completed
+Task 4 in project 562 was preserved; the explicitly authorized missing-Task-2
+recovery was admitted after the exact stopped holder was reconciled. It was still
+running at documentation time, so no Task 2 success or three-slot throughput
+claim is recorded. Operator procedures and incident evidence are in
+`docs/operators/webodm-resume.md` and `docs/operators/three-run-execution.md`.
+
+## Processing-node preflight credential redaction (2026-11-04)
+
+WebODM processing-node failures now report only an allowlisted node diagnostic
+(ID, name and scalar health/status fields). They no longer serialize the raw
+processing-node API payload, so token, password and nested credential fields do
+not enter `PreflightError` text or downstream logs. Authentication, node choice,
+online detection and fail-closed behavior are unchanged.
+
+Validation used mocked HTTP responses and pytest-owned paths only: two new
+credential-bearing regression cases pass on Python 3.10 and 3.13; 24 focused
+preflight/storage/ingestion cases pass on 3.10; all 1,462 safe tests pass on
+3.13 and 1,462 safely collect. Both changed Python files compile in memory on
+3.10. No WebODM request, pipeline/GIS process, production database, `.env`,
+survey root, upload cache, output, token rotation or destructive operation was
+performed. Existing validation logs remain preserved and may still contain the
+previously recorded token values.
+
 ## Operator-requested tarpaulin size profile (2026-10-27)
 
 Implemented the user's 4X8FT defaults: title 85 pt, address 55 pt, inset titles
@@ -13,9 +50,11 @@ Validation: 11 new cases on 3.10, 237 focused and all 1460 safe tests on 3.13;
 1460 safely collected. Eight Python files compile in memory on 3.10; scoped
 whitespace checks pass. Three runtime/four existing test modules updated, one
 test module added, operator guide/three refactor records updated. No files
-moved/deleted, dependencies/schema, production/source/runtime changes, real GIS
-execution or commits/pushes. User note edits preserved. Real typography/export
-inspection remains operator work; commands are in the map-editor guide.
+moved/deleted, dependencies/schema, production/source/runtime changes or real
+GIS execution during automated validation. User note edits were preserved; the
+milestone shipped in `47ad11a`. On 2026-11-03 the operator reported real 4X8FT
+typography, overlap and preview-to-PDF sizing correct. This closes the size-profile
+visual gap, not the broader drag/display-scaling operator check.
 
 ## All named page objects movable (2026-10-26)
 

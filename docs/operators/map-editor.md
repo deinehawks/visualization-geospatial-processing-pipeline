@@ -48,10 +48,14 @@ tracked Python paths plus `tests/test_map_editor_tarpaulin_defaults.py`, without
 imports/bytecode writes. Scoped whitespace checks pass. Three runtime modules
 and four existing test modules updated; one test module added; operator/refactor
 records updated. No source surveys, credentials, production database/runtime,
-existing designs/exports, dependencies or actual GIS commands touched. No files
-moved/deleted or Git commits/pushes. User edits to `codes.txt` were left alone.
-Real QGIS text appearance/overlap and preview-to-PDF sizing remain separately
-authorized operator checks.
+existing designs/exports, dependencies or actual GIS commands touched during
+automated validation. No files moved/deleted. User edits to `codes.txt` were
+left alone; the milestone shipped in commit `47ad11a`.
+
+Operator validation (2026-11-03): the operator reported the requested 4X8FT
+typography, overlap and preview-to-PDF sizing correct in the real smoke test.
+This closes the visual gap for this size profile only; the broader page-object
+drag/display-scaling check remains separate.
 
 ## Move any page object (2026-10-26)
 

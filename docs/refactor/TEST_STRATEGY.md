@@ -1,5 +1,18 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Processing-node diagnostic redaction (2026-11-04)
+
+Mock the WebODM authentication and node-list boundaries and include credentials
+at top level and inside nested objects. Assert that configured-node and all-node
+offline errors retain useful allowlisted health fields while omitting token,
+password and nested secret values and keys. Tests use pytest-owned paths and do
+not load `.env`, resolve a host, open a socket, contact WebODM or create a task.
+
+Validation: both new regression cases pass on Python 3.10 and 3.13; 24 focused
+preflight/storage/ingestion cases pass on 3.10; all 1,462 safe tests pass on 3.13
+and 1,462 safely collect. The changed runtime and test files compile in memory
+on Python 3.10 without imports or bytecode writes. Scoped whitespace checks pass.
+
 ## Requested tarpaulin sizes (2026-10-27)
 
 Add 11 isolated default-profile cases; strengthen existing fake labels so font
@@ -12,8 +25,10 @@ No new production dependency, test switches or safety-guard changes.
 
 Validation: 11 new cases on 3.10; 237 focused and 1460 safe tests on 3.13;
 1460 safely collected. Eight Python paths compile in memory on 3.10; scoped
-whitespace checks pass. Fake Qt/GIS/process only, files pytest-owned. Real QGIS
-text overlap and preview/PDF sizing remain separate operator validation.
+whitespace checks pass. Fake Qt/GIS/process only, files pytest-owned. On
+2026-11-03 the operator reported real 4X8FT typography, overlap and preview/PDF
+sizing correct. This supplements rather than replaces the deterministic suite
+and does not cover the separate drag/display-scaling smoke check.
 
 ## General page-object positioning (2026-10-26)
 

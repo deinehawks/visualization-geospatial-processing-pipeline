@@ -69,6 +69,36 @@ The compatibility property `Execution.two_runs` now denotes any multi-slot
 invocation; it remains available to existing callers. Identity/storage evidence
 is required for every non-preflight invocation whenever capacity exceeds one.
 
+## Controlled rollout observations (2026-11-04 to 2026-11-05)
+
+The first operator rollout used three independent surveys with the policy set to
+`max_runs: 3` and two approved WebODM processing nodes (IDs 3 and 5). Three local
+slots do not require three processing nodes: WebODM may queue work when both
+nodes are occupied. They also do not prove that two nodes have enough CPU, RAM,
+disk or network capacity for three concurrent surveys.
+
+The initial three-terminal attempt stopped safely in processing-node preflight
+because WebODM reported every node offline. No task was created by those failed
+attempts. The nodes repeatedly returned online when clicked in WebODM and then
+turned red again after several minutes. Diagnosis on the local WebODM host found
+the `webapp` container running without its Celery beat scheduler; a stale beat
+PID had also been observed. Starting the scheduler with
+`docker exec webapp /webodm/worker.sh scheduler start` restored the beat process.
+The operator must verify that it remains present after any WebODM/container
+restart; clicking a red node is only a temporary refresh, not the repair.
+
+The failed node preflight previously included the raw node API object in its
+error text. The scoped security fix now emits only allowlisted scalar diagnostic
+fields and has mocked regression coverage for token/password/nested-secret
+redaction. Historical logs are not rewritten and must still be treated as
+sensitive.
+
+This evidence establishes fail-closed admission and identifies the scheduler
+dependency. It does **not** complete the controlled rollout: three simultaneous
+survey runs have not yet completed successfully under observation. Record task
+routing, queue time, node stability, host/storage pressure and final artifacts
+before declaring three-slot production readiness.
+
 ## Validation evidence
 
 All new tests use pytest-owned temporary paths/SQLite and fake process, lock,

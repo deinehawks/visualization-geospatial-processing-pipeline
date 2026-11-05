@@ -1,5 +1,15 @@
 # Architectural Decision Log
 
+## Processing-node failure diagnostics use an allowlist (2026-11-04)
+
+WebODM processing-node preflight errors must not serialize the raw API node
+object. Failure details expose only the allowlisted scalar identity/health fields
+needed by an operator: ID, name, status/state/health and online/availability/
+reachability indicators. Unknown, nested and credential-bearing fields are
+omitted. Node selection, authentication, online detection and fail-closed
+admission are unchanged. Existing logs are historical evidence and are not
+rewritten; rotate credentials separately only when operationally required.
+
 ## Explicit tarpaulin print-size defaults (2026-10-27)
 
 Accept the user's requested 4X8FT size profile, superseding only the earlier
@@ -11,8 +21,10 @@ change. A saved design remains authoritative on reopen/export/CRS changes.
 Reselecting the same paper preserves custom sizes and draft DPI. Preserve
 existing A4/A3 defaults and physical sizes on subsequent paper changes, with
 full Undo/Redo restoration. No source, wording, geography or position changes.
-Mocked validation establishes state/handoff; actual typography needs an operator
-check. Exact values and commands: `docs/operators/map-editor.md`.
+Mocked validation establishes state/handoff. On 2026-11-03 the operator reported
+the real 4X8FT typography, overlap and preview-to-PDF sizing correct, closing this
+decision's visual-validation gap. The broader page-object drag/display-scaling
+check remains separate. Exact values and commands: `docs/operators/map-editor.md`.
 
 ## Movable page objects supersede fixed-position policy (2026-10-26)
 

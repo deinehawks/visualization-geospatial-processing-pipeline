@@ -628,7 +628,7 @@ class PipelinePreflight:
                         "configured WebODM processing node appears offline",
                         details=[
                             f"Configured WEBODM_NODE_ID: {node_id}",
-                            f"Node payload: {node}",
+                            f"Node status: {self._safe_node_diagnostic(node)}",
                         ],
                         suggestions=[
                             "Open WebODM > Processing Nodes and confirm the node status is Online.",
@@ -648,7 +648,10 @@ class PipelinePreflight:
                 self._fail(
                     stage,
                     "all WebODM processing nodes appear offline",
-                    details=[f"Nodes returned: {nodes}"],
+                    details=[
+                        "Node statuses: "
+                        f"{[self._safe_node_diagnostic(node) for node in nodes]}"
+                    ],
                     suggestions=[
                         "Open WebODM > Processing Nodes and confirm at least one node is Online.",
                         "Restart the WebODM node worker/container.",
@@ -698,6 +701,27 @@ class PipelinePreflight:
             return not any(word in status for word in offline_words)
 
         return True
+
+    @staticmethod
+    def _safe_node_diagnostic(node: Mapping[str, Any]) -> Dict[str, Any]:
+        safe_fields = (
+            "id",
+            "name",
+            "status",
+            "status_label",
+            "state",
+            "health",
+            "online",
+            "is_online",
+            "available",
+            "reachable",
+        )
+        return {
+            key: node[key]
+            for key in safe_fields
+            if key in node
+            and isinstance(node[key], (str, int, float, bool, type(None)))
+        }
     
     @staticmethod
     def _friendly_request_error(e: Exception) -> str:

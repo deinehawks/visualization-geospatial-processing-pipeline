@@ -162,6 +162,65 @@ the exact WebODM project. If Task 2 exists, use
 is the default. If no Task 2 exists, preserve the failure evidence and diagnose
 the create failure before attempting another explicitly authorized recovery.
 
+## Processing nodes repeatedly turn offline
+
+When every processing node turns red several minutes after it was manually
+clicked online, check the WebODM scheduler rather than repeatedly refreshing the
+nodes. From the directory containing WebODM's `docker-compose.yml`:
+
+```powershell
+docker compose ps
+docker top webapp | Select-String -Pattern "celery|beat"
+```
+
+The `webapp` container should have a `celery -A worker beat` process. A PID file
+alone is not proof: read it inside the container and verify the corresponding
+`/proc/<pid>` directory. If the scheduler is absent and no scheduler process is
+alive, start it through WebODM's own helper:
+
+```powershell
+docker exec webapp /webodm/worker.sh scheduler start
+docker top webapp | Select-String -Pattern "celery|beat"
+docker exec webapp cat /webodm/celerybeat.pid
+```
+
+WebODM uses this scheduler to refresh processing-node state. Without it, a node
+can appear healthy immediately after a manual click and become offline again as
+its recorded health grows stale. Recheck after more than five minutes and after
+container/host restarts. Do not delete an apparently stale PID until the process
+and container state have been verified; the helper may remove or replace it.
+
+## Field recovery record (2026-11-04 to 2026-11-05)
+
+Run `699df6a3-5237-4297-8c9a-83687896aec2` (`AH-026152`) was interrupted with
+Ctrl+C after its first invocation omitted `--disable-cross-run`. The coordinator
+correctly retained an owned `requires_recovery` record. The operator reviewed and
+reconciled the exact stopped operation; no journal, database row or output was
+manually deleted.
+
+After the missing boundary archive was supplied, the boundary conversion itself
+succeeded. Publication initially stopped at the storage-commitment guard because
+another interrupted-operation record still owned the commitment. Exact-operation
+reconciliation followed by a fresh storage preflight allowed resume without
+replaying already completed work.
+
+In WebODM project 562, Task 4
+`8f2de23d-7b83-4fa0-8db9-e04e42428b41` completed with 536 images, while Task 2
+had never been created and had no durable UUID. Ordinary resume therefore failed
+closed instead of guessing whether a duplicate remote task existed. The operator
+visually confirmed that the project contained only the completed Task 4, ran the
+plan-only missing-Task-2 recovery, and then supplied the exact authorization.
+
+The first execution attempt printed the authorization summary but was rejected
+as `BUSY` before admission by operation
+`082cadfab2cd4e0e9f9429f6f174e7bb`. Printing `AUTHORIZED` confirms the recovery
+flags and phrase only; it does not mean upload or task creation occurred. Status
+showed that exact holder as `requires_recovery`; after confirming its process was
+gone and Task 2 was still absent, the operator reconciled that exact record. The
+same guarded recovery was then admitted and was running when this record was
+written. Task 2 completion and output validation remain pending and must not be
+inferred from admission alone.
+
 ## Download the complete Task 4 ODM ZIP
 
 Task 4 honors the same export controls as Task 2:
