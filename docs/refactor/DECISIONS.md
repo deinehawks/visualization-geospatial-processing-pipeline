@@ -1,5 +1,104 @@
 # Architectural Decision Log
 
+## Permit a verified root image-list copy when old task output is incomplete (2026-11-10)
+
+For the one authorized failed Task 4 replacement, WebODM's old task output may
+omit the root `Loading N images` line after NodeODM task metadata expires. In
+that case accept an operator-copied root `img_list.txt` only with the SHA-256
+measured on the processing node before copying. Its parent directory must be
+the NodeODM UUID returned by the exact failed WebODM task. The failed task's
+processing node must match the explicitly selected node, and the retained
+accepted-image list must exceed its WebODM upload count. ODM writes this list
+after photo validation, so it may contain fewer entries than the earlier root
+`Loading N images` line. If both counts exist, require the loading count to be
+at least the list count and use the loading count. Both old counts must differ
+from the clean replacement manifest.
+
+Recheck the copy immediately before authorization, audit its UUID, count and
+hash, and preserve all existing project, task, stage, options and one-replacement
+guards. Missing or conflicting proof stops before upload. This exception does
+not change the authoritative root-output requirement for newly created tasks.
+
+## Reuse only fully proven disabled cross-run outputs (2026-11-10)
+
+For an explicitly authorized failed-Task-4 replacement, treat already-published
+disabled cross-run outputs as reusable only when RAW, workspace `path` and
+published `path` have identical deterministic flat-JPEG filename/size records,
+both exclusion directories are empty, and no same-run backup exists. Record the
+reuse in stage output and continue without another bulk copy or mirror swap.
+Allow only the regular `.raw-recovery.json` ownership marker as extra RAW
+content; any other non-image entry still prevents reuse.
+
+Do not inspect or delete a stuck same-run temp mirror on this path; it is not an
+authoritative output and SMB may report inconsistent enumeration/removal state.
+Any proof failure falls back to the existing full copy and atomic publication.
+Do not broaden reuse to ordinary runs or enabled filtering, and do not infer
+success from count or total size alone.
+
+## Contaminated failed tasks require one evidence-preserving replacement (2026-11-09)
+
+Treat the local upload manifest and the first root ODM `Loading N images` line
+as separate proofs: the first controls what the pipeline offered, while the
+second proves what NodeODM actually admitted. Do not infer correctness from a
+WebODM project upload count alone. Newly created tasks must match both; cancel a
+mismatch or a missing root count after the bounded running timeout and retain
+the UUID whenever cancellation is uncertain.
+
+Permit replacement only through exact run/project/failed-task/node confirmation,
+a latest local stage recorded as `failed`, `paused` or `requires_recovery`, a
+one-task remote project, persisted options, an old ODM count mismatch and a
+clean replacement-specific cache. Paused permits a task that continued after
+local detachment; `requires_recovery` permits retry after a guarded local
+pre-creation failure. Both exact remote task views must still report `failed`.
+Preserve the local attempt and old binding unchanged until authorization, then
+append the returned replacement UUID. Never delete/restart the old task and
+never automatically create a third task. For the approved
+AH-026153 recovery, restore all 4,288 original images and disable cross-run
+filtering because 3,953 kept plus 335 excluded equals the source; use corrected
+`cb-t4` naming. Preserve historical exact-UUID resume and add no schema or
+dependency. Rollback is source-only; remote evidence is never erased.
+
+## Refreshed WebODM outputs invalidate their derived artifacts (2026-11-06)
+
+Treat a normal full-pipeline force of `webodm`, `webodm_task4` or
+`webodm_task2` as a new upstream output generation. Force the quality gate and
+QGIS consumers in the same attempt, and prevent that downstream QGIS invocation
+from reusing a merely readable existing clip. Reserve all corresponding storage
+before admission. This makes the newly exported exact-UUID orthomosaic the input
+to the clip and tile generation rather than leaving an older derived artifact
+marked complete.
+
+Do not broaden direct `--force-stage qgis`: it retains its existing resume/reuse
+contract, while `--refresh-qgis task4` remains the guarded fresh-QGIS-only
+workflow. Preserve explicit programmatic `selected_stages={"webodm"}` isolation
+for reconciliation tests and repair tools. Ordinary resume, task UUID binding,
+failure rollback, schemas, options and remote mutation rules remain unchanged.
+Rollback is a source-only reversion; already generated files are never silently
+rewritten or deleted.
+
+## Admitted storage is not charged twice mid-run (2026-11-06)
+
+Treat the atomic admission and final pre-work storage check as the point that
+reserves a run's full estimated writes. Keep that estimate in the operation
+journal so later admissions still account for it. At later managed compute and
+transfer boundaries, verify the physical reserve without adding the admitted
+estimate to free space that the same run has already consumed. Otherwise every
+large successful write makes its own unchanged estimate appear unaffordable.
+
+Retain strict aggregate checking for new admissions and the pre-work recheck.
+Fail a lost physical reserve as `STORAGE_RESERVE`; keep `STORAGE_COMMITTED` for
+requested plus active committed writes that exceed current capacity. This is a
+journal-compatible semantics correction, not a schema, estimate, concurrency,
+retry or external-service change. Uncoordinated external consumption remains
+bounded by the configured physical reserve and underlying write failures.
+
+For normal resume, credit only measured bytes under the exact owned completed
+`images/raw` directory. Make the cross-run mirror an explicit published-space
+component whenever it remains pending. If raw is retained, reserve its cumulative
+peak with the optional ODM ZIP; if successful filtering deletes raw, reserve the
+lower sequential peak. Missing/linked/foreign paths provide no credit. Preserve
+the existing final per-write checks as a second safety boundary.
+
 ## Three-run opt-in withdrawn; two-slot ceiling restored (2026-11-05)
 
 Supersede the 2026-10-23 three-run opt-in at the operator's request. Current
@@ -9,6 +108,17 @@ negative-only reused-PID verification and all identity, storage, exclusivity,
 resource-permit and recovery safeguards. Roll the live policy back to 2 through
 the guarded idle-only command before deploying this source. Preserve Git history;
 do not force-push or rewrite later commits.
+
+## Large Task 4 split/merge is an explicit run-scoped override (2026-11-05)
+
+Expose WebODM's existing local split/merge as Task 4-only CLI values rather than
+changing the global `.env` profile. The CLI overrides only `split` and
+`split-overlap`, defaults overlap to 100 metres, and does not add `sm-cluster`.
+Persist effective static Task 4 options in the existing binding before remote
+task creation so interrupted creation can resume deterministically; omit the
+generated boundary from the audit value. Explicit conflicts fail before upload,
+while a durable UUID remains authoritative. Keep Task 2, combined mode, optional
+all-assets ZIP, node selection and historical no-options bindings compatible.
 
 ## Processing-node failure diagnostics use an allowlist (2026-11-04)
 

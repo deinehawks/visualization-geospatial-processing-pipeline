@@ -1,6 +1,9 @@
 from __future__ import annotations
+from dataclasses import dataclass
 from datetime import datetime
+import hashlib
 from pathlib import Path
+import re
 from typing import Optional, Tuple, Dict, Any, Iterable
 
 import csv
@@ -30,6 +33,79 @@ class WebODMProjectNotFound(RuntimeError):
 
 class WebODMProjectLookupError(RuntimeError):
     pass
+
+
+class WebODMInputValidationError(RuntimeError):
+    """A newly created task could not prove its authoritative ODM input set."""
+
+
+@dataclass(frozen=True)
+class WebODMUploadManifest:
+    count: int
+    total_bytes: int
+    digest: str
+    files: tuple[Path, ...]
+    records: tuple[tuple[str, int], ...]
+
+    def persisted(self) -> dict[str, Any]:
+        return {
+            "count": self.count,
+            "total_bytes": self.total_bytes,
+            "digest": self.digest,
+        }
+
+
+def build_webodm_upload_manifest(
+    image_folder: str | Path,
+    *,
+    recursive: bool = False,
+) -> WebODMUploadManifest:
+    """Build the deterministic, case-insensitive upload manifest."""
+    folder = Path(image_folder)
+    if not folder.is_dir():
+        raise FileNotFoundError(f"Image folder not found: {folder}")
+    iterator = folder.rglob("*") if recursive else folder.iterdir()
+    candidates = [
+        path
+        for path in iterator
+        if path.is_file() and path.suffix.casefold() in {".jpg", ".jpeg"}
+    ]
+    by_name: dict[str, Path] = {}
+    for path in candidates:
+        key = path.name.casefold()
+        previous = by_name.get(key)
+        if previous is not None:
+            raise ValueError(
+                "Duplicate case-insensitive WebODM upload filename: "
+                f"{previous.name!r} and {path.name!r}"
+            )
+        by_name[key] = path
+    files = tuple(sorted(by_name.values(), key=lambda path: path.name.casefold()))
+    if not files:
+        raise ValueError(f"No JPG/JPEG images found in {folder}")
+    records = tuple((path.name.casefold(), int(path.stat().st_size)) for path in files)
+    digest = hashlib.sha256(
+        b"".join(
+            name.encode("utf-8") + b"\0" + str(size).encode("ascii") + b"\n"
+            for name, size in records
+        )
+    ).hexdigest()
+    return WebODMUploadManifest(
+        count=len(files),
+        total_bytes=sum(size for _name, size in records),
+        digest=digest,
+        files=files,
+        records=records,
+    )
+
+
+_ROOT_IMAGE_COUNT_RE = re.compile(r"(?im)^\s*(?:\[[^\]]+\]\s*)?Loading\s+([0-9][0-9,]*)\s+images\b")
+
+
+def parse_first_webodm_root_image_count(output: str) -> Optional[int]:
+    """Return the first root ODM image count, before any later submodel logs."""
+    match = _ROOT_IMAGE_COUNT_RE.search(output or "")
+    return int(match.group(1).replace(",", "")) if match else None
 
 
 class WebODMProcessor:
@@ -294,6 +370,11 @@ class WebODMProcessor:
         live: bool = False,
         max_consecutive_poll_errors: int = 30,  
         control_check=None,
+        expected_image_count: Optional[int] = None,
+        require_authoritative_image_count: bool = False,
+        input_count_timeout_seconds: int = 900,
+        cancel_confirmation_timeout_seconds: int = 120,
+        input_verified_callback=None,
     ) -> Tuple[bool, float, Dict[str, Any]]:
         """
         Poll WebODM task until terminal status: completed / failed / canceled.
@@ -303,6 +384,51 @@ class WebODMProcessor:
         last_status: Optional[str] = None
         last_line_len = 0
         consecutive_errors = 0
+        running_started: Optional[float] = None
+        authoritative_count_verified = not require_authoritative_image_count
+
+        if require_authoritative_image_count and not expected_image_count:
+            raise ValueError(
+                "expected_image_count is required when authoritative input validation is enabled"
+            )
+
+        def _cancel_and_fail(reason: str) -> None:
+            self.logger.error(
+                "WebODM input validation failed; requesting cancellation "
+                "project_id=%s task_id=%s expected_images=%s reason=%s",
+                project_id,
+                task_id,
+                expected_image_count,
+                reason,
+            )
+            confirmed = False
+            cancel_error: Optional[Exception] = None
+            try:
+                self.cancel_task(project_id, task_id)
+                deadline = time.time() + max(0, cancel_confirmation_timeout_seconds)
+                first_confirmation_check = True
+                while first_confirmation_check or time.time() <= deadline:
+                    first_confirmation_check = False
+                    canceled_info = self.get_task(project_id, task_id)
+                    canceled_status, _ = self._normalize_status(
+                        canceled_info.get("status")
+                    )
+                    if canceled_status == "canceled":
+                        confirmed = True
+                        break
+                    if cancel_confirmation_timeout_seconds <= 0:
+                        break
+                    time.sleep(min(2, cancel_confirmation_timeout_seconds))
+            except Exception as exc:
+                cancel_error = exc
+            outcome = "confirmed" if confirmed else "uncertain"
+            message = (
+                "WebODM input validation failed; task cancellation "
+                f"outcome={outcome}; reason={reason}"
+            )
+            if cancel_error is not None:
+                raise WebODMInputValidationError(message) from cancel_error
+            raise WebODMInputValidationError(message)
 
         def _emit_live(line: str) -> None:
             nonlocal last_line_len
@@ -361,6 +487,45 @@ class WebODMProcessor:
                 raw_status_value
             )
 
+            if require_authoritative_image_count and not authoritative_count_verified:
+                api_count = task_info.get("images_count")
+                if api_count not in (None, ""):
+                    try:
+                        normalized_api_count = int(api_count)
+                    except (TypeError, ValueError):
+                        _cancel_and_fail("invalid WebODM images_count")
+                    if normalized_api_count != int(expected_image_count):
+                        _cancel_and_fail(
+                            "WebODM images_count mismatch "
+                            f"actual={normalized_api_count}"
+                        )
+                if status_label == "running":
+                    if running_started is None:
+                        running_started = time.time()
+                    output = self.get_task_output(project_id, task_id)
+                    root_count = parse_first_webodm_root_image_count(output)
+                    if root_count is not None:
+                        if root_count != int(expected_image_count):
+                            _cancel_and_fail(
+                                "ODM root image count mismatch "
+                                f"actual={root_count}"
+                            )
+                        authoritative_count_verified = True
+                        self.logger.info(
+                            "WebODM authoritative input count verified "
+                            "project_id=%s task_id=%s images=%s",
+                            project_id,
+                            task_id,
+                            root_count,
+                        )
+                        if input_verified_callback is not None:
+                            input_verified_callback(root_count)
+                    elif (
+                        time.time() - running_started
+                        >= float(input_count_timeout_seconds)
+                    ):
+                        _cancel_and_fail("ODM root image count was not observed before timeout")
+
             if status_label != last_status:
                 self.logger.info(
                     f'WebODM status: {status_label} '
@@ -377,6 +542,11 @@ class WebODMProcessor:
 
             if is_terminal:
                 _finalize_live()
+
+                if require_authoritative_image_count and not authoritative_count_verified:
+                    _cancel_and_fail(
+                        "task became terminal before ODM root image count verification"
+                    )
 
                 if status_label == "completed":
                     return True, elapsed, task_info
@@ -434,6 +604,7 @@ class WebODMProcessor:
         live: bool = True,                     # single-line live progress in terminal
         cancel_poll_seconds: int = 3,          # how often to check WebODM for cancel
         control_check=None,
+        expected_manifest: Optional[WebODMUploadManifest] = None,
     ) -> str:
         from requests_toolbelt.multipart.encoder import MultipartEncoder, MultipartEncoderMonitor
         import threading
@@ -443,40 +614,11 @@ class WebODMProcessor:
         self.logger.info(f"Creating task: {name}")
         self.logger.info(f"Image source: {image_folder}")
 
-        folder = Path(image_folder)
-        if not folder.exists():
-            raise FileNotFoundError(f"Image folder not found: {image_folder}")
-
-        # Collect images (JPG/JPEG only), dedupe by case-insensitive filename
-        if recursive:
-            candidates = [p for p in folder.rglob(
-                "*") if p.is_file() and p.suffix.lower() in (".jpg", ".jpeg")]
-        else:
-            candidates = []
-            candidates += list(folder.glob("*.jpg"))
-            candidates += list(folder.glob("*.jpeg"))
-            candidates += list(folder.glob("*.JPG"))
-            candidates += list(folder.glob("*.JPEG"))
-
-        uniq: Dict[str, Path] = {}
-        for p in candidates:
-            key = p.name.lower()  # Windows/SMB safe dedupe
-            if key not in uniq:
-                uniq[key] = p
-
-        image_files = sorted(uniq.values(), key=lambda p: p.name.lower())
-
-        if not image_files:
-            self.logger.error("No JPG/JPEG images found")
-            raise ValueError(f"No JPG/JPEG images found in {image_folder}")
-
-        # size summary
-        total_bytes = 0
-        for p in image_files:
-            try:
-                total_bytes += p.stat().st_size
-            except OSError:
-                pass
+        manifest = build_webodm_upload_manifest(image_folder, recursive=recursive)
+        if expected_manifest is not None and manifest != expected_manifest:
+            raise ValueError("WebODM upload inputs changed before multipart creation")
+        image_files = list(manifest.files)
+        total_bytes = manifest.total_bytes
         gb = total_bytes / (1024**3)
         self.logger.info(
             f"Found {len(image_files)} unique images | approximate size = {gb:.2f} GB")
@@ -623,6 +765,14 @@ class WebODMProcessor:
 
             self.logger.info(
                 "Uploading images to WebODM")
+            current_manifest = build_webodm_upload_manifest(
+                image_folder,
+                recursive=recursive,
+            )
+            if current_manifest != manifest:
+                raise ValueError(
+                    "WebODM upload inputs changed before the multipart request"
+                )
             poller_thread.start()
 
             self._remote_mutation_started = True
@@ -684,6 +834,23 @@ class WebODMProcessor:
                     f.close()
                 except Exception:
                     pass
+
+    @remote_mutation
+    def cancel_task(self, project_id: int, task_id: str) -> None:
+        """Request cancellation through WebODM's supported task endpoint."""
+        self._own_project(project_id)
+        self._remote_mutation_started = True
+        response = self.session.post(
+            f"{self.base_url}/api/projects/{project_id}/tasks/{task_id}/cancel/",
+            headers=self.headers,
+            timeout=30,
+        )
+        response.raise_for_status()
+        self.logger.warning(
+            "Requested WebODM task cancellation project_id=%s task_id=%s",
+            project_id,
+            task_id,
+        )
 
     # Documentation helpers (kept)
     def _reset_session(self, *, reauth: bool = False) -> None:

@@ -74,6 +74,24 @@ def estimate_jpeg_bytes(
     return sum(path.stat().st_size for path in files), len(files)
 
 
+def estimate_existing_directory_bytes(path: Path) -> int:
+    """Measure an owned resume directory without following linked entries."""
+    root = Path(path)
+    if not root.exists():
+        return 0
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f'Existing storage-credit path is not a directory: {path}')
+    total = 0
+    for candidate in root.rglob('*'):
+        if candidate.is_symlink():
+            raise ValueError(
+                f'Existing storage-credit directory contains a link: {candidate}'
+            )
+        if candidate.is_file():
+            total += max(0, int(candidate.stat().st_size))
+    return total
+
+
 def inspect_storage_requirements(
     requirements: Iterable[StorageRequirement],
     *,
@@ -172,6 +190,9 @@ def build_storage_preflight(
     include_qgis_staging: bool = True,
     include_workspace: bool = True,
     include_published_outputs: bool = True,
+    include_cross_run_mirror: bool = False,
+    delete_raw_after_cross_run: bool = False,
+    existing_published_bytes: int = 0,
     include_raw_input_recovery: bool = False,
     include_task4_all_assets_zip: bool = False,
     include_qgis_refresh: bool = False,
@@ -207,11 +228,16 @@ def build_storage_preflight(
         if include_workspace
         else 0
     )
-    published_bytes = (
-        source_bytes + task4_all_assets_zip_bytes
-        if include_published_outputs
-        else 0
+    planned_published_bytes = 0
+    if include_published_outputs:
+        planned_published_bytes = source_bytes + task4_all_assets_zip_bytes
+        if include_cross_run_mirror and not delete_raw_after_cross_run:
+            planned_published_bytes += source_bytes
+    credited_published_bytes = min(
+        planned_published_bytes,
+        max(0, int(existing_published_bytes)),
     )
+    published_bytes = planned_published_bytes - credited_published_bytes
     raw_input_recovery_bytes = (
         source_bytes if include_raw_input_recovery else 0
     )
@@ -266,12 +292,16 @@ def build_storage_preflight(
             ),
             'estimated_workspace_bytes': workspace_bytes,
             'estimated_published_output_bytes': published_bytes,
+            'estimated_planned_published_output_bytes': planned_published_bytes,
+            'existing_published_bytes': credited_published_bytes,
             'estimated_raw_input_recovery_bytes': raw_input_recovery_bytes,
             'webodm_mode': mode,
             'include_upload_cache': bool(include_upload_cache),
             'include_qgis_staging': bool(include_qgis_staging),
             'include_workspace': bool(include_workspace),
             'include_published_outputs': bool(include_published_outputs),
+            'include_cross_run_mirror': bool(include_cross_run_mirror),
+            'delete_raw_after_cross_run': bool(delete_raw_after_cross_run),
             'include_raw_input_recovery': bool(include_raw_input_recovery),
             'include_qgis_refresh': bool(include_qgis_refresh),
             'include_task4_all_assets_zip': bool(
@@ -298,6 +328,9 @@ def format_storage_report(report: Mapping[str, object]) -> str:
     raw_recovery_gib = int(
         report.get('estimated_raw_input_recovery_bytes', 0)
     ) / GIB
+    existing_published_gib = int(
+        report.get('existing_published_bytes', 0)
+    ) / GIB
     lines = [
         '===== STORAGE PREFLIGHT =====',
         f'Result: {result}',
@@ -316,6 +349,11 @@ def format_storage_report(report: Mapping[str, object]) -> str:
             else 'Raw-input recovery: disabled'
         ),
     ]
+    if existing_published_gib > 0:
+        lines.append(
+            'Already completed data (not counted again): '
+            f'{existing_published_gib:.2f} GiB'
+        )
     for value in report.get('volumes', []):
         volume = dict(value)
         status = 'PASS' if volume.get('ok') else 'FAIL'

@@ -12,6 +12,7 @@ from shared.storage_preflight import (
     format_storage_report,
     inspect_storage_requirements,
     is_sqlite_full_error,
+    estimate_existing_directory_bytes,
 )
 
 
@@ -170,6 +171,64 @@ def test_task4_all_assets_zip_adds_workspace_and_published_estimates(
     assert volume["required_bytes"] == (20 * GIB) + 2480
     formatted = format_storage_report(report)
     assert "Task 4 full ODM ZIP: enabled (estimated 0.00 GiB)" in formatted
+
+
+def test_resume_credit_and_raw_retention_change_remaining_published_peak(
+    tmp_path: Path,
+):
+    source = tmp_path / 'source'
+    raw = tmp_path / 'surveys' / '2026' / 'AH-026153' / 'rgb' / 'images' / 'raw'
+    source.mkdir()
+    raw.mkdir(parents=True)
+    (source / 'one.jpg').write_bytes(b'a' * 400)
+    (raw / 'one.jpg').write_bytes(b'a' * 400)
+
+    common = dict(
+        source_dir=source,
+        database_path=tmp_path / 'data' / 'pipeline.db',
+        logs_dir=tmp_path / 'logs',
+        checkpoint_dir=tmp_path / 'checkpoints',
+        upload_cache_root=tmp_path / 'cache',
+        qgis_staging_root=tmp_path / 'qgis-staging',
+        workspace_root=tmp_path / 'workspaces',
+        surveys_root=tmp_path / 'surveys',
+        temp_root=tmp_path / 'temp',
+        webodm_mode='task4',
+        include_cross_run_mirror=True,
+        include_task4_all_assets_zip=True,
+        existing_published_bytes=estimate_existing_directory_bytes(raw),
+        min_free_gb=0,
+        min_free_percent=0,
+        published_min_free_gb=0,
+        published_min_free_percent=0,
+        disk_usage=lambda _path: _usage(total_gib=100, free_gib=100),
+    )
+
+    retained = build_storage_preflight(
+        **common,
+        delete_raw_after_cross_run=False,
+    )
+    deleted = build_storage_preflight(
+        **common,
+        delete_raw_after_cross_run=True,
+    )
+
+    assert retained['estimated_planned_published_output_bytes'] == 1200
+    assert retained['existing_published_bytes'] == 400
+    assert retained['estimated_published_output_bytes'] == 800
+    assert deleted['estimated_planned_published_output_bytes'] == 800
+    assert deleted['estimated_published_output_bytes'] == 400
+    assert 'Already completed data (not counted again)' in format_storage_report(deleted)
+
+
+def test_existing_published_credit_requires_an_owned_directory(tmp_path: Path):
+    missing = tmp_path / 'missing'
+    regular_file = tmp_path / 'not-a-directory'
+    regular_file.write_bytes(b'data')
+
+    assert estimate_existing_directory_bytes(missing) == 0
+    with pytest.raises(ValueError, match='not a directory'):
+        estimate_existing_directory_bytes(regular_file)
 
 
 def test_raw_input_recovery_adds_one_source_copy_to_survey_volume(

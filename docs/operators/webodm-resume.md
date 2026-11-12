@@ -23,6 +23,18 @@ python main.py ... --resume --run-id <run-id> --force-stage webodm_task4
 - confirmed missing or conflicting identity: require repair;
 - network/authentication/server lookup failure: fail against the same binding without creating a task.
 
+In a normal full pipeline invocation, forcing a WebODM operation also invalidates
+its completed `quality_gate` and `qgis` results. After the exact Task 4 UUID is
+exported, the pipeline reruns quality selection and QGIS clipping/tiles without
+reusing the previous readable clip. Storage preflight therefore includes QGIS
+staging, workspace and published-output capacity. An explicitly selected
+programmatic WebODM-only run remains isolated for repair/testing workflows.
+
+Always start a completed-task refresh with `--storage-preflight-only`. Each
+artifact replacement remains atomic: a failed replacement preserves its prior
+target, while a later-stage failure retains earlier successful replacements and
+leaves not-yet-replaced artifacts available for diagnosis/resume.
+
 ## Repair a historical binding
 
 Dry-run is the default:
@@ -162,6 +174,206 @@ the exact WebODM project. If Task 2 exists, use
 is the default. If no Task 2 exists, preserve the failure evidence and diagnose
 the create failure before attempting another explicitly authorized recovery.
 
+## Run-scoped local Task 4 split/merge
+
+For one large, geotagged Task 4 survey, enable WebODM's existing local
+split/merge workflow without changing `.env` defaults:
+
+```powershell
+python main.py `
+  --survey "<dataset>" `
+  --year 2026 `
+  --survey-id "<survey-id>" `
+  --task4 `
+  --node-id 3 `
+  --task4-split 400 `
+  --task4-split-overlap 100 `
+  --storage-preflight-only
+```
+
+`--task4-split` is the average number of images per submodel. The overlap is a
+radius in metres and defaults to 100 when omitted. The CLI values override only
+the `split` and `split-overlap` keys from `WEBODM_TASK4_OPTIONS_JSON` for that
+invocation; every other Task 4 option remains unchanged. This is local,
+sequential split/merge on the selected processing node. It does not configure
+or contact ClusterODM/ClusterODX.
+
+The plan prints the selected node, source image count and approximate base
+submodel count. The actual count and work per submodel can increase because of
+overlap. Split size must be positive and smaller than the selected image count.
+These flags are rejected for Task 2 and combined mode. The optional full ODM ZIP
+retains its existing export setting and storage estimate.
+
+Review the storage report and independently confirm free scratch space on the
+processing node; local pipeline preflight cannot measure the NodeODM host's
+scratch volume. Remove `--storage-preflight-only` only after both checks pass.
+
+The effective static Task 4 options are stored in the existing canonical binding
+before upload/task creation; the generated boundary GeoJSON is not stored in
+`options_json`. A resume before task creation reuses that profile. Explicit
+resume flags that disagree with it fail before upload. Once a task UUID exists,
+normal resume reattaches to that exact task and never creates a replacement.
+Historical bindings without stored options retain their prior behavior.
+
+## Replace one proven-contaminated failed Task 4
+
+Use this recovery only when all of the following are true: the canonical Task 4
+is failed, its exact WebODM project contains no other task, the original source
+can be recovered, and the failed ODM root log proves a different image count
+from the clean local manifest. If that root line is missing, the exact failed
+task may instead use a source-hash-verified copy of its NodeODM root
+`img_list.txt`. It is not a general retry command.
+
+For run `0d57c35b-0a6e-41a7-84be-2eda3217492b`, the retained filtered set had
+3,953 images and `cross-runs` had 335, which exactly reconstructs the 4,288-image
+source when cross-run filtering is disabled. The failed NodeODM task admitted
+more images than WebODM's recorded 3,953 uploads. WebODM links the failed task
+to node 3 and NodeODM UUID `5b03d450-cb52-47fa-aca3-c4be832e15a9`. Its
+live NodeODM task API no longer has that UUID, so preserve the retained root
+`img_list.txt` instead. On node 3, record the source SHA-256 and copy only
+that file from the `nodeodm` container. Place the copy on the pipeline
+workstation under a new operator-owned
+`<evidence-root>\5b03d450-cb52-47fa-aca3-c4be832e15a9\img_list.txt`
+directory; do not overwrite an existing copy. Keep the source hash separately.
+If the root file is gone, stop rather than reconstructing it.
+
+The operator can inspect the source without modifying the task:
+
+```powershell
+$nodeUuid = "5b03d450-cb52-47fa-aca3-c4be832e15a9"
+$nodeFile = "/var/www/data/$nodeUuid/img_list.txt"
+docker exec nodeodm sha256sum $nodeFile
+docker exec nodeodm wc -l $nodeFile
+```
+
+On node 3, replace `D:\operator-evidence\AH-026153` below with a new
+operator-owned destination. The UUID subdirectory must not already exist:
+
+```powershell
+$evidenceRoot = "D:\operator-evidence\AH-026153"
+$evidenceDir = Join-Path $evidenceRoot $nodeUuid
+if (Test-Path -LiteralPath $evidenceDir) { throw "Evidence destination already exists" }
+New-Item -ItemType Directory -Path $evidenceDir -ErrorAction Stop | Out-Null
+docker cp "nodeodm:$nodeFile" (Join-Path $evidenceDir "img_list.txt")
+Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $evidenceDir "img_list.txt")
+```
+
+Transfer that small text file to the pipeline workstation, preserving the UUID
+subdirectory. Its copied hash must match the hash printed by `sha256sum` on
+node 3. The CLI counts
+actual entries rather than relying on `wc -l`, which counts newline characters.
+Start with this local-only plan:
+
+```powershell
+python main.py `
+  --survey "SMF-003_35.8Ha_M3M_50m_85f75s_3mps" `
+  --year 2026 `
+  --survey-id "AH-026153" `
+  --task4 `
+  --node-id 3 `
+  --task4-split 400 `
+  --task4-split-overlap 100 `
+  --disable-cross-run `
+  --resume `
+  --run-id "0d57c35b-0a6e-41a7-84be-2eda3217492b" `
+  --force-stage cross_run_filter `
+  --force-stage webodm_task4 `
+  --recover-missing-raw `
+  --raw-recovery-confirmation "RECOVER RAW FOR RUN 0d57c35b-0a6e-41a7-84be-2eda3217492b" `
+  --replace-failed-webodm-task task4 `
+  --webodm-task-replacement-project-id 563 `
+  --webodm-task-replacement-task-id "dbfd2162-e659-45f6-bbc9-e4019575888a" `
+  --webodm-task-replacement-confirmation "CREATE REPLACEMENT TASK4 IN WEBODM PROJECT 563 FOR FAILED TASK dbfd2162-e659-45f6-bbc9-e4019575888a FOR RUN 0d57c35b-0a6e-41a7-84be-2eda3217492b" `
+  --replacement-nodeodm-image-list "<evidence-root>\5b03d450-cb52-47fa-aca3-c4be832e15a9\img_list.txt" `
+  --replacement-nodeodm-image-list-sha256 "<SHA-256 recorded on node 3>" `
+  --storage-preflight-only
+```
+
+The plan reads only local run state, storage information and the evidence copy.
+It verifies the file hash and image entries. It does not open a
+writer, contact WebODM, rebuild image directories or upload anything. Confirm
+that it reports 4,288 source images, node 3, split 400, overlap 100, approximately
+11 base submodels, the NodeODM evidence count and remote checks pending. Remove only
+`--storage-preflight-only` to execute after that review.
+
+Execution recovers all 4,288 images from the persisted source, atomically
+replaces `images/path` with the full set and `images/cross-runs` with an empty
+directory, and therefore uses the corrected `cb-t4` task name. The old 3,953
+image upload cache and failed task are retained unchanged. A new cache scoped to
+the run and failed UUID is built; an unexpected cache image, duplicate
+case-insensitive filename or manifest change stops before upload.
+
+Immediately before creation, the pipeline proves project 563, the exact failed
+UUID and name, a one-task project, the persisted split profile and the old ODM
+count mismatch. The newest local Task 4 attempt may be `failed`, `paused` or
+`requires_recovery`. A paused task is accepted because a detached remote task
+can continue after the local pipeline pauses; `requires_recovery` permits a
+guarded retry after a local pre-creation safety failure. In every case, both
+remote views of the exact task must report `failed`; a running or completed
+remote task is rejected. The existing local attempt row is retained unchanged.
+For the copied image-list path, the guard also checks WebODM's stored NodeODM
+UUID, processing node and 3,953-image upload count, then rechecks the source
+hash before it audits the old NodeODM count. ODM writes `img_list.txt` after
+photo validation, so its accepted-image count may be lower than the earlier
+`Loading N images` count. The list must exceed WebODM's upload count; when
+both ODM counts exist, the loading count must be at least the list count.
+A mismatch stops before upload.
+The old binding is also retained until authorization succeeds, avoiding a
+conflict between the old `xcb-t4` UUID and the new `cb-t4` name. Authorization
+is appended before upload. The returned replacement UUID is appended
+immediately with audited rebind history; the failed UUID remains in earlier rows.
+
+Every newly created Task 1, Task 2 and Task 4 now has a deterministic local
+manifest. WebODM's `images_count`, when present, must match it. Once the task is
+running, the first root-level ODM `Loading <N> images` line is authoritative;
+later submodel counts are ignored. A mismatch, or no root count within 15
+minutes of running, requests WebODM cancellation and waits up to two minutes for
+confirmation. A failed or uncertain cancellation retains the new UUID and
+requires manual recovery.
+
+Never repeat the replacement command after creation starts. The durable
+`replacement_creation_started`, replacement UUID or recovery status blocks a
+second replacement, so the pipeline cannot automatically create a third task.
+Inspect and repair the exact new UUID instead. Normal historical exact-UUID
+resume remains compatible because the new count requirement applies only to
+tasks created after this guard.
+
+If a disabled cross-run retry previously completed RAW, workspace `path` and
+published `path` but failed while removing or renaming a same-run network-share
+temporary directory, resume can reuse those outputs. Reuse is limited to this
+explicit failed-Task-4 replacement workflow and requires identical deterministic
+filename/size manifests across all three image directories, both workspace and
+published `cross-runs` directories to be empty, and no same-run backup directory.
+RAW may also contain its regular `.raw-recovery.json` ownership marker; other
+non-image entries still prevent reuse.
+The stage records `reused_existing_outputs=true` and leaves any stuck
+`.path.tmp-<run-id>` directory untouched. Any mismatch uses the normal full-copy
+and atomic-publication path instead.
+
+### Storage reservation rechecks
+
+The storage preflight and the final pre-work recheck must cover all estimated
+writes plus the configured reserve. After work starts, the coordinator keeps
+that full estimate as a durable commitment for other admissions, but it does
+not charge the same estimate again against free space already consumed by this
+run. Each managed compute or transfer boundary still verifies that the physical
+reserve remains available. A reserve loss stops with `STORAGE_RESERVE`; a new
+or competing admission that cannot cover requested and committed writes stops
+with `STORAGE_COMMITTED`.
+
+Normal resume also credits only bytes actually present in the completed run's
+owned `images/raw` directory. The report prints that credit. When raw retention
+is enabled, the remaining estimate includes both the cross-run mirror and the
+optional full ODM ZIP; when successful filtering deletes raw, it models the
+lower sequential peak. The credit never comes from an unrelated directory and
+does not bypass the reserve or per-write capacity checks.
+
+For a run that failed at a managed-resource boundary before any WebODM project
+or task was created, confirm the coordinator has no holder, then use the exact
+original mode, node and split flags with `--resume --run-id <run-id>`. Start with
+`--storage-preflight-only`. Do not create a replacement run or delete the
+completed data-segregation output; normal resume reuses completed stages.
+
 ## Processing nodes repeatedly turn offline
 
 When every processing node turns red several minutes after it was manually
@@ -220,6 +432,16 @@ gone and Task 2 was still absent, the operator reconciled that exact record. The
 same guarded recovery was then admitted and was running when this record was
 written. Task 2 completion and output validation remain pending and must not be
 inferred from admission alone.
+
+On 2026-11-06 the operator reported that this run had completed, but the Task 4
+clipped orthomosaic still showed the earlier distorted generation after Task 4
+had been rerun. The forced WebODM operation exported its task output, while the
+already completed quality/QGIS stages were skipped and QGIS had previously
+accepted the old clip because it was readable. Source now treats a normal forced WebODM
+refresh as invalidating quality and QGIS, and disables clip reuse for that
+downstream QGIS attempt. This source change does not mutate the completed run or
+its files automatically; the operator must review a fresh storage preflight and
+explicitly rerun the exact-task refresh after deploying the patch.
 
 ## Download the complete Task 4 ODM ZIP
 

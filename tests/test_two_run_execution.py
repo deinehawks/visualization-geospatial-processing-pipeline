@@ -217,6 +217,36 @@ def test_disk_consumed_after_preflight_fails_before_work(parallel):
     assert parallel.store.status(first.operation_id)['storage_commitments']['owned-test-volume']['required'] == 60
 
 
+def test_mid_run_storage_recheck_does_not_double_count_admitted_writes(parallel, monkeypatch):
+    first = reserve(parallel, '001', report={'ok': True, 'volumes': [volume(parallel)]})
+    run(parallel, first, 101)
+    from types import SimpleNamespace
+    monkeypatch.setattr('shutil.disk_usage', lambda _: SimpleNamespace(free=40))
+    with first.resource('compute'):
+        assert parallel.store.status(first.operation_id)['resources'] == {'compute': True}
+    stored = parallel.store.status(first.operation_id)['storage_commitments']['owned-test-volume']
+    assert stored == {
+        'required': 60,
+        'reserve': 5,
+        'free': 40,
+        'probe_path': str(parallel.base_dir),
+    }
+    with pytest.raises(ConsoleError) as failure:
+        reserve(parallel, '002', report={'ok': True, 'volumes': [volume(parallel, required=1, free=40)]})
+    assert failure.value.code == 'STORAGE_COMMITTED'
+
+
+def test_mid_run_storage_recheck_still_enforces_physical_reserve(parallel):
+    first = reserve(parallel, '001', report={'ok': True, 'volumes': [volume(parallel)]})
+    run(parallel, first, 101)
+    from types import SimpleNamespace
+    with pytest.raises(ConsoleError) as failure:
+        first.check_committed_storage(disk_usage=lambda _: SimpleNamespace(free=4))
+    assert failure.value.code == 'STORAGE_RESERVE'
+    stored = parallel.store.status(first.operation_id)['storage_commitments']['owned-test-volume']
+    assert stored['required'] == 60 and stored['free'] == 100
+
+
 @pytest.mark.parametrize('resource_name', ['compute', 'bulk_transfer'])
 def test_waiting_run_can_pause_without_taking_or_releasing_other_permit(parallel, resource_name):
     first, second = reserve(parallel, '001'), reserve(parallel, '002')
@@ -312,7 +342,7 @@ def test_persistence_error_never_reexecutes_stage(temporary_sqlite_db_path, monk
 def test_busy_commit_retries_only_commit(monkeypatch):
     connection = Mock(in_transaction=True)
     error = sqlite3.OperationalError('busy')
-    error.sqlite_errorcode = sqlite3.SQLITE_BUSY
+    error.sqlite_errorcode = getattr(sqlite3, 'SQLITE_BUSY', 5)
     connection.commit.side_effect = [error, None]
     monkeypatch.setattr('shared.db.repo.time.sleep', lambda _: None)
     _CommitRetry(connection).commit()
