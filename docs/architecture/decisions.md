@@ -223,3 +223,13 @@ The pipeline workstream has implemented the guarded `activate_publication` Stage
   reconciled only after exact project-name and zero-task verification.
   Ambiguous creation blocks automatic retry and requires operator inspection.
 
+
+## CW-ADR-015 - Branded guided operator workspace (2026-11-13)
+
+- **Status:** Implemented and verified with isolated fixtures; operational smoke checks remain separate.
+- **Decision:** Use white surfaces and approved burgundy/charcoal/grey accents with local shadcn-inspired components and no added dependency. Separate Overview attention/active/history groups, guided execution forms, and a compact run summary above Progress/Outputs/Technical tabs.
+- **Evidence:** Present latest stage/operation outcomes without rewriting persisted state. Keep prior attempts, exact IDs and recovery controls in expert views; remote status remains last observed. Unknown historical settings require review; bound Task 4 split profiles are read only.
+- **Interfaces:** Add positive optional console split/overlap inputs mapped through the existing CLI and preflight recheck, plus recorded-option provenance. No schema, security-boundary, queue, role or remote-operation expansion.
+- **Supersession:** The browser's prior internal-restart form is replaced by guidance to inspect/restart the exact task in WebODM. Existing guarded review API behavior remains compatible; earlier decision records are retained.
+- **Validation/rollback:** See [redesign validation](../ui/console-redesign-validation.md). Revert console source and rebuild static assets if required; no DB downgrade or evidence deletion.
+

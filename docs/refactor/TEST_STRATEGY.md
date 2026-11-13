@@ -1,5 +1,32 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Operator guidance and branded console (2026-11-13)
+
+Add Node contract coverage for current-attempt precedence, historical request
+evidence, saved profiles, human durations, disabled-button reasons and keyboard
+tab selection. Python console tests use existing temporary SQLite/process fakes
+to verify additive split mapping, incompatible input rejection, read-only bound
+profiles, unknown settings and preflight-profile drift rejection before work.
+
+The explicit `web/pipeline-console/tests/preview.mjs` and `visual.mjs` pair is
+separate from ordinary test discovery. It serves static `out/` on 127.0.0.1:8877
+with fake API responses only, then uses an installed headless Chromium browser
+with a unique `.next/visual-checks/` profile and test-ownership sentinel. It imports
+no backend/configuration, starts no pipeline and blocks page requests outside its
+fixture origin. Its controlled browser subprocess is needed for DOM/keyboard/
+responsive validation, not geospatial execution. No browser/dependency download
+or profile deletion occurs. Screenshots are ignored generated artifacts.
+
+Fixture interactions cover new/large/resume/storage-failure/interrupted/failed
+remote/completed/empty states, tab focus and polling persistence, and canceled
+confirmation dispatch. Viewports: 1600x1000, 1280x800, 390x844 and a 900x540 CSS
+viewport at device scale 2 (200%-equivalent reflow, not native Windows scaling).
+The original browser-control tool failed sandbox initialization; isolated
+headless-browser checks supplied the visual evidence. Full results, commands and
+the Python 3.10 optional API-module skip are in
+`docs/ui/console-redesign-validation.md`. Existing protected-resource guards and
+external-test exclusions remain unchanged.
+
 ## One-time NodeODM root image-list evidence (2026-11-10)
 
 Use only pytest-owned text files and fake WebODM task metadata. Validate the

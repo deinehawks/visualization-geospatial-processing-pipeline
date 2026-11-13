@@ -1,5 +1,37 @@
 # Refactor Current Status
 
+## Branded operator console and guided execution (2026-11-13)
+
+Implemented on `feat/operator-console-guidance`, following Task 4 commit
+`5dccb0d`. Overview, New/Resume and Run Detail now share the approved white,
+burgundy `#8A1C23`, charcoal `#353D47` and grey `#666666` design. Run Detail has a
+compact latest-evidence summary and keyboard-accessible Progress/Outputs/Technical
+tabs; older attempts and technical recovery remain available without dominating
+the routine view. Polling retains the selected tab and canceled confirmations
+dispatch no request. Latest attempts supersede older failures without hiding a
+new failed forced attempt.
+
+Completed the pending browser split controls through the existing CLI/preflight:
+Task 4-only, explicit node, split 400/overlap 100 defaults, and read-only bound
+profiles. Historical settings are prefilled only from recorded browser requests;
+unknown choices require operator review. Session/CSRF/Host/Origin checks, ownership,
+task bindings, schema and CLI defaults remain unchanged. No dependencies added.
+
+Validation: 21 Node tests; TypeScript/static build; 100 focused Python 3.13 tests;
+80 focused Python 3.10 tests with one optional API-module skip (FastAPI absent);
+all 1,460 safe defaults pass on Python 3.13 and collect safely. Python 3.10 safely
+collects 1,440 tests with the same optional module unavailable. Four changed
+Python files compile in memory on both versions. Fixture-only Chromium checks
+cover normal/large/resumed/interrupted/remote-failed/storage-failed/completed and
+empty states, keyboard tabs, polling, confirmations and responsive reflow.
+Details and exact commands: `docs/ui/console-redesign-validation.md`.
+
+No production database/configuration, survey/cache/share, operational service,
+GIS executable or real pipeline was accessed. A separate fake static server and
+isolated headless-browser profile were used for screenshots. Actual Windows
+display scaling and real operational workflow smoke checks remain separate.
+Unrelated `codes.txt` and `tools/query_survey_stats.py` edits remain untouched.
+
 ## Linked NodeODM evidence for the failed Task 4 (2026-11-10)
 
 A read-only WebODM task lookup identified project 563, failed task

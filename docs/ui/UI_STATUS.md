@@ -1,5 +1,27 @@
 # Pipeline Web Console Status
 
+## Branded guidance release (2026-11-13)
+
+The approved redesign is implemented across Overview, New/Resume and Run Detail
+on `feat/operator-console-guidance`. It uses local reusable components and the
+supplied brand colors, with routine progress, outputs and technical recovery
+separated. Pending split controls and historical-setting review are completed.
+There is no schema, dependency, security-boundary or ordinary CLI behavior change.
+
+Validation: 21 Node tests, TypeScript/static build, 100 focused Python 3.13 tests,
+80 focused Python 3.10 tests plus one optional API-module skip, 1,460 passing
+safe defaults and collection on Python 3.13, 1,440 collected on Python 3.10,
+in-memory compilation and scoped whitespace review. A fake-API headless-browser
+walkthrough passed responsive, tab, polling, confirmation and execution-form
+scenarios. It did not contact real services or start production processing.
+Exact commands and acceptance mapping:
+[console-redesign-validation.md](console-redesign-validation.md).
+
+Native Windows display scaling, real GIS/WebODM behavior and operational smoke
+rollout remain outside this automated visual check. Operator smoke testing is
+in progress; its result has not yet been recorded. Commit and push of this
+validated UI work were requested on 2026-11-13.
+
 ## Two-run extension (2026-10-21)
 
 Explicit legacy local reconciliation is available through the operator CLI.

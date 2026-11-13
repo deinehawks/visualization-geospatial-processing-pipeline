@@ -17,6 +17,8 @@ class RunInput(Input):
     date: str | None = Field(default=None, pattern=r'^[0-9]{8}$')
     uav: str | None = Field(default=None, pattern=r'^[A-Za-z0-9 _-]{1,100}$')
     node_id: int | None = Field(default=None, ge=1)
+    task4_split: int | None = Field(default=None, ge=1)
+    task4_split_overlap: int | None = Field(default=None, ge=1)
     disable_cross_run: bool = False
     rgb: bool = False
     keep_workspace: bool = False

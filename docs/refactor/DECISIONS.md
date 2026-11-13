@@ -1,5 +1,24 @@
 # Architectural Decision Log
 
+## Branded guided operator workspace (accepted 2026-11-13)
+
+Use the approved white/burgundy/charcoal/grey visual system and shadcn-inspired
+local components without adding dependencies. Separate routine status/progress,
+outputs and expert evidence. Present the latest relevant stage/operation; retain
+history without allowing older failures to override resumed work or old success
+to conceal a newer failure. Keep last-observed WebODM state separate from local
+ownership and never invent progress, time estimates or observation timestamps.
+
+Preserve loopback/session guards and existing execution/recovery semantics.
+Complete additive Task 4 split inputs through CLI validation, with explicit node
+selection and read-only saved profiles for bound tasks. Unknown historical launch
+settings require review rather than silent inference. The routine browser screen
+guides remote restart through the exact WebODM task; prior guarded review API
+behavior is retained for compatibility. CW-ADR-015 records this UI presentation
+decision; earlier decision history remains intact. Rollback restores frontend/
+console source and rebuilds static assets; no database downgrade or evidence
+deletion is needed.
+
 ## Permit a verified root image-list copy when old task output is incomplete (2026-11-10)
 
 For the one authorized failed Task 4 replacement, WebODM's old task output may
