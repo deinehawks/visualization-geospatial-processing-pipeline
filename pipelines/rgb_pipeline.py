@@ -34,11 +34,14 @@ from shared.publication_lock import PublicationLockedError
 from shared.execution import resource, transfer, StatePersistenceError
 from modules.kml_boundary_setter.kml_boundary_setter import run_kml
 from modules.webodm.webodm_processor import (
+    WebODMInputValidationError,
     WebODMProcessor,
     WebODMProjectLookupError,
     WebODMProjectNotFound,
     WebODMTaskLookupError,
     WebODMTaskNotFound,
+    build_webodm_upload_manifest,
+    parse_first_webodm_root_image_count,
 )
 from modules.cross_run_image_filter.cross_run_image_filter import run_filter
 from modules.data_segregation.data_segregation import run_data_segregation
@@ -53,8 +56,14 @@ from shared.qgis_tile_recovery import (
     validate_qgis_tile_rebuild_request,
 )
 from shared.raw_input_recovery import (
+    RAW_RECOVERY_OWNERSHIP_NAME,
     recover_missing_raw_inputs,
     validate_raw_input_recovery_request,
+)
+from shared.nodeodm_replacement_evidence import inspect_nodeodm_image_list
+from shared.stage_dependencies import (
+    WEBODM_OUTPUT_FORCE_STAGES,
+    expand_webodm_output_dependencies,
 )
 from shared.qgis_refresh import (
     QGISRefreshError, acknowledge_refresh, reject_pending_refresh,
@@ -302,6 +311,7 @@ class RGBPipeline(
         self._empty_webodm_recovery: Optional[dict[str, Any]] = None
         self._missing_webodm_project_recovery: Optional[dict[str, Any]] = None
         self._missing_webodm_task_recovery: Optional[dict[str, Any]] = None
+        self._failed_webodm_task_replacement: Optional[dict[str, Any]] = None
 
     # Helpers
     def _set_survey_artifact_context(self, survey_id: str, rgb_path: Path) -> None:
@@ -1177,6 +1187,7 @@ class RGBPipeline(
         success: Optional[bool] = None,
         runtime_seconds: Optional[float] = None,
         binding_source: str = 'pipeline',
+        options: Optional[Mapping[str, Any]] = None,
         audit: Optional[Dict[str, Any]] = None,
         append_history: bool = False,
         allow_rebind: bool = False,
@@ -1205,6 +1216,7 @@ class RGBPipeline(
                 runtime_seconds=runtime_seconds,
                 binding_source=binding_source,
                 stage_attempt_id=stage_attempt_id,
+                options=dict(options) if options is not None else None,
                 audit=audit,
                 append_history=append_history,
                 allow_rebind=allow_rebind,
@@ -1351,6 +1363,11 @@ class RGBPipeline(
             task_name=task_name,
             local_status='empty_project_recovery_authorized',
             binding_source='operator_empty_project_recovery',
+            options=(
+                self._webodm_task_options(task_key)
+                if task_key == 'task4'
+                else None
+            ),
             audit={
                 'event': 'empty_webodm_project_recovery_authorized',
                 'authorized_at': authorized_at,
@@ -1523,6 +1540,190 @@ class RGBPipeline(
         )
         return True
 
+    def _authorize_failed_webodm_task_replacement(
+        self,
+        *,
+        processor: Any,
+        task_key: str,
+        project_id: int,
+        task_name: str,
+        binding: Mapping[str, Any],
+        expected_image_count: int,
+    ) -> bool:
+        recovery = self._failed_webodm_task_replacement
+        if recovery is None:
+            return False
+        failed_task_id = str(recovery.get('failed_task_id') or '')
+        expected_confirmation = (
+            'CREATE REPLACEMENT TASK4 IN WEBODM PROJECT '
+            f'{project_id} FOR FAILED TASK {failed_task_id} FOR RUN {self.run_id}'
+        )
+        if task_key != 'task4' or recovery.get('operation') != 'task4':
+            raise StageRequiresRecovery('Failed-task replacement supports Task 4 only.')
+        if int(recovery.get('project_id') or 0) != int(project_id):
+            raise StageRequiresRecovery('Replacement project does not match persisted Task 4.')
+        if recovery.get('confirmation') != expected_confirmation:
+            raise StageRequiresRecovery('Failed-task replacement confirmation changed.')
+        if str(binding.get('task_id') or '') != failed_task_id:
+            raise StageRequiresRecovery('Replacement failed-task UUID is no longer canonical.')
+        if str(binding.get('local_status') or '') in {
+            'replacement_creation_started',
+            'replacement_task_created',
+            'replacement_requires_recovery',
+        }:
+            raise StageRequiresRecovery(
+                'A Task 4 replacement was already started; refusing to create a third task.'
+            )
+        configured_node = (self.config.get('webodm') or {}).get('node_id')
+        if int(recovery.get('processing_node') or 0) != int(configured_node or 0):
+            raise StageRequiresRecovery('Replacement processing node changed after authorization.')
+        expected_stage_id = recovery.get('failed_stage_attempt_id')
+        if expected_stage_id is None or int(expected_stage_id) <= 0:
+            raise StageRequiresRecovery(
+                'Task 4 replacement is missing the pre-admission source-stage proof.'
+            )
+        source_stage_status = str(recovery.get('source_stage_status') or '')
+        if source_stage_status not in {
+            'failed',
+            'paused',
+            'requires_recovery',
+        }:
+            raise StageRequiresRecovery(
+                'Task 4 replacement source stage must be failed, paused or '
+                'requires_recovery.'
+            )
+        try:
+            project = processor.get_project(int(project_id))
+            remote_tasks = processor.list_project_tasks(int(project_id))
+            remote_task = processor.get_task(int(project_id), failed_task_id)
+        except Exception as exc:
+            raise StageRequiresRecovery(
+                'Could not prove the exact failed WebODM task before replacement.'
+            ) from exc
+        if int(project.get('id') or 0) != int(project_id):
+            raise StageRequiresRecovery('Replacement WebODM project identity mismatch.')
+        if len(remote_tasks) != 1:
+            raise StageRequiresRecovery(
+                f'Replacement project must contain exactly the failed task; found '
+                f'{len(remote_tasks)} task(s).'
+            )
+        listed = remote_tasks[0]
+        listed_status, _ = WebODMProcessor._normalize_status(listed.get('status'))
+        exact_status, _ = WebODMProcessor._normalize_status(remote_task.get('status'))
+        if (
+            str(listed.get('id') or '') != failed_task_id
+            or str(listed.get('name') or '')
+            != str(binding.get('task_name') or '')
+            or str(remote_task.get('id') or failed_task_id) != failed_task_id
+            or listed_status != 'failed'
+            or exact_status != 'failed'
+        ):
+            raise StageRequiresRecovery(
+                'Remote project contents do not match the exact failed Task 4.'
+            )
+        output_root_count = parse_first_webodm_root_image_count(
+            processor.get_task_output(int(project_id), failed_task_id)
+        )
+        old_root_count = output_root_count
+        count_source = 'webodm_task_output'
+        evidence_audit = None
+        if recovery.get('nodeodm_evidence_path') is not None:
+            try:
+                evidence = inspect_nodeodm_image_list(
+                    recovery['nodeodm_evidence_path'],
+                    recovery['nodeodm_evidence_sha256'],
+                )
+            except (OSError, ValueError) as exc:
+                raise StageRequiresRecovery(
+                    'NodeODM image-list evidence changed or is invalid.'
+                ) from exc
+            try:
+                webodm_node = int(remote_task.get('processing_node') or 0)
+                webodm_upload_count = int(remote_task.get('images_count') or 0)
+            except (TypeError, ValueError) as exc:
+                raise StageRequiresRecovery(
+                    'Failed WebODM task has invalid node or image-count metadata.'
+                ) from exc
+            if (
+                str(remote_task.get('uuid') or '') != evidence['node_uuid']
+                or webodm_node != int(configured_node)
+                or webodm_upload_count <= 0
+            ):
+                raise StageRequiresRecovery(
+                    'NodeODM evidence does not match the exact failed WebODM task.'
+                )
+            if (
+                output_root_count is not None
+                and output_root_count < evidence['count']
+            ):
+                raise StageRequiresRecovery(
+                    'ODM root count is smaller than its retained image-list count.'
+                )
+            if evidence['count'] <= webodm_upload_count:
+                raise StageRequiresRecovery(
+                    'NodeODM image list does not prove input contamination.'
+                )
+            if evidence['count'] == int(expected_image_count):
+                raise StageRequiresRecovery(
+                    'Failed Task 4 does not prove the recorded ODM input-count mismatch.'
+                )
+            if output_root_count is None:
+                old_root_count = int(evidence['count'])
+                count_source = 'nodeodm_accepted_image_list'
+            evidence_audit = {
+                'node_uuid': evidence['node_uuid'],
+                'sha256': evidence['sha256'],
+                'count': int(evidence['count']),
+                'webodm_uploaded_images': webodm_upload_count,
+            }
+        if old_root_count is None or old_root_count == int(expected_image_count):
+            raise StageRequiresRecovery(
+                'Failed Task 4 does not prove the recorded ODM input-count mismatch.'
+            )
+        self._persist_webodm_binding(
+            task_key='task4',
+            project_id=int(project_id),
+            task_id=failed_task_id,
+            task_name=str(binding.get('task_name') or task_name),
+            remote_status='failed',
+            local_status='failed_task_replacement_authorized',
+            binding_source='operator_failed_task_replacement',
+            options=self._webodm_task_options('task4'),
+            append_history=True,
+            audit={
+                'event': 'failed_webodm_task_replacement_authorized',
+                'failed_task_id': failed_task_id,
+                'failed_task_name': binding.get('task_name'),
+                'replacement_task_name': task_name,
+                'old_odm_image_count': old_root_count,
+                'old_odm_image_count_source': count_source,
+                **(
+                    {'nodeodm_evidence': evidence_audit}
+                    if evidence_audit is not None
+                    else {}
+                ),
+                'expected_image_count': int(expected_image_count),
+                'processing_node': int(configured_node),
+                'source_stage_attempt_id': int(expected_stage_id),
+                'source_stage_status': source_stage_status,
+                'confirmation': expected_confirmation,
+            },
+        )
+        log_event(
+            self.loggers['webodm'],
+            'failed_webodm_task_replacement_authorized',
+            run_id=self.run_id,
+            project_id=project_id,
+            failed_task_id=failed_task_id,
+            old_odm_image_count=old_root_count,
+            old_odm_image_count_source=count_source,
+            expected_image_count=expected_image_count,
+            processing_node=configured_node,
+            source_stage_attempt_id=int(expected_stage_id),
+            source_stage_status=source_stage_status,
+        )
+        return True
+
     def _webodm_project_recovery_receipt_path(self) -> Path:
         return (
             self.checkpoint_dir
@@ -1601,6 +1802,7 @@ class RGBPipeline(
             task_name=task_name,
             local_status="missing_project_replaced",
             binding_source="operator_missing_project_recovery",
+            options=self._webodm_task_options("task4"),
             allow_rebind=True,
             append_history=True,
             audit={
@@ -1990,6 +2192,65 @@ class RGBPipeline(
                 files.append(p)
         return sorted(files)
 
+    def _verified_disabled_crossrun_recovery(
+        self,
+        *,
+        input_dir: Path,
+        output_dir: Path,
+        excluded_dir: Path,
+        legacy_output_dir: Path,
+        legacy_excluded_dir: Path,
+    ) -> Optional[Tuple[List[Path], Dict[str, Any]]]:
+        image_dirs = (input_dir, output_dir, legacy_output_dir)
+        empty_dirs = (excluded_dir, legacy_excluded_dir)
+        if any(not path.is_dir() for path in (*image_dirs, *empty_dirs)):
+            return None
+
+        for target in (legacy_output_dir, legacy_excluded_dir):
+            backup = target.parent / f".{target.name}.bak-{self.run_id}"
+            if backup.exists():
+                return None
+
+        try:
+            manifests = [
+                build_webodm_upload_manifest(path)
+                for path in image_dirs
+            ]
+            for path, manifest in zip(image_dirs, manifests):
+                entries = tuple(path.iterdir())
+                images = tuple(
+                    entry for entry in entries
+                    if entry.is_file()
+                    and entry.suffix.casefold() in {'.jpg', '.jpeg'}
+                )
+                image_entries = set(images)
+                unexpected = tuple(
+                    entry for entry in entries
+                    if entry not in image_entries
+                    and not (
+                        path == input_dir
+                        and entry.name == RAW_RECOVERY_OWNERSHIP_NAME
+                        and entry.is_file()
+                        and not entry.is_symlink()
+                    )
+                )
+                if len(images) != manifest.count or unexpected:
+                    return None
+            if any(any(path.iterdir()) for path in empty_dirs):
+                return None
+        except (OSError, ValueError):
+            return None
+
+        source_manifest, workspace_manifest, published_manifest = manifests
+        if not (
+            source_manifest.records
+            == workspace_manifest.records
+            == published_manifest.records
+        ):
+            return None
+
+        return list(source_manifest.files), source_manifest.persisted()
+
     @staticmethod
     def _fmt_bytes(num: int) -> str:
         size: float = float(num)
@@ -2125,6 +2386,65 @@ class RGBPipeline(
                 logger.info(f"Upload cache cleaned: {cache_dir}")
         except Exception:
             logger.exception(f"Failed to clean upload cache: {cache_dir}")
+
+    def _stage_replacement_upload_cache(
+        self,
+        *,
+        src_dir: Path,
+        failed_task_id: str,
+        logger: logging.Logger,
+    ):
+        """Stage one replacement in a dedicated cache without touching old evidence."""
+        source_manifest = build_webodm_upload_manifest(src_dir)
+        upload_cache_root_cfg = (self.config.get('paths') or {}).get(
+            'upload_cache_root'
+        ) or os.getenv('UPLOAD_CACHE_ROOT')
+        local_root = (
+            Path(upload_cache_root_cfg)
+            if upload_cache_root_cfg
+            else Path(os.getenv('TEMP', r'C:\temp'))
+        )
+        cache_dir = (
+            local_root
+            / 'automation-pipeline'
+            / 'upload_cache'
+            / f'{self.run_id}_task4_replacement_{failed_task_id[:12]}'
+        )
+        if cache_dir.is_dir():
+            source_names = {path.name.casefold() for path in source_manifest.files}
+            extra_names = sorted(
+                path.name
+                for path in self._iter_jpeg_files(cache_dir)
+                if path.name.casefold() not in source_names
+            )
+            if extra_names:
+                raise StageRequiresRecovery(
+                    'Replacement upload cache contains unexpected images; '
+                    'refusing to delete evidence or upload contaminated inputs.',
+                    output={
+                        'status': 'requires_recovery',
+                        'cache_dir': str(cache_dir),
+                        'unexpected_image_count': len(extra_names),
+                    },
+                )
+        staged_dir, _count = self._stage_upload_cache(
+            src_dir=src_dir,
+            cache_root=cache_dir,
+            logger=logger,
+            progress_every=25,
+            require_free_multiplier=1.2,
+        )
+        staged_manifest = build_webodm_upload_manifest(staged_dir)
+        if staged_manifest.records != source_manifest.records:
+            raise StageRequiresRecovery(
+                'Replacement upload cache does not exactly match the rebuilt source set.',
+                output={
+                    'status': 'requires_recovery',
+                    'source_manifest': source_manifest.persisted(),
+                    'cache_manifest': staged_manifest.persisted(),
+                },
+            )
+        return staged_dir, staged_manifest
 
     def _require_workspace_owned_path(self, path: Path) -> Path:
         candidate = Path(path).resolve(strict=False)
@@ -2576,23 +2896,53 @@ class RGBPipeline(
         logger.info(f"Legacy output mirror (excluded/cross-runs): {legacy_excluded_dir}")
 
         if not enabled:
-            logger.info("Cross-run filter disabled. Copying RAW -> PATH without exclusions.")
-
-            self._reset_workspace_directory(output_dir)
-            self._reset_workspace_directory(excluded_dir)
-
-            images = self._iter_jpeg_files(input_dir)
-            for img in images:
-                transfer(self, shutil.copy2, img, output_dir / img.name)
-
-            self._replace_legacy_directory_after_success(
-                source_dir=output_dir,
-                target_dir=legacy_output_dir,
+            logger.info(
+                "Cross-run filter disabled. Validating reusable outputs before "
+                "copying RAW -> PATH without exclusions."
             )
-            self._replace_legacy_directory_after_success(
-                source_dir=excluded_dir,
-                target_dir=legacy_excluded_dir,
+
+            recovered = (
+                self._verified_disabled_crossrun_recovery(
+                    input_dir=input_dir,
+                    output_dir=output_dir,
+                    excluded_dir=excluded_dir,
+                    legacy_output_dir=legacy_output_dir,
+                    legacy_excluded_dir=legacy_excluded_dir,
+                )
+                if self._failed_webodm_task_replacement is not None
+                else None
             )
+            reused_existing_outputs = recovered is not None
+            if recovered is not None:
+                images, recovered_manifest = recovered
+                logger.info(
+                    "Cross-run filter disabled recovery: reusing matching RAW, "
+                    "workspace and published outputs (images=%s digest=%s). "
+                    "Same-run temporary mirror directories are left untouched.",
+                    recovered_manifest['count'],
+                    recovered_manifest['digest'],
+                )
+            else:
+                if self._failed_webodm_task_replacement is not None:
+                    logger.warning(
+                        "Existing disabled cross-run outputs did not satisfy "
+                        "the exact recovery proof; using the normal full copy."
+                    )
+                self._reset_workspace_directory(output_dir)
+                self._reset_workspace_directory(excluded_dir)
+
+                images = self._iter_jpeg_files(input_dir)
+                for img in images:
+                    transfer(self, shutil.copy2, img, output_dir / img.name)
+
+                self._replace_legacy_directory_after_success(
+                    source_dir=output_dir,
+                    target_dir=legacy_output_dir,
+                )
+                self._replace_legacy_directory_after_success(
+                    source_dir=excluded_dir,
+                    target_dir=legacy_excluded_dir,
+                )
 
             result = {
                 "filter_enabled": False,
@@ -2608,6 +2958,7 @@ class RGBPipeline(
                 "crossrun_flag": "c",                 # keep default semantics
                 "experiment_crossrun_label": "NF",   # experiment naming only
                 "raw_deleted": False,
+                "reused_existing_outputs": reused_existing_outputs,
                 "workspace": {
                     "input_dir": str(input_dir),
                     "output_dir": str(output_dir),
@@ -3109,6 +3460,10 @@ class RGBPipeline(
 
         try:
             try:
+                if self._failed_webodm_task_replacement is not None:
+                    raise RuntimeError(
+                        'replacement uses a dedicated immutable upload cache'
+                    )
                 cached_dir, _ = self._stage_upload_cache(
                     src_dir=image_folder,
                     cache_root=cache_root,
@@ -3143,6 +3498,73 @@ class RGBPipeline(
                 )
 
             processor = self._create_webodm_processor(logger)
+            upload_manifest = build_webodm_upload_manifest(upload_folder)
+
+            def _creation_audit(task_key: str) -> dict[str, Any]:
+                current = self.repo.get_webodm_binding(self.run_id, task_key)
+                audit: dict[str, Any] = {}
+                if current and current.get('audit_json'):
+                    try:
+                        import json
+                        loaded = json.loads(current['audit_json'])
+                        if isinstance(loaded, dict):
+                            audit.update(loaded)
+                    except (TypeError, ValueError):
+                        pass
+                audit.setdefault('event', 'webodm_task_created')
+                audit['upload_manifest'] = upload_manifest.persisted()
+                audit['processing_node'] = webodm_cfg.get('node_id')
+                return audit
+
+            def _wait_for_new_task(task_key: str, task_id: str, task_name: str):
+                def record_verified(actual_count: int) -> None:
+                    self._persist_webodm_binding(
+                        task_key=task_key,
+                        project_id=int(project_id),
+                        task_id=str(task_id),
+                        task_name=task_name,
+                        remote_status='running',
+                        local_status='input_count_verified',
+                        audit={
+                            'event': 'webodm_authoritative_input_count_verified',
+                            'verified_image_count': int(actual_count),
+                            'upload_manifest': upload_manifest.persisted(),
+                        },
+                    )
+
+                try:
+                    return processor.wait_for_completion(
+                        project_id,
+                        task_id,
+                        live=False,
+                        control_check=lambda: self._check_control_or_raise('webodm'),
+                        expected_image_count=upload_manifest.count,
+                        require_authoritative_image_count=True,
+                        input_verified_callback=record_verified,
+                    )
+                except WebODMInputValidationError as exc:
+                    self._persist_webodm_binding(
+                        task_key=task_key,
+                        project_id=int(project_id),
+                        task_id=str(task_id),
+                        task_name=task_name,
+                        local_status='input_validation_requires_recovery',
+                        audit={
+                            'event': 'webodm_input_validation_failed',
+                            'upload_manifest': upload_manifest.persisted(),
+                            'error_type': type(exc).__name__,
+                        },
+                    )
+                    raise StageRequiresRecovery(
+                        str(exc),
+                        output={
+                            'status': 'requires_recovery',
+                            'operation_key': task_key,
+                            'project_id': int(project_id),
+                            'task_id': str(task_id),
+                            'upload_manifest': upload_manifest.persisted(),
+                        },
+                    ) from exc
 
 
             project_suffix = str(self.state.get("webodm_project_suffix") or "").strip()
@@ -3222,11 +3644,35 @@ class RGBPipeline(
                 project_bindings.append(('task4', task4_name))
 
             for operation_key, operation_name in project_bindings:
+                existing_binding = self.repo.get_webodm_binding(
+                    self.run_id,
+                    operation_key,
+                )
+                if (
+                    operation_key == 'task4'
+                    and self._failed_webodm_task_replacement is not None
+                ):
+                    logger.info(
+                        'Deferring Task 4 replacement binding update until '
+                        'the exact failed task is authorized.'
+                    )
+                    continue
                 self._persist_webodm_binding(
                     task_key=operation_key,
                     project_id=int(project_id),
                     task_name=operation_name,
                     local_status='project_bound',
+                    options=(
+                        self._webodm_task_options(operation_key)
+                        if (
+                            operation_key == 'task4'
+                            and (
+                                existing_binding is None
+                                or not existing_binding.get('options_json')
+                            )
+                        )
+                        else None
+                    ),
                 )
 
             # ---------------- TASK 1 ----------------
@@ -3367,6 +3813,7 @@ class RGBPipeline(
                             image_folder=str(upload_folder),
                             options=task1_options,
                             processing_node=webodm_cfg.get("node_id"),
+                            expected_manifest=upload_manifest,
                         )
                         self._persist_webodm_binding(
                             task_key='task1',
@@ -3375,9 +3822,10 @@ class RGBPipeline(
                             task_name=task1_name,
                             remote_status='queued',
                             local_status='task_created',
+                            audit=_creation_audit('task1'),
                         )
-                        t1_success, t1_runtime, _t1_info = processor.wait_for_completion(
-                            project_id, current_task1_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                        t1_success, t1_runtime, _t1_info = _wait_for_new_task(
+                            'task1', current_task1_id, task1_name,
                         )
 
                     final_t1_raw_status = (_t1_info or {}).get('status')
@@ -3679,6 +4127,7 @@ class RGBPipeline(
                             image_folder=str(upload_folder),
                             options=task2_options,
                             processing_node=webodm_cfg.get("node_id"),
+                            expected_manifest=upload_manifest,
                         )
                         self._persist_webodm_binding(
                             task_key='task2',
@@ -3687,6 +4136,7 @@ class RGBPipeline(
                             task_name=task2_name,
                             remote_status='queued',
                             local_status='task_created',
+                            audit=_creation_audit('task2'),
                         )
                         log_event(
                             logger,
@@ -3696,8 +4146,8 @@ class RGBPipeline(
                             task_id=current_task2_id,
                             task_name=task2_name,
                         )
-                        t2_success, t2_runtime, _t2_info = processor.wait_for_completion(
-                            project_id, current_task2_id, live=False, control_check=lambda: self._check_control_or_raise("webodm"),
+                        t2_success, t2_runtime, _t2_info = _wait_for_new_task(
+                            'task2', current_task2_id, task2_name,
                         )
                         log_event(
                             logger,
@@ -4699,6 +5149,10 @@ class RGBPipeline(
         processor = self._create_webodm_processor(logger)
 
         binding = self.repo.get_webodm_binding(self.run_id, task_key)
+        replacement_requested = bool(
+            task_key == 'task4'
+            and self._failed_webodm_task_replacement is not None
+        )
         existing_task_id = None
         if binding:
             bound_project_id = binding.get('project_id')
@@ -4714,7 +5168,11 @@ class RGBPipeline(
                         'task_id': binding.get('task_id'),
                     },
                 )
-            if binding.get('task_name') and binding['task_name'] != task_name:
+            if (
+                binding.get('task_name')
+                and binding['task_name'] != task_name
+                and not replacement_requested
+            ):
                 raise StageRequiresRecovery(
                     f'Canonical {task_key} name {bound_task_name!r} '
                     f'does not match expected name {task_name!r}',
@@ -4729,7 +5187,23 @@ class RGBPipeline(
                 existing_task_id = str(binding['task_id'])
 
         recovery_authorized = False
-        if self._empty_webodm_recovery is not None:
+        replacement_source_manifest = None
+        if replacement_requested:
+            if binding is None or not existing_task_id:
+                raise StageRequiresRecovery(
+                    'Failed Task 4 replacement requires the canonical failed UUID.'
+                )
+            replacement_source_manifest = build_webodm_upload_manifest(image_folder)
+            recovery_authorized = self._authorize_failed_webodm_task_replacement(
+                processor=processor,
+                task_key=task_key,
+                project_id=int(project_id),
+                task_name=task_name,
+                binding=binding,
+                expected_image_count=replacement_source_manifest.count,
+            )
+            existing_task_id = None
+        elif self._empty_webodm_recovery is not None:
             recovery_authorized = self._authorize_empty_webodm_project_recovery(
                 processor=processor,
                 task_key=task_key,
@@ -4816,15 +5290,58 @@ class RGBPipeline(
                 _info = task_info
 
         else:
-            upload_image_folder = self._get_reusable_webodm_upload_folder(
-                default_source_dir=image_folder,
-                logger=logger,
-            )
+            if replacement_requested:
+                failed_task_id = str(
+                    self._failed_webodm_task_replacement['failed_task_id']
+                )
+                upload_image_folder, upload_manifest = (
+                    self._stage_replacement_upload_cache(
+                        src_dir=image_folder,
+                        failed_task_id=failed_task_id,
+                        logger=logger,
+                    )
+                )
+                if upload_manifest.records != replacement_source_manifest.records:
+                    raise StageRequiresRecovery(
+                        'Rebuilt Task 4 source changed while staging the replacement.'
+                    )
+                self._persist_webodm_binding(
+                    task_key='task4',
+                    project_id=int(project_id),
+                    task_id=failed_task_id,
+                    task_name=str(binding.get('task_name') or ''),
+                    remote_status='failed',
+                    local_status='replacement_creation_started',
+                    binding_source='operator_failed_task_replacement',
+                    options=self._webodm_task_options('task4'),
+                    append_history=True,
+                    audit={
+                        'event': 'failed_webodm_task_replacement_creation_started',
+                        'failed_task_id': failed_task_id,
+                        'replacement_task_name': task_name,
+                        'upload_manifest': upload_manifest.persisted(),
+                        'processing_node': webodm_cfg.get('node_id'),
+                    },
+                )
+            else:
+                upload_image_folder = self._get_reusable_webodm_upload_folder(
+                    default_source_dir=image_folder,
+                    logger=logger,
+                )
+                if upload_image_folder != image_folder:
+                    try:
+                        build_webodm_upload_manifest(upload_image_folder)
+                    except (FileNotFoundError, ValueError) as exc:
+                        logger.warning(
+                            'Reusable WebODM upload folder is incomplete; '
+                            f'restaging from the authoritative source. reason={exc}'
+                        )
+                        upload_image_folder = image_folder
 
             # If no reusable cache was found, actively stage to local disk before
             # uploading — streaming a multi-GB multipart upload directly off Z:\
             # is prone to SMB hiccups killing the request mid-transfer.
-            if upload_image_folder == image_folder:
+            if not replacement_requested and upload_image_folder == image_folder:
                 upload_cache_root_cfg = (self.config.get("paths") or {}).get("upload_cache_root")
                 if not upload_cache_root_cfg:
                     upload_cache_root_cfg = os.getenv("UPLOAD_CACHE_ROOT")
@@ -4858,13 +5375,47 @@ class RGBPipeline(
                     )
                     upload_image_folder = image_folder
 
+            upload_manifest = build_webodm_upload_manifest(upload_image_folder)
             current_task_id = processor.create_task_with_images(
                 project_id=int(project_id),
                 name=task_name,
                 image_folder=str(upload_image_folder),
                 options=task_options,
                 processing_node=webodm_cfg.get("node_id"),
+                expected_manifest=upload_manifest,
             )
+
+            latest_creation_binding = self.repo.get_webodm_binding(
+                self.run_id,
+                task_key,
+            )
+            creation_audit = None
+            if replacement_requested:
+                creation_audit = {
+                    'event': 'failed_webodm_task_replacement_created',
+                    'failed_task_id': self._failed_webodm_task_replacement.get(
+                        'failed_task_id'
+                    ),
+                    'upload_manifest': upload_manifest.persisted(),
+                    'processing_node': webodm_cfg.get('node_id'),
+                }
+            elif latest_creation_binding and latest_creation_binding.get('audit_json'):
+                try:
+                    import json
+                    creation_audit = json.loads(
+                        latest_creation_binding['audit_json']
+                    )
+                except (TypeError, ValueError):
+                    creation_audit = None
+                if isinstance(creation_audit, dict):
+                    creation_audit['upload_manifest'] = upload_manifest.persisted()
+                    creation_audit['processing_node'] = webodm_cfg.get('node_id')
+            if creation_audit is None:
+                creation_audit = {
+                    'event': 'webodm_task_created',
+                    'upload_manifest': upload_manifest.persisted(),
+                    'processing_node': webodm_cfg.get('node_id'),
+                }
 
             self._persist_webodm_binding(
                 task_key=task_key,
@@ -4873,19 +5424,90 @@ class RGBPipeline(
                 task_name=task_name,
                 remote_status='queued',
                 local_status='task_created',
+                options=(
+                    self._webodm_task_options(task_key)
+                    if task_key == 'task4'
+                    else None
+                ),
                 binding_source=(
-                    'operator_empty_project_recovery'
+                    'operator_failed_task_replacement'
+                    if replacement_requested
+                    else 'operator_empty_project_recovery'
                     if recovery_authorized
                     else 'pipeline'
                 ),
+                allow_rebind=replacement_requested,
+                append_history=replacement_requested,
+                audit=creation_audit,
             )
 
-            success, runtime, _info = processor.wait_for_completion(
-                int(project_id),
-                current_task_id,
-                live=False,
-                control_check=lambda: self._check_control_or_raise("webodm"),
-            )
+            def _record_verified_input_count(actual_count: int) -> None:
+                self._persist_webodm_binding(
+                    task_key=task_key,
+                    project_id=int(project_id),
+                    task_id=str(current_task_id),
+                    task_name=task_name,
+                    remote_status='running',
+                    local_status='input_count_verified',
+                    binding_source=(
+                        'operator_failed_task_replacement'
+                        if replacement_requested
+                        else 'pipeline'
+                    ),
+                    options=(
+                        self._webodm_task_options(task_key)
+                        if task_key == 'task4'
+                        else None
+                    ),
+                    audit={
+                        'event': 'webodm_authoritative_input_count_verified',
+                        'verified_image_count': int(actual_count),
+                        'upload_manifest': upload_manifest.persisted(),
+                    },
+                )
+
+            try:
+                success, runtime, _info = processor.wait_for_completion(
+                    int(project_id),
+                    current_task_id,
+                    live=False,
+                    control_check=lambda: self._check_control_or_raise("webodm"),
+                    expected_image_count=upload_manifest.count,
+                    require_authoritative_image_count=True,
+                    input_verified_callback=_record_verified_input_count,
+                )
+            except WebODMInputValidationError as exc:
+                self._persist_webodm_binding(
+                    task_key=task_key,
+                    project_id=int(project_id),
+                    task_id=str(current_task_id),
+                    task_name=task_name,
+                    local_status=(
+                        'replacement_requires_recovery'
+                        if replacement_requested
+                        else 'input_validation_requires_recovery'
+                    ),
+                    binding_source=(
+                        'operator_failed_task_replacement'
+                        if replacement_requested
+                        else 'pipeline'
+                    ),
+                    audit={
+                        'event': 'webodm_input_validation_failed',
+                        'upload_manifest': upload_manifest.persisted(),
+                        'error_type': type(exc).__name__,
+                    },
+                )
+                raise StageRequiresRecovery(
+                    str(exc),
+                    output={
+                        'status': 'requires_recovery',
+                        'operation_key': task_key,
+                        'project_id': int(project_id),
+                        'task_id': str(current_task_id),
+                        'upload_manifest': upload_manifest.persisted(),
+                    },
+                ) from exc
 
         final_raw_status = (_info or {}).get('status')
         final_remote_status, _terminal = WebODMProcessor._normalize_status(
@@ -5410,11 +6032,12 @@ class RGBPipeline(
             Mapping[str, Any]
         ] = None,
         missing_webodm_task_recovery: Optional[Mapping[str, Any]] = None,
+        failed_webodm_task_replacement: Optional[Mapping[str, Any]] = None,
         qgis_tile_rebuild: Optional[Mapping[str, Any]] = None,
         qgis_refresh: Optional[Mapping[str, Any]] = None,
         raw_input_recovery: Optional[Mapping[str, Any]] = None,
     ) -> Dict[str, Any]:
-        force_stages = force_stages or set()
+        force_stages = set(force_stages or ())
         self._qgis_refresh = None
         # Guard even a normal resume which would otherwise skip completed QGIS.
         try:
@@ -5427,7 +6050,8 @@ class RGBPipeline(
         if qgis_refresh is not None:
             if (not resume or force_stages - {'qgis'} or raw_input_recovery
                     or qgis_tile_rebuild or empty_webodm_recovery or missing_webodm_project_recovery
-                    or missing_webodm_task_recovery or publication_confirmation
+                    or missing_webodm_task_recovery or failed_webodm_task_replacement
+                    or publication_confirmation
                     or selected_stages not in (None, {'qgis'})):
                 raise ValueError('Fresh QGIS refresh requires resume and cannot combine other operations')
             self._qgis_refresh = validate_refresh_request(dict(qgis_refresh), self.run_id)
@@ -5604,6 +6228,104 @@ class RGBPipeline(
             self._missing_webodm_task_recovery = recovery
         else:
             self._missing_webodm_task_recovery = None
+        if failed_webodm_task_replacement is not None:
+            if (
+                empty_webodm_recovery is not None
+                or missing_webodm_project_recovery is not None
+                or missing_webodm_task_recovery is not None
+            ):
+                raise ValueError(
+                    'Failed WebODM task replacement cannot combine with another '
+                    'WebODM creation recovery'
+                )
+            recovery = dict(failed_webodm_task_replacement)
+            if not resume:
+                raise ValueError('Failed WebODM task replacement requires resume=True')
+            if recovery.get('operation') != 'task4' or self.webodm_mode != 'task4':
+                raise ValueError('Failed WebODM task replacement requires Task 4-only mode')
+            if force_stages != {'cross_run_filter', 'webodm_task4'}:
+                raise ValueError(
+                    'Failed WebODM task replacement requires exactly forced '
+                    'cross_run_filter and webodm_task4 stages'
+                )
+            if raw_input_recovery is None or self.crossrun_enabled_override is not False:
+                raise ValueError(
+                    'Failed WebODM task replacement requires raw recovery with '
+                    'cross-run filtering disabled'
+                )
+            project_id = int(recovery.get('project_id') or 0)
+            failed_task_id = str(recovery.get('failed_task_id') or '')
+            processing_node = int(recovery.get('processing_node') or 0)
+            if project_id <= 0 or not failed_task_id or processing_node <= 0:
+                raise ValueError(
+                    'Failed WebODM task replacement requires project, failed task '
+                    'and processing node identities'
+                )
+            configured_node = int(
+                (self.config.get('webodm') or {}).get('node_id') or 0
+            )
+            if processing_node != configured_node:
+                raise ValueError('Failed WebODM task replacement node changed')
+            expected_confirmation = (
+                'CREATE REPLACEMENT TASK4 IN WEBODM PROJECT '
+                f'{project_id} FOR FAILED TASK {failed_task_id} FOR RUN {self.run_id}'
+            )
+            if recovery.get('confirmation') != expected_confirmation:
+                raise ValueError(
+                    'Failed WebODM task replacement requires exact confirmation: '
+                    f'{expected_confirmation!r}'
+                )
+            binding = self.repo.get_webodm_binding(self.run_id, 'task4')
+            if (
+                not binding
+                or int(binding.get('project_id') or 0) != project_id
+                or str(binding.get('task_id') or '') != failed_task_id
+            ):
+                raise ValueError(
+                    'Failed WebODM task replacement must match the canonical binding'
+                )
+            if str(binding.get('local_status') or '') in {
+                'replacement_creation_started',
+                'replacement_task_created',
+                'replacement_requires_recovery',
+            }:
+                raise ValueError(
+                    'A Task 4 replacement was already started; refusing another task'
+                )
+            latest_replacement_source = self.repo.get_latest_stage(
+                self.run_id,
+                'webodm_task4',
+            )
+            source_stage_status = str(
+                (latest_replacement_source or {}).get('status') or ''
+            )
+            if source_stage_status not in {
+                'failed',
+                'paused',
+                'requires_recovery',
+            }:
+                raise ValueError(
+                    'Failed WebODM task replacement requires the latest Task 4 '
+                    'stage attempt to be failed, paused or requires_recovery'
+                )
+            recovery['project_id'] = project_id
+            recovery['failed_task_id'] = failed_task_id
+            recovery['processing_node'] = processing_node
+            recovery['failed_stage_attempt_id'] = int(
+                latest_replacement_source['id']
+            )
+            recovery['source_stage_status'] = source_stage_status
+            evidence_path = recovery.get('nodeodm_evidence_path')
+            evidence_hash = recovery.get('nodeodm_evidence_sha256')
+            if bool(evidence_path) != bool(evidence_hash):
+                raise ValueError(
+                    'NodeODM image-list path and source SHA-256 must be paired'
+                )
+            if evidence_path:
+                inspect_nodeodm_image_list(evidence_path, evidence_hash)
+            self._failed_webodm_task_replacement = recovery
+        else:
+            self._failed_webodm_task_replacement = None
 
         pipeline_logger = self.loggers["pipeline"]
         pipeline_header(pipeline_logger, self.run_id)
@@ -5642,6 +6364,20 @@ class RGBPipeline(
         self._resume_had_webodm_history = bool(
             resume and self.repo.get_latest_stage(self.run_id, 'webodm')
         )
+        expanded_force_stages = expand_webodm_output_dependencies(
+            force_stages
+        )
+        effective_force_stages = set(force_stages)
+        if selected_stages is None:
+            effective_force_stages = expanded_force_stages
+        else:
+            effective_force_stages.update(
+                expanded_force_stages.intersection(selected_stages)
+            )
+        refreshes_webodm_outputs = bool(
+            selected_stages is None
+            and force_stages.intersection(WEBODM_OUTPUT_FORCE_STAGES)
+        )
         stage_steps = [
             {
                 "name": "data_segregation",
@@ -5675,7 +6411,9 @@ class RGBPipeline(
             },
             {
                 "name": "qgis",
-                "fn": lambda: self.stage_qgis(resume=resume),
+                "fn": lambda: self.stage_qgis(
+                    resume=resume and not refreshes_webodm_outputs
+                ),
                 "output_key": "qgis",
                 "stale_running_policy": "rerun",
             },
@@ -5742,7 +6480,7 @@ class RGBPipeline(
 
         def _force(name: str) -> bool:
             return (
-                name in force_stages
+                name in effective_force_stages
                 or (
                     name == "raw_input_recovery"
                     and self._raw_input_recovery is not None

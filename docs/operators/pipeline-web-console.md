@@ -1,5 +1,38 @@
 # Local Pipeline Web Console V1
 
+## Guided branded workspace (2026-11-13)
+
+The current console uses white surfaces and the approved burgundy/charcoal/grey
+brand accents. Overview separates **Needs attention**, **Active processing** and
+**Survey history**. A compact run summary shows the latest status, current stage
+and next safe action above **Progress**, **Outputs** and **Technical details** tabs.
+Arrow keys, Home and End move between tabs; polling retains the selected tab.
+Times are displayed as readable durations. Older attempts and full errors remain
+in Technical details rather than being mixed into current progress.
+
+New run and Resume follow **Choose inputs → Check → Review → Start/Resume**.
+Every input edit clears the check. Disabled buttons explain what is needed next.
+Older terminal runs mark unrecorded RGB, cross-run, UAV and node choices for an
+explicit review; unchecked/empty fields must not be mistaken for saved settings.
+
+For Task 4-only work, **Split into smaller models** defaults to 400 images and
+100 m overlap and requires a node ID. The existing CLI checks source count and
+storage. The review panel displays the validated node/profile and approximate
+base model count. A bound task's saved profile is read only; normal resume keeps
+the exact task and its options. Historical tasks without saved options say so.
+
+WebODM status remains **last observed**, not a live service check. No observation
+time is manufactured from unrelated timestamps. Run ID identifies the survey;
+operation ID identifies one local invocation/check. Reconciliation and tile
+recovery are in Technical details (or the overview's technical receipt).
+
+The static build is prepared. To load changed Python input mapping, reopen the
+console launcher at a safe stopping point and refresh the browser; implementation
+does not stop or restart an existing operational server or runner. No component
+library or production dependency was installed. See
+[redesign validation](../ui/console-redesign-validation.md) for exact commands,
+fake-data walkthroughs and the optional Python 3.10 API-test limitation.
+
 ## Two-slot opt-in update (2026-10-21)
 
 The single-run descriptions below are the original V1/default behavior. The
@@ -16,7 +49,7 @@ workstation checks. Forced repair/restart operations remain exclusive.
    open. It opens **http://127.0.0.1:8765/** with a one-use launcher session.
 3. Choose **New run**, enter the dataset, survey ID/year and processing mode,
    then **Check inputs & storage**. Select an exact candidate if prompted,
-   recheck, and start only after PASS.
+   recheck, and start only after **Inputs and storage ready**.
 
 The isolated `.venv-ui` environment and static frontend were prepared on this
 workstation during implementation. The server itself was not started. The
@@ -62,13 +95,13 @@ blocks browser dispatch; it is not automatically marked failed or cleared.
 
 ## Review, pause, stop and recovery
 
-Quality review appears inside Run Detail with the exact WebODM project/task
-identities. Approve, fail, or request an allowlisted internal restart. Restart
-requires the displayed exact run/task/stage phrase. Every question has a unique
-ID; stale or conflicting decisions cannot answer a later question. Decisions
-and command IDs are retained with trusted local-session audit attribution.
-The browser adapter retains the current pipeline's quality/restart and artifact
-handling semantics; it does not introduce a new remote artifact-refresh policy.
+Quality review appears inside Run Detail. Open the exact existing WebODM project,
+inspect the result, then approve or fail the review. Exact project/task identities
+are available in Technical details. For a remote restart, inspect that task in
+WebODM; the current screen has no remote-restart button. The older guarded review
+API remains for compatibility. Every question has a unique ID; stale/conflicting
+decisions cannot answer a later question. Decisions and command IDs retain their
+trusted local-session audit attribution. Artifact-refresh policy is unchanged.
 
 Pause and Stop are **local cooperative requests**, not remote WebODM cancellation.
 The UI distinguishes requested/acknowledged/not-applied commands. A blocking
@@ -78,7 +111,8 @@ silently proceeding into successful workspace cleanup. The latest completed
 stage remains reusable on resume. Current database stop semantics still record
 failure; no new database status enum is introduced by this UI.
 
-For unreadable resumed tiles: open the failed run, choose **Tile recovery**,
+For unreadable resumed tiles: open the failed run, choose **Technical details →
+Expert tile recovery → Prepare tile recovery**,
 select Task 2/4, enter the displayed exact confirmation, check storage and then
 start. This invokes the existing [guarded tile workflow](qgis-tile-recovery.md).
 The old staging tree is quarantined, not discarded. Do not delete quarantine
@@ -121,7 +155,7 @@ Its first unconstrained resolution was replaced only inside that new environment
 by the tested lock. `pip check` passed. Package downloads/public documentation
 were the only external access performed; no operational service was contacted.
 
-## Validation evidence
+## Original V1 validation evidence (2026-10-20)
 
 All helper, Windows kernel, network, QGIS and WebODM boundaries in these tests
 are fakes. SQLite and journal paths are pytest-owned. ASGI tests replace asyncio
@@ -157,7 +191,7 @@ network share, existing map, checkpoint or running pipeline was accessed/modifie
 After current processing exits, authorize a small sample and verify: dashboard
 and Windows display scaling; exact source/mode/storage review; one-run exclusion
 with a second CLI; browser closure/server reconnect during processing; manual
-review and exact task restart behavior/artifact readiness; cooperative pause/stop
+review and exact task identity/artifact readiness; cooperative pause/stop
 during WebODM and GDAL; exact-ID resume; and successful tile quarantine/rebuild.
 Retain all evidence. No real storage, WebODM, QGIS/GDAL, Windows job inheritance,
 or production-scale/UI visual rollout was exercised by the mocked test suite.

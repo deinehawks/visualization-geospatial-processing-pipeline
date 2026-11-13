@@ -158,10 +158,38 @@ class Execution:
                 raise StageRequiresRecovery('Survey folder claim is incomplete; preserve allocation evidence') from exc
             return survey_id, target
 
-    def check_committed_storage(self):
-        budgets = self.store.status(self.operation_id).get('storage_commitments') or {}
-        self.recheck_storage({'volumes': [{'probe_path': value['probe_path'], 'required_bytes': value['required'],
-            'reserve_bytes': value['reserve'], 'free_bytes': value['free']} for value in budgets.values()]})
+    def check_committed_storage(self, *, disk_usage=None):
+        """Recheck physical reserve without charging admitted writes twice.
+
+        Admission and the pre-work recheck already reserve the full estimated
+        writes atomically. As those writes materialize, physical free space and
+        the run's remaining work fall together. Reapplying the original estimate
+        to the lower free-space value would count completed writes a second time.
+        Keep the durable estimate for later admissions, but require the physical
+        reserve to remain available before another managed resource starts.
+        """
+        import shutil
+        disk_usage = disk_usage or shutil.disk_usage
+        with self.store.lock():
+            budgets = self.store.status(self.operation_id).get('storage_commitments') or {}
+        checked = {}
+        for key, value in budgets.items():
+            free = int(disk_usage(str(value['probe_path'])).free)
+            reserve = max(0, int(value['reserve']))
+            if free < reserve:
+                raise ConsoleError(
+                    'Physical storage reserve is no longer available; check free space',
+                    'STORAGE_RESERVE',
+                )
+            checked[key] = {**value, 'free': free}
+        with self.store.lock():
+            current = self.store.status(self.operation_id).get('storage_commitments') or {}
+            if current != budgets:
+                raise ConsoleError(
+                    'Storage commitments changed during reserve verification; retry',
+                    'STORAGE_CHANGED',
+                )
+            self.store.update(self.operation_id, storage_commitments=checked)
 
     def failed_result(self, result):
         from .projections import redact

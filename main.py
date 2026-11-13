@@ -7,7 +7,7 @@ import os
 from pathlib import Path
 import sqlite3
 import tempfile
-from typing import Any
+from typing import Any, Mapping
 import uuid
 import hashlib
 
@@ -16,6 +16,8 @@ from operator_ui.identities import volume_identity
 
 execution_guard_factory = cli_execution_guard
 
+TASK4_SPLIT_DEFAULT_OVERLAP_METERS = 100
+
 from shared.config import load_pipeline_config
 from shared.db.repo import PipelineRepo
 from shared.paths import db_path
@@ -23,9 +25,12 @@ from shared.artifacts import RUN_WORKSPACE_OWNERSHIP_NAME
 from shared.qgis_tile_recovery import qgis_tile_rebuild_confirmation
 from shared.qgis_refresh import refresh_confirmation
 from shared.raw_input_recovery import raw_input_recovery_confirmation
+from shared.nodeodm_replacement_evidence import inspect_nodeodm_image_list
+from shared.stage_dependencies import expand_webodm_output_dependencies
 from shared.storage_preflight import (
     StorageCapacityError,
     build_storage_preflight,
+    estimate_existing_directory_bytes,
     format_storage_report,
     is_sqlite_full_error,
     require_storage_capacity,
@@ -50,6 +55,145 @@ def read_bindings_read_only(database, run_id):
             'SELECT project_id, task_id FROM webodm_tasks WHERE run_id=?', (run_id,))]
     finally:
         connection.close()
+
+
+def read_task_binding_read_only(
+    database: Path,
+    run_id: str,
+    operation_key: str,
+) -> dict | None:
+    path = Path(database)
+    if not path.is_file():
+        return None
+    connection = sqlite3.connect(path.resolve().as_uri() + '?mode=ro', uri=True)
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute('PRAGMA query_only=ON')
+        columns = {
+            row['name']
+            for row in connection.execute(
+                'PRAGMA table_info(webodm_tasks)'
+            )
+        }
+        required = {'id', 'run_id', 'task_id', 'operation_key', 'options_json'}
+        if not required <= columns:
+            return None
+        selected_columns = [
+            name
+            for name in (
+                'id', 'project_id', 'task_id', 'task_name', 'options_json',
+                'remote_status', 'raw_status', 'local_status',
+                'binding_source', 'stage_attempt_id', 'audit_json',
+            )
+            if name in columns
+        ]
+        row = connection.execute(
+            f'''
+            SELECT {", ".join(selected_columns)}
+            FROM webodm_tasks
+            WHERE run_id=? AND operation_key=?
+            ORDER BY id DESC
+            LIMIT 1
+            ''',
+            (run_id, operation_key),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        connection.close()
+
+
+def _positive_cli_integer(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError('must be a positive integer') from exc
+    if parsed <= 0:
+        raise argparse.ArgumentTypeError('must be a positive integer')
+    return parsed
+
+
+def resolve_task4_split_options(
+    configured_options: Mapping[str, Any] | None,
+    *,
+    split: int | None,
+    overlap: int | None,
+    persisted_binding: Mapping[str, Any] | None = None,
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    options = dict(configured_options or {})
+    explicit = split is not None
+    persisted_options: dict[str, Any] | None = None
+
+    if persisted_binding and persisted_binding.get('options_json'):
+        try:
+            loaded = json.loads(str(persisted_binding['options_json']))
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            if explicit or not persisted_binding.get('task_id'):
+                raise ValueError(
+                    'Persisted Task 4 options are unreadable; refusing to '
+                    'guess split/merge settings before task creation.'
+                ) from exc
+        else:
+            if not isinstance(loaded, dict):
+                if explicit or not persisted_binding.get('task_id'):
+                    raise ValueError(
+                        'Persisted Task 4 options must be a JSON object.'
+                    )
+            else:
+                persisted_options = dict(loaded)
+
+    if explicit:
+        requested_overlap = (
+            int(overlap)
+            if overlap is not None
+            else TASK4_SPLIT_DEFAULT_OVERLAP_METERS
+        )
+        if persisted_options is not None:
+            persisted_split = persisted_options.get('split')
+            persisted_overlap = persisted_options.get('split-overlap')
+            if (
+                persisted_split is not None
+                and int(persisted_split) != int(split)
+            ) or (
+                persisted_overlap is not None
+                and int(persisted_overlap) != requested_overlap
+            ):
+                raise ValueError(
+                    'Explicit Task 4 split/merge settings conflict with the '
+                    'persisted run options.'
+                )
+        options['split'] = int(split)
+        options['split-overlap'] = requested_overlap
+        return options, {
+            'split': int(split),
+            'split_overlap_meters': requested_overlap,
+            'source': 'cli',
+        }
+
+    if (
+        persisted_options is not None
+        and not persisted_binding.get('task_id')
+        and persisted_options.get('split') is not None
+    ):
+        persisted_split = int(persisted_options['split'])
+        persisted_overlap = int(
+            persisted_options.get(
+                'split-overlap',
+                TASK4_SPLIT_DEFAULT_OVERLAP_METERS,
+            )
+        )
+        if persisted_split <= 0 or persisted_overlap <= 0:
+            raise ValueError(
+                'Persisted Task 4 split/merge settings must be positive.'
+            )
+        options = persisted_options
+        options['split-overlap'] = persisted_overlap
+        return options, {
+            'split': persisted_split,
+            'split_overlap_meters': persisted_overlap,
+            'source': 'persisted',
+        }
+
+    return options, None
 
 
 def read_run_state_read_only(database: Path, run_id: str) -> dict | None:
@@ -109,12 +253,14 @@ def resolve_storage_stage_needs(
     force_stages: set[str],
     qgis_enabled: bool,
 ) -> dict[str, bool]:
+    force_stages = expand_webodm_output_dependencies(force_stages)
     if not resume:
         return {
             'include_upload_cache': True,
             'include_qgis_staging': qgis_enabled,
             'include_workspace': True,
             'include_published_outputs': True,
+            'include_cross_run_mirror': True,
         }
 
     def will_run(stage_name: str, *aliases: str) -> bool:
@@ -127,6 +273,7 @@ def resolve_storage_stage_needs(
     webodm_needed = will_run('webodm', 'webodm_task4')
     quality_gate_needed = will_run('quality_gate')
     qgis_needed = qgis_enabled and will_run('qgis')
+    cross_run_needed = will_run('cross_run_filter')
     earlier_workspace_stage_needed = any(
         will_run(stage_name)
         for stage_name in (
@@ -150,6 +297,7 @@ def resolve_storage_stage_needs(
             or quality_gate_needed
             or qgis_needed
         ),
+        'include_cross_run_mirror': cross_run_needed,
     }
 
 
@@ -344,6 +492,26 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
     parser.add_argument("--survey-id", default=None, help="Optional fixed survey ID, e.g. AH-026002")
     parser.add_argument("--node-id", type=int, default=None)
     parser.add_argument(
+        "--task4-split",
+        type=_positive_cli_integer,
+        default=None,
+        metavar="IMAGES",
+        help=(
+            "Enable local WebODM Task 4 split/merge using this average "
+            "number of images per submodel."
+        ),
+    )
+    parser.add_argument(
+        "--task4-split-overlap",
+        type=_positive_cli_integer,
+        default=None,
+        metavar="METERS",
+        help=(
+            "Task 4 split/merge overlap radius in metres; defaults to 100 "
+            "when --task4-split is set."
+        ),
+    )
+    parser.add_argument(
         "--disable-cross-run",
         action="store_true",
         help="Disable the cross-run filter stage and copy raw images directly into path output.",
@@ -507,7 +675,45 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             '<project-id> FOR RUN <run-id>".'
         ),
     )
-
+    parser.add_argument(
+        "--replace-failed-webodm-task",
+        choices=["task4"],
+        default=None,
+        help=(
+            "Authorize one audited replacement for the exact failed Task 4 "
+            "after local and remote identity checks."
+        ),
+    )
+    parser.add_argument(
+        "--webodm-task-replacement-project-id",
+        type=int,
+        default=None,
+        help="Exact persisted WebODM project containing the failed Task 4.",
+    )
+    parser.add_argument(
+        "--webodm-task-replacement-task-id",
+        default=None,
+        help="Exact failed Task 4 UUID being retained and replaced.",
+    )
+    parser.add_argument(
+        "--webodm-task-replacement-confirmation",
+        default=None,
+        help=(
+            "Exact confirmation phrase for the failed Task 4 replacement."
+        ),
+    )
+    parser.add_argument(
+        "--replacement-nodeodm-image-list",
+        default=None,
+        metavar="PATH",
+        help="Operator-copied <node-task-uuid>/img_list.txt for failed Task 4 proof.",
+    )
+    parser.add_argument(
+        "--replacement-nodeodm-image-list-sha256",
+        default=None,
+        metavar="SHA256",
+        help="SHA-256 measured on node 3 before copying img_list.txt.",
+    )
     parser.add_argument(
         '--rebuild-qgis-tiles',
         choices=['task2', 'task4'],
@@ -550,6 +756,12 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
 
     if args.resume and not args.run_id:
         parser.error("--run-id is required when using --resume")
+    if args.task4_split_overlap is not None and args.task4_split is None:
+        parser.error("--task4-split-overlap requires --task4-split")
+    if args.task4_split is not None and (args.task2 or args.both_tasks):
+        parser.error(
+            "--task4-split is supported only in Task 4-only mode"
+        )
     if args.qgis_refresh_confirmation and not args.refresh_qgis:
         parser.error('--qgis-refresh-confirmation requires --refresh-qgis')
     if args.refresh_qgis:
@@ -561,7 +773,7 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
                 or args.rebuild_qgis_tiles or args.recover_missing_raw or args.activate_publication
                 or args.rebind_source_dir or args.rebind_workspace_to_configured_root
                 or args.recover_empty_webodm_project or args.recover_missing_webodm_project
-                or args.recover_missing_webodm_task):
+                or args.recover_missing_webodm_task or args.task4_split is not None):
             parser.error('--refresh-qgis cannot combine other task modes, forced stages or recovery operations')
     if args.activate_publication and not args.publication_confirmation:
         parser.error("--publication-confirmation is required when using --activate-publication")
@@ -592,7 +804,7 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
     if args.recover_missing_raw:
         if not args.resume:
             parser.error("--recover-missing-raw requires --resume")
-        if args.disable_cross_run:
+        if args.disable_cross_run and not args.replace_failed_webodm_task:
             parser.error(
                 "--recover-missing-raw cannot be combined with "
                 "--disable-cross-run"
@@ -764,6 +976,95 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
                 f"{expected_missing_task_confirmation!r}"
             )
 
+    replacement_companions_present = bool(
+        args.webodm_task_replacement_project_id is not None
+        or args.webodm_task_replacement_task_id
+        or args.webodm_task_replacement_confirmation
+        or args.replacement_nodeodm_image_list
+        or args.replacement_nodeodm_image_list_sha256
+    )
+    if replacement_companions_present and not args.replace_failed_webodm_task:
+        parser.error(
+            "WebODM task replacement and NodeODM evidence flags "
+            "require --replace-failed-webodm-task"
+        )
+    if bool(args.replacement_nodeodm_image_list) != bool(
+        args.replacement_nodeodm_image_list_sha256
+    ):
+        parser.error(
+            "--replacement-nodeodm-image-list and "
+            "--replacement-nodeodm-image-list-sha256 must be supplied together"
+        )
+    replacement_evidence = None
+    if args.replacement_nodeodm_image_list:
+        try:
+            replacement_evidence = inspect_nodeodm_image_list(
+                args.replacement_nodeodm_image_list,
+                args.replacement_nodeodm_image_list_sha256,
+            )
+        except ValueError as exc:
+            parser.error(str(exc))
+    if args.replace_failed_webodm_task:
+        if not args.resume:
+            parser.error("--replace-failed-webodm-task requires --resume")
+        if args.task2 or args.both_tasks:
+            parser.error(
+                "--replace-failed-webodm-task requires Task 4-only mode"
+            )
+        if set(args.force_stage or []) != {
+            "cross_run_filter",
+            "webodm_task4",
+        }:
+            parser.error(
+                "--replace-failed-webodm-task requires exactly "
+                "--force-stage cross_run_filter and --force-stage webodm_task4"
+            )
+        if not args.recover_missing_raw or not args.disable_cross_run:
+            parser.error(
+                "--replace-failed-webodm-task requires --recover-missing-raw "
+                "and --disable-cross-run"
+            )
+        if args.node_id is None or args.node_id <= 0:
+            parser.error(
+                "--replace-failed-webodm-task requires an explicit positive --node-id"
+            )
+        if (
+            args.webodm_task_replacement_project_id is None
+            or args.webodm_task_replacement_project_id <= 0
+        ):
+            parser.error(
+                "--webodm-task-replacement-project-id must be positive"
+            )
+        if not args.webodm_task_replacement_task_id:
+            parser.error("--webodm-task-replacement-task-id is required")
+        if (
+            args.recover_empty_webodm_project
+            or args.recover_missing_webodm_project
+            or args.recover_missing_webodm_task
+            or args.refresh_qgis
+            or args.rebuild_qgis_tiles
+            or args.activate_publication
+            or args.rebind_source_dir
+            or args.rebind_workspace_to_configured_root
+        ):
+            parser.error(
+                "--replace-failed-webodm-task cannot be combined with another "
+                "recovery, publication or rebind operation"
+            )
+        expected_replacement_confirmation = (
+            "CREATE REPLACEMENT TASK4 IN WEBODM PROJECT "
+            f"{args.webodm_task_replacement_project_id} FOR FAILED TASK "
+            f"{args.webodm_task_replacement_task_id} FOR RUN {args.run_id}"
+        )
+        if (
+            args.webodm_task_replacement_confirmation
+            != expected_replacement_confirmation
+        ):
+            parser.error(
+                "--webodm-task-replacement-confirmation must exactly match: "
+                f"{expected_replacement_confirmation!r}"
+            )
+
     config: dict[str, Any] = load_pipeline_config()
     base_dir = Path(".")
     database_path = db_path(base_dir)
@@ -790,6 +1091,71 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             database_path,
             selected_run_id,
         )
+
+    persisted_task4_binding = (
+        read_task_binding_read_only(
+            database_path,
+            selected_run_id,
+            'task4',
+        )
+        if args.resume and not args.task2 and not args.both_tasks
+        else None
+    )
+    if args.replace_failed_webodm_task:
+        replacement_source_status = latest_stage_statuses.get('webodm_task4')
+        if replacement_source_status not in {
+            'failed',
+            'paused',
+            'requires_recovery',
+        }:
+            parser.error(
+                '--replace-failed-webodm-task requires the latest '
+                'webodm_task4 stage to be failed, paused or requires_recovery'
+            )
+        if not persisted_task4_binding:
+            parser.error(
+                '--replace-failed-webodm-task requires a canonical Task 4 binding'
+            )
+        if (
+            int(persisted_task4_binding.get('project_id') or 0)
+            != int(args.webodm_task_replacement_project_id)
+            or str(persisted_task4_binding.get('task_id') or '')
+            != str(args.webodm_task_replacement_task_id)
+        ):
+            parser.error(
+                'Task 4 replacement project/task must match the canonical binding'
+            )
+        if not persisted_task4_binding.get('task_name'):
+            parser.error(
+                'Task 4 replacement requires the persisted failed task name'
+            )
+        if not persisted_task4_binding.get('options_json'):
+            parser.error(
+                'Task 4 replacement requires persisted Task 4 options'
+            )
+        if str(persisted_task4_binding.get('local_status') or '') in {
+            'replacement_creation_started',
+            'replacement_task_created',
+            'replacement_requires_recovery',
+        }:
+            parser.error(
+                'A Task 4 replacement was already started; reconcile its exact '
+                'UUID instead of creating another task'
+            )
+    task4_split_profile = None
+    if not args.task2 and not args.both_tasks:
+        webodm_config = dict(config.get('webodm') or {})
+        try:
+            task4_options, task4_split_profile = resolve_task4_split_options(
+                webodm_config.get('task4_options'),
+                split=args.task4_split,
+                overlap=args.task4_split_overlap,
+                persisted_binding=persisted_task4_binding,
+            )
+        except (TypeError, ValueError) as exc:
+            parser.error(str(exc))
+        webodm_config['task4_options'] = task4_options
+        config['webodm'] = webodm_config
 
     if args.rebuild_qgis_tiles:
         qgis_status = latest_stage_statuses.get('qgis')
@@ -884,8 +1250,13 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
     )
     if args.refresh_qgis:
         storage_stage_needs = dict(include_upload_cache=False, include_qgis_staging=True,
-                                   include_workspace=True, include_published_outputs=True)
+                                   include_workspace=True, include_published_outputs=True,
+                                   include_cross_run_mirror=False)
     exports_config = config.get("exports") or {}
+    cross_run_config = config.get('cross_run_filter') or {}
+    delete_raw_after_cross_run = bool(
+        cross_run_config.get('delete_raw_after_success', False)
+    )
     task4_all_assets_zip_enabled = bool(
         storage_stage_needs["include_upload_cache"]
         and webodm_mode in {"task4", "both"}
@@ -895,6 +1266,23 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             False,
         )
     )
+    existing_published_bytes = 0
+    selected_survey_id = (run_record or {}).get('survey_id') or args.survey_id
+    if (
+        args.resume
+        and selected_survey_id
+        and latest_stage_statuses.get('data_segregation') == 'completed'
+        and storage_stage_needs['include_cross_run_mirror']
+        and 'data_segregation' not in set(args.force_stage or [])
+    ):
+        existing_published_bytes = estimate_existing_directory_bytes(
+            surveys_root
+            / str(args.year)
+            / str(selected_survey_id)
+            / 'rgb'
+            / 'images'
+            / 'raw'
+        )
     storage_report = build_storage_preflight(
         source_dir=source_dir,
         database_path=database_path,
@@ -909,6 +1297,8 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         **storage_stage_needs,
         include_raw_input_recovery=args.recover_missing_raw,
         include_task4_all_assets_zip=task4_all_assets_zip_enabled,
+        delete_raw_after_cross_run=delete_raw_after_cross_run,
+        existing_published_bytes=existing_published_bytes,
         **({'include_qgis_refresh': True} if args.refresh_qgis else {}),
         min_free_gb=int(storage_config.get("min_free_gb", 10)),
         min_free_percent=int(storage_config.get("min_free_percent", 5)),
@@ -922,6 +1312,33 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         volume_key=volume_identity,
     )
     print(format_storage_report(storage_report))
+    if task4_split_profile is not None:
+        source_image_count = int(
+            storage_report.get('source_image_count', 0)
+        )
+        split_size = int(task4_split_profile['split'])
+        if split_size >= source_image_count:
+            parser.error(
+                '--task4-split must be smaller than the selected source '
+                f'image count ({source_image_count})'
+            )
+        task4_split_profile = {
+            **task4_split_profile,
+            'processing_node': (config.get('webodm') or {}).get('node_id'),
+            'source_image_count': source_image_count,
+            'approximate_base_submodels': (
+                source_image_count + split_size - 1
+            ) // split_size,
+        }
+        print(
+            'Task 4 local split/merge: '
+            f"node={task4_split_profile['processing_node']} | "
+            f"split={split_size} images | "
+            f"overlap={task4_split_profile['split_overlap_meters']} m | "
+            'approximate base submodels='
+            f"{task4_split_profile['approximate_base_submodels']} | "
+            f"source={task4_split_profile['source']}"
+        )
     preflight = {
         'report': storage_report, 'source_dir': str(source_dir),
         'run_id': selected_run_id, 'survey_id': (run_record or {}).get('survey_id') or args.survey_id, 'year': args.year,
@@ -930,6 +1347,27 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         'stage_statuses': latest_stage_statuses,
         'config_fingerprint': hashlib.sha256(json.dumps(config, sort_keys=True, default=str).encode()).hexdigest(),
         'webodm_url': (config.get('webodm') or {}).get('url', ''),
+        'task4_split': task4_split_profile,
+        'failed_webodm_task_replacement': (
+            {
+                'operation': 'task4',
+                'project_id': args.webodm_task_replacement_project_id,
+                'failed_task_id': args.webodm_task_replacement_task_id,
+                'processing_node': args.node_id,
+                'local_stage_status': latest_stage_statuses.get('webodm_task4'),
+                'expected_source_image_count': int(
+                    storage_report.get('source_image_count', 0)
+                ),
+                'remote_checks': 'pending',
+                **(
+                    {'nodeodm_evidence': replacement_evidence}
+                    if replacement_evidence is not None
+                    else {}
+                ),
+            }
+            if args.replace_failed_webodm_task
+            else None
+        ),
         'bindings': read_bindings_read_only(database_path, selected_run_id) if args.resume else [],
         'published_path': str(surveys_root / str(args.year) / str((run_record or {}).get('survey_id') or args.survey_id) / 'rgb')
                           if ((run_record or {}).get('survey_id') or args.survey_id) else None,
@@ -937,6 +1375,7 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
                           or args.rebind_workspace_to_configured_root or args.recover_missing_raw
                           or args.rebuild_qgis_tiles or args.recover_empty_webodm_project
                           or args.recover_missing_webodm_project or args.recover_missing_webodm_task
+                           or args.replace_failed_webodm_task
                           or args.refresh_qgis),
     }
     if observer is not None:
@@ -995,6 +1434,29 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
             "Missing WebODM task recovery: "
             f"task2 project {args.webodm_task_recovery_project_id} ({action})"
         )
+    if args.replace_failed_webodm_task:
+        action = (
+            "PLAN ONLY - local files, WebODM and database unchanged; "
+            "remote checks pending"
+            if args.storage_preflight_only
+            else "AUTHORIZED - exact failed task is retained; one replacement maximum"
+        )
+        print(
+            "Failed Task 4 replacement: "
+            f"project {args.webodm_task_replacement_project_id} | "
+            f"failed task {args.webodm_task_replacement_task_id} | "
+            f"local stage {latest_stage_statuses.get('webodm_task4')} | "
+            f"node {args.node_id} | expected images "
+            f"{storage_report.get('source_image_count', 0)} ({action})"
+        )
+        if replacement_evidence is not None:
+            print(
+                "NodeODM image-list copy: "
+                f"uuid {replacement_evidence['node_uuid']} | "
+                f"images {replacement_evidence['count']} | "
+                f"source SHA-256 {replacement_evidence['sha256']} "
+                "(local proof verified; remote link pending)"
+            )
     if args.storage_preflight_only:
         return preflight
 
@@ -1025,6 +1487,13 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
         print(f"Year         : {args.year}")
         print(f"Survey ID    : {args.survey_id or 'auto-generate'}")
         print(f"WebODM mode  : {mode_display}")
+        if task4_split_profile is not None:
+            print(
+                'Task 4 split : '
+                f"{task4_split_profile['split']} images / "
+                f"{task4_split_profile['split_overlap_meters']} m overlap / "
+                f"node {task4_split_profile['processing_node']}"
+            )
         print(f"Cross-run    : {'disabled' if args.disable_cross_run else 'enabled'}")
         print(f"UAV folder   : {args.uav or 'any'}")
         print(f"Image mode   : {'DJI *_D.JPG only' if args.rgb else 'all JPG/JPEG'}")
@@ -1103,6 +1572,27 @@ def main(argv=None, *, observer=None, pipeline_options=None, candidate_selector=
                         "confirmation": args.webodm_task_recovery_confirmation,
                     }
                     if args.recover_missing_webodm_task
+                    else None
+                ),
+                failed_webodm_task_replacement=(
+                    {
+                        "operation": args.replace_failed_webodm_task,
+                        "project_id": args.webodm_task_replacement_project_id,
+                        "failed_task_id": args.webodm_task_replacement_task_id,
+                        "processing_node": args.node_id,
+                        **(
+                            {
+                                "nodeodm_evidence_path": args.replacement_nodeodm_image_list,
+                                "nodeodm_evidence_sha256": args.replacement_nodeodm_image_list_sha256,
+                            }
+                            if replacement_evidence is not None
+                            else {}
+                        ),
+                        "confirmation": (
+                            args.webodm_task_replacement_confirmation
+                        ),
+                    }
+                    if args.replace_failed_webodm_task
                     else None
                 ),
                 qgis_tile_rebuild=(

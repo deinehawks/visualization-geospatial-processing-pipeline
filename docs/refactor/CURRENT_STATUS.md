@@ -1,5 +1,184 @@
 # Refactor Current Status
 
+## Branded operator console and guided execution (2026-11-13)
+
+Implemented on `feat/operator-console-guidance`, following Task 4 commit
+`5dccb0d`. Overview, New/Resume and Run Detail now share the approved white,
+burgundy `#8A1C23`, charcoal `#353D47` and grey `#666666` design. Run Detail has a
+compact latest-evidence summary and keyboard-accessible Progress/Outputs/Technical
+tabs; older attempts and technical recovery remain available without dominating
+the routine view. Polling retains the selected tab and canceled confirmations
+dispatch no request. Latest attempts supersede older failures without hiding a
+new failed forced attempt.
+
+Completed the pending browser split controls through the existing CLI/preflight:
+Task 4-only, explicit node, split 400/overlap 100 defaults, and read-only bound
+profiles. Historical settings are prefilled only from recorded browser requests;
+unknown choices require operator review. Session/CSRF/Host/Origin checks, ownership,
+task bindings, schema and CLI defaults remain unchanged. No dependencies added.
+
+Validation: 21 Node tests; TypeScript/static build; 100 focused Python 3.13 tests;
+80 focused Python 3.10 tests with one optional API-module skip (FastAPI absent);
+all 1,460 safe defaults pass on Python 3.13 and collect safely. Python 3.10 safely
+collects 1,440 tests with the same optional module unavailable. Four changed
+Python files compile in memory on both versions. Fixture-only Chromium checks
+cover normal/large/resumed/interrupted/remote-failed/storage-failed/completed and
+empty states, keyboard tabs, polling, confirmations and responsive reflow.
+Details and exact commands: `docs/ui/console-redesign-validation.md`.
+
+No production database/configuration, survey/cache/share, operational service,
+GIS executable or real pipeline was accessed. A separate fake static server and
+isolated headless-browser profile were used for screenshots. Actual Windows
+display scaling and real operational workflow smoke checks remain separate.
+Unrelated `codes.txt` and `tools/query_survey_stats.py` edits remain untouched.
+
+## Linked NodeODM evidence for the failed Task 4 (2026-11-10)
+
+A read-only WebODM task lookup identified project 563, failed task
+`dbfd2162-e659-45f6-bbc9-e4019575888a`, processing node 3 and NodeODM UUID
+`5b03d450-cb52-47fa-aca3-c4be832e15a9`. WebODM recorded 3,953 uploaded
+images. The direct NodeODM task API now reports that UUID as not found, while
+the operator previously inspected its retained root `img_list.txt`. The
+replacement guard now permits a source-hash-verified copy of that file as
+one-time old-task evidence, tied to the exact WebODM UUID and node. It remains
+closed until the operator supplies the copy and source hash; no real
+replacement task was created during implementation.
+Validation with temporary files/SQLite and fake WebODM: 213 focused tests pass
+on Python 3.10 and 3.13; all 1,449 safe tests pass and safely collect on
+Python 3.13. Changed Python files compile in memory. Only read-only WebODM
+metadata and node lookup checks touched live services; no production file or
+database record was modified.
+
+## Idempotent disabled cross-run replacement recovery (2026-11-10)
+
+The AH-026153 replacement recovery produced matching 4,288-image RAW, workspace
+and published `path` directories plus empty workspace/published `cross-runs`, but
+SMB refused to remove the same-run `.path.tmp-*` directory. Retrying the stage
+would otherwise copy 37.33 GiB again and revisit the same stuck namespace entry.
+
+During the explicitly authorized failed-Task-4 replacement only, the disabled
+cross-run stage now reuses existing outputs after proving identical flat JPEG
+filename/size manifests across RAW, workspace and published `path`, both
+exclusion directories empty, and no same-run backup. It records reuse and does
+not enumerate, remove or rename same-run temp mirrors. Missing/mismatched files,
+unexpected entries other than RAW's regular `.raw-recovery.json` ownership
+marker, non-empty exclusions, manifest errors or a backup all retain the normal
+full-copy path. Ordinary runs and enabled filtering are unchanged; there is no
+schema or dependency change.
+
+Validation uses temporary files/SQLite only: the 114 focused RGB stage tests pass
+on Python 3.10 and 3.13, and all 1,429 safe defaults pass on Python 3.13.
+The earlier 230 focused recovery tests and 1,428 safe defaults were
+prior-session evidence. No production survey, network share, database,
+WebODM/NodeODM or GIS executable was accessed.
+
+## Guarded contaminated Task 4 replacement (2026-11-09)
+
+The failed AH-026153 split/merge run separated 3,953 kept images and 335
+cross-run exclusions from an original 4,288-image source, while NodeODM's root
+log admitted 4,081 images. The pipeline now supports one exact, operator-approved
+Task 4 replacement that first recovers the original source, reruns cross-run
+handling disabled, and uploads all 4,288 images from a dedicated cache. The old
+cache, failed task and binding history remain evidence; the replacement uses the
+corrected `cb-t4` name, project 563, node 3 and the persisted split 400/overlap
+100 profile. A started replacement blocks any automatic third task.
+
+New WebODM creations use deterministic case-insensitive manifests and reject
+duplicate names or pre-request mutation. WebODM's image count is checked when
+present, and the first root ODM `Loading N images` line must match within 15
+minutes of running. Mismatch/timeout requests supported cancellation, waits up
+to two minutes and retains uncertain UUIDs as recovery evidence. Historical
+bound tasks keep exact-UUID compatibility. No schema, dependency, split default,
+normal resume or existing-task replacement behavior changed.
+
+Replacement admission also recognizes a newest local Task 4 attempt recorded as
+`paused`, because its exact WebODM task may have continued after the local
+pipeline detached and later failed. A subsequent local pre-creation safety
+failure may be retried from `requires_recovery`. The project-binding setup now
+defers the new `cb-t4` identity until exact failed-task authorization, preventing
+the retained `xcb-t4` UUID/name from conflicting with a UUID-less placeholder.
+No source attempt is rewritten and remote proof is unchanged: both remote task
+views must still identify the exact canonical UUID as `failed`.
+
+Validation uses temporary files/SQLite and fake WebODM only: 229 focused tests
+pass under Python 3.10 and 3.13; all 1,427 safe defaults pass and 1,427 safely
+collect under Python 3.13. No production survey/cache/database, WebODM/NodeODM,
+network share, credential, GIS executable or real pipeline was accessed.
+
+## Forced WebODM output refresh invalidates derived QGIS artifacts (2026-11-06)
+
+A completed Task 4 rerun could export a refreshed orthomosaic while ordinary
+resume skipped the already completed quality-gate and QGIS stages. Even when
+QGIS was forced separately, its resume path accepted an existing readable clip
+without proving that it came from the refreshed source. Run
+`699df6a3-5237-4297-8c9a-83687896aec2` exposed the defect when its clipped Task 4
+orthophoto still showed the earlier distorted generation.
+
+Normal full-pipeline forces of `webodm`, `webodm_task4` or `webodm_task2` now
+also force `quality_gate` and `qgis`, and that downstream QGIS attempt runs
+without reusing the previous clip. Preflight reserves the corresponding QGIS,
+workspace and publication capacity. Explicit programmatic stage selection and
+direct QGIS force semantics remain unchanged, as does the separately guarded
+fresh-QGIS refresh workflow. No schema, dependency, task identity, remote
+restart, publication rollback or default-resume behavior changed.
+
+Validation uses temporary SQLite/files and fake WebODM/QGIS boundaries only.
+Three focused regressions pass on Python 3.10 and 3.13; the complete affected
+resume/storage/QGIS/RGB set passes 264/264 on both versions. All 1,406 safe
+defaults pass and safely collect on Python 3.13.
+No real pipeline, AH-026152 files, production database, WebODM service, network
+share or GIS executable was accessed. The completed production output is not
+changed automatically and still requires an operator-authorized preflight and
+exact-task refresh after deployment.
+
+## Mid-run storage commitment double-count fixed (2026-11-06)
+
+Run `0d57c35b-0a6e-41a7-84be-2eda3217492b` completed data segregation for
+4,288 images, then stopped before WebODM when the resource-boundary storage
+check reapplied its original full write estimate to free space already consumed
+by those writes. The `STORAGE_COMMITTED` wording incorrectly implied another
+run even though the coordinator had no remaining holder and no remote identity.
+
+Admission and the final pre-work recheck still require the complete estimate,
+all active commitments and the configured reserve. Mid-run resource checks now
+preserve the full durable commitment for later admissions while verifying only
+that physical reserve remains available; reserve exhaustion fails separately as
+`STORAGE_RESERVE`. Resume preflight credits only measured bytes in the owned
+completed raw directory. Retained-raw plans now explicitly include the pending
+cross-run mirror, while delete-raw plans retain their lower sequential peak. No
+policy, database/schema, stage, retry, WebODM or filesystem-output behavior changed.
+
+Validation uses fake disk usage and pytest-owned paths/journals: 156 focused
+storage/resume cases pass on Python 3.10 with the known sqlite compatibility case
+deselected, and 260 combined cases pass on 3.13. All 1,403 safe tests pass and
+collect on 3.13. No real pipeline, survey path, network share, production
+database, WebODM or GIS process ran.
+
+## Run-scoped Task 4 local split/merge CLI (2026-11-05)
+
+Task 4-only CLI runs can now add `--task4-split <images>` and optional
+`--task4-split-overlap <metres>` (default 100). The values augment the existing
+Task 4 JSON options in memory before admission and configuration fingerprinting;
+normal Task 4, Task 2 and combined behavior is unchanged when the flags are
+absent. Task 2/combined use, invalid values, overlap without split and a split
+size not smaller than the selected image count fail before pipeline execution.
+
+Preflight reports the processing node and approximate base submodel count. The
+effective static Task 4 options are written to the existing binding
+`options_json` before task creation, excluding the generated boundary. A
+pre-creation resume reuses them, conflicting explicit values fail closed and a
+durable task UUID retains exact-task resume semantics. No schema, dependency,
+ClusterODM, automatic node selection, export or default `.env` change was added.
+The operator command and NodeODM scratch-space limitation are documented in
+`docs/operators/webodm-resume.md`.
+
+Validation uses fake WebODM and pytest-owned paths/SQLite only: all 170 focused
+CLI/hermetic pipeline tests pass on Python 3.10 and 3.13; all 1,475 safe-default
+tests pass on 3.13 and 1,475 safely collect. Four changed Python files compile
+in memory under Python 3.10 without imports or bytecode writes, and scoped
+whitespace checks pass. No production database, `.env`, survey root, WebODM,
+NodeODM, ClusterODM, GIS executable or real pipeline was accessed.
+
 ## Three-slot execution capability withdrawn (2026-11-05)
 
 The operator withdrew the three-slot rollout and requested complete removal of
@@ -9,17 +188,16 @@ guide were removed. The negative-only reused-PID verification remains because it
 protects ownership reconciliation independently of capacity. No schema,
 dependency, journal format or two-slot safety boundary changed.
 
-Deployment requires the existing live execution policy to be changed from 3 to
-2 through the guarded CLI while the coordinator is idle. Do not deploy source
-that rejects the saved three-slot policy before that rollback succeeds.
+After the existing recovery run finished, the guarded CLI changed the idle live
+policy from 3 to 2 and verified zero holders, two available slots and no legacy
+blocker. Removal commit `4c7d104` was then fast-forwarded to `development`. No
+history rewrite, force-push, production data change or WebODM mutation occurred.
 
 Local removal validation: 156 focused cases pass on Python 3.13; Python 3.10
 passes 135 focused cases with one optional-dependency skip and the pre-existing
 `sqlite3.SQLITE_BUSY` compatibility case explicitly deselected. All 1384 safe
 defaults pass and collect on Python 3.13. The 11 frontend contracts pass, five
 changed Python files compile in memory, and scoped `git diff --check` passes.
-No live policy, production data, database, WebODM task or remote was changed by
-this validation; deployment remains gated on an idle coordinator.
 
 ## Processing-node preflight credential redaction (2026-11-04)
 

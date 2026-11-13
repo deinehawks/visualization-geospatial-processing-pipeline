@@ -479,6 +479,90 @@ def test_readonly_api_cannot_write_even_if_given_write_sql(console):
         console.reader.query('DELETE FROM runs')
 
 
+def test_large_survey_console_maps_checked_profile_to_existing_cli(console):
+    inputs = console.normalize({'survey': 'fixture-survey', 'task4_split': 400, 'node_id': 3})
+    assert inputs['task4_split_overlap'] == 100
+    argv = arguments(inputs, preflight=True)
+    for flag, value in (('--task4-split', '400'), ('--task4-split-overlap', '100'), ('--node-id', '3')):
+        assert argv[argv.index(flag) + 1] == value
+    assert '--task4' in argv and '--storage-preflight-only' in argv
+    assert '--sm-cluster' not in argv
+    assert '--task4-split' not in arguments(console.normalize({'survey': 'ordinary'}), preflight=True)
+    console.popen.assert_not_called()
+
+
+@pytest.mark.parametrize('change, message', [
+    ({'mode': 'both', 'task4_split': 400, 'node_id': 3}, 'Task 4-only'),
+    ({'mode': 'task2', 'task4_split': 400, 'node_id': 3}, 'Task 4-only'),
+    ({'task4_split': 400}, 'explicit WebODM node'),
+    ({'task4_split_overlap': 100}, 'requires a split size'),
+])
+def test_large_survey_console_rejects_incompatible_inputs_before_dispatch(console, change, message):
+    with pytest.raises(ConsoleError, match=message):
+        console.normalize({'survey': 'fixture-survey', **change})
+    console.popen.assert_not_called()
+
+
+@pytest.mark.parametrize('change', [{'task4_split': 0}, {'task4_split': -1}, {'task4_split_overlap': 0}])
+def test_large_survey_console_requires_positive_sizes(change):
+    with pytest.raises(ValidationError):
+        RunInput.model_validate(change)
+
+
+def test_saved_task4_profile_is_readonly_and_terminal_settings_remain_unknown(console):
+    seed(console, mode='task4')
+    with closing(sqlite3.connect(console.reader.database)) as connection, connection:
+        connection.execute('INSERT INTO webodm_tasks(run_id,operation_key,project_id,task_id,options_json) VALUES (?,?,?,?,?)',
+                           ('original', 'task4', 12, 'exact-task', json.dumps({'split': 400, 'split-overlap': 100})))
+    before = console.reader.database.read_bytes()
+    result = console.run_detail('original')
+    assert result['resume_known_options'] == [] and result['resume_options'] == {}
+    assert result['operations'][0]['options'] == {'split': 400, 'split-overlap': 100}
+    assert console.normalize({'action': 'resume', 'run_id': 'original'})['task4_split'] is None
+    with pytest.raises(ConsoleError, match='read only'):
+        console.normalize({'action': 'resume', 'run_id': 'original', 'task4_split': 500, 'node_id': 3})
+    assert console.reader.database.read_bytes() == before
+    console.popen.assert_not_called()
+
+
+def test_recorded_browser_choices_are_prefilled_only_from_request_evidence(console):
+    seed(console, mode='task4')
+    operation_id = uid()
+    console.store.reserve(operation_id, {'kind': 'run', 'run_id': 'original', 'inputs': {
+        'action': 'resume', 'mode': 'task4', 'rgb': True, 'disable_cross_run': True, 'node_id': 3, 'uav': 'M3M_B'}})
+    console.store.update(operation_id, state='finished')
+    result = console.run_detail('original')
+    assert set(result['resume_known_options']) == {'rgb', 'disable_cross_run', 'node_id', 'uav'}
+    assert result['resume_options']['rgb'] is True and result['resume_options']['disable_cross_run'] is True
+    assert result['resume_options']['node_id'] == 3 and result['resume_options']['uav'] == 'M3M_B'
+    assert 'date' not in result['resume_options']
+
+
+def test_large_survey_preflight_and_recheck_use_fake_launch_only(console):
+    checked = console.preflight(uid(), {'survey': 'fixture', 'task4_split': 400, 'node_id': 3})
+    recorded = read_json(console.store.directory(checked['operation_id']) / 'request.json')['inputs']
+    profile = {'split': 400, 'split_overlap_meters': 100, 'processing_node': 3, 'approximate_base_submodels': 11}
+    report = {'report': {'ok': True, 'source_image_count': 4288, 'volumes': []}, 'task4_split': profile,
+              'run_id': checked['run_id'], 'source_dir': str(console.base_dir / 'source'), 'mode': 'task4',
+              'workspace_root': str(console.base_dir / 'workspace'), 'surveys_root': str(console.base_dir / 'surveys'),
+              'survey_id': 'AH-026136', 'year': 2026}
+    def preflight(argv, **options):
+        assert '--storage-preflight-only' in argv and '--task4-split' in argv
+        options['observer'](report)
+        return report
+    result = execute(console.store, checked['operation_id'], launch=preflight)
+    assert result['preflight']['task4_split'] == profile
+    assert recorded['task4_split_overlap'] == 100
+    started = console.start(uid(), checked['operation_id'])
+    def changed(argv, **options):
+        options['observer']({**report, 'task4_split': {**profile, 'split': 500}})
+        pytest.fail('Changed split profile must fail before pipeline side effects')
+    console.store.processes.live[os.getpid()] = 'birth'
+    result = execute(console.store, started['operation_id'], launch=changed)
+    assert result['code'] == 'PREFLIGHT_CHANGED'
+    assert console.store.status(started['operation_id'])['state'] == 'failed'
+
+
 def test_imports_do_not_start_server_or_load_configuration(monkeypatch):
     import builtins
     monkeypatch.setattr(builtins,'input',Mock(side_effect=AssertionError('input')))

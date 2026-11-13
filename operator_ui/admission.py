@@ -128,7 +128,11 @@ class AdmissionMixin:
             committed = sum(int(other.get(key, {}).get('required', 0)) for other in others)
             reserve = max([value['reserve']] + [int(other.get(key, {}).get('reserve', 0)) for other in others])
             if value['free'] < value['required'] + committed + reserve:
-                raise ConsoleError('Storage is committed to another run; check inputs/storage again', 'STORAGE_COMMITTED')
+                raise ConsoleError(
+                    'Storage cannot cover requested and committed writes plus reserve; '
+                    'check free space and active runs',
+                    'STORAGE_COMMITTED',
+                )
         return result
 
     def admit(self, request):

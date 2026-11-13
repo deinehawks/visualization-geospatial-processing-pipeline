@@ -35,6 +35,9 @@ def arguments(inputs, *, preflight):
     for key in ('date', 'uav', 'node_id'):
         if getattr(value, key) is not None:
             argv += ['--' + key.replace('_', '-'), str(getattr(value, key))]
+    for key in ('task4_split', 'task4_split_overlap'):
+        if getattr(value, key) is not None:
+            argv += ['--' + key.replace('_', '-'), str(getattr(value, key))]
     for key in ('disable_cross_run', 'rgb', 'keep_workspace'):
         if getattr(value, key):
             argv += ['--' + key.replace('_', '-')]
@@ -141,7 +144,7 @@ def execute(store, operation_id, *, launch=None):
                 if expected is not None:
                     keys = ('source_dir', 'mode', 'run_id', 'year', 'survey_id', 'surveys_root',
                             'workspace_root', 'config_fingerprint', 'stage_statuses', 'bindings',
-                            'published_path', 'exclusive')
+                            'published_path', 'exclusive', 'task4_split')
                     if any(value.get(key) != expected.get(key) for key in keys):
                         raise ConsoleError('Inputs/configuration/state changed; perform a new preflight', 'PREFLIGHT_CHANGED')
             # A real execution always reruns the shared preflight inside launch.

@@ -1,5 +1,23 @@
 ﻿# API Contract
 
+## Guided console additions (2026-11-13)
+
+`RunInput` adds nullable positive integers `task4_split` and
+`task4_split_overlap`. Split requires Task 4-only new/resume mode and an explicit
+`node_id`; omitted overlap defaults to 100. Reject overlap without split,
+nonpositive values and split during tile recovery. Resume with an existing
+Task 4 UUID cannot override its profile through this console. Requests omitting
+the new fields remain compatible. The helper maps them to the existing CLI
+flags and compares the resulting structured `task4_split` preflight profile
+again before execution. CLI source-count/configuration validation still applies.
+
+Run detail adds `resume_known_options`, listing settings actually present in a
+recorded browser request. Missing historical settings are not inferred. Saved
+task options still come from the existing read-only binding projection. UI
+labels/durations do not rewrite database statuses or receipts. Session, Host,
+Origin, CSRF, confirmations, idempotency, ownership and remote-operation guards
+remain unchanged. No remote restart endpoint or migration is added.
+
 ## Two-run execution extension (2026-10-21)
 
 Follow-up additive field: `GET /api/execution` and `/api/operations.execution`

@@ -72,6 +72,20 @@ class ConsoleService:
                 raise ConsoleError('Exact tile-rebuild confirmation required: ' + expected, 'CONFIRMATION_REQUIRED', 422)
         elif value['rebuild_task'] or value['confirmation']:
             raise ConsoleError('Recovery options require tile-rebuild mode', 'INVALID_INPUT', 422)
+        if value['task4_split_overlap'] is not None and value['task4_split'] is None:
+            raise ConsoleError('Split overlap requires a split size', 'INVALID_INPUT', 422)
+        if value['task4_split'] is not None:
+            if value['mode'] != 'task4' or value['action'] == 'rebuild_tiles':
+                raise ConsoleError('Large survey split is available for Task 4-only runs', 'INVALID_INPUT', 422)
+            if value['node_id'] is None:
+                raise ConsoleError('Large survey split requires an explicit WebODM node', 'INVALID_INPUT', 422)
+            if value['action'] != 'new' and any(
+                row.get('operation_key') == 'task4' and row.get('task_id')
+                for row in detail['operations']
+            ):
+                raise ConsoleError('Existing Task 4 split settings are read only; resume without split overrides', 'INVALID_INPUT', 422)
+            if value['task4_split_overlap'] is None:
+                value['task4_split_overlap'] = 100
         return value
 
     def preflight(self, command_id, inputs):
@@ -246,6 +260,7 @@ class ConsoleService:
         inputs = self.recorded_inputs(run_id)
         result['resume_options'] = {key: inputs[key] for key in ('date', 'uav', 'node_id', 'rgb',
             'disable_cross_run', 'keep_workspace') if key in inputs}
+        result['resume_known_options'] = list(result['resume_options'])
         if result['mode'] is None and inputs.get('mode') in ('task2', 'task4', 'both'):
             result.update(mode=inputs['mode'], mode_requires_confirmation=False, mode_source='console_request')
         base_url = next((row.get('preflight', {}).get('webodm_url') for row in result['console_operations']

@@ -1,5 +1,147 @@
 # Test Strategy for the Scalability and Concurrency Refactor
 
+## Operator guidance and branded console (2026-11-13)
+
+Add Node contract coverage for current-attempt precedence, historical request
+evidence, saved profiles, human durations, disabled-button reasons and keyboard
+tab selection. Python console tests use existing temporary SQLite/process fakes
+to verify additive split mapping, incompatible input rejection, read-only bound
+profiles, unknown settings and preflight-profile drift rejection before work.
+
+The explicit `web/pipeline-console/tests/preview.mjs` and `visual.mjs` pair is
+separate from ordinary test discovery. It serves static `out/` on 127.0.0.1:8877
+with fake API responses only, then uses an installed headless Chromium browser
+with a unique `.next/visual-checks/` profile and test-ownership sentinel. It imports
+no backend/configuration, starts no pipeline and blocks page requests outside its
+fixture origin. Its controlled browser subprocess is needed for DOM/keyboard/
+responsive validation, not geospatial execution. No browser/dependency download
+or profile deletion occurs. Screenshots are ignored generated artifacts.
+
+Fixture interactions cover new/large/resume/storage-failure/interrupted/failed
+remote/completed/empty states, tab focus and polling persistence, and canceled
+confirmation dispatch. Viewports: 1600x1000, 1280x800, 390x844 and a 900x540 CSS
+viewport at device scale 2 (200%-equivalent reflow, not native Windows scaling).
+The original browser-control tool failed sandbox initialization; isolated
+headless-browser checks supplied the visual evidence. Full results, commands and
+the Python 3.10 optional API-module skip are in
+`docs/ui/console-redesign-validation.md`. Existing protected-resource guards and
+external-test exclusions remain unchanged.
+
+## One-time NodeODM root image-list evidence (2026-11-10)
+
+Use only pytest-owned text files and fake WebODM task metadata. Validate the
+source SHA-256, canonical UUID directory, JPEG entries, unique names and
+logical line count, including a missing final newline. Preflight must verify
+the local copy without constructing a pipeline or opening a writer. At
+authorization, require the exact WebODM task UUID, processing node, an
+accepted-image count greater than the old upload count, and a root output count
+no smaller than the list when present. Prove a successful audited
+replacement and that UUID/node/count/hash disagreements create no task.
+Existing root-output behavior and the newly created task input guard remain
+unchanged. No real NodeODM file, WebODM task or survey data is used in tests.
+Results: 213 focused tests pass on Python 3.10 and 3.13; all 1,449 safe tests
+pass and safely collect on Python 3.13.
+
+## Idempotent disabled cross-run replacement recovery (2026-11-10)
+
+Use pytest-owned RAW, workspace, published and same-run temp directories. Seed
+matching mixed-extension JPEGs and empty exclusion directories, then place a
+sentinel in the temp mirror and a RAW `.raw-recovery.json` ownership marker.
+Assert an unrelated RAW entry blocks reuse. Assert the explicit replacement path returns
+`reused_existing_outputs=true`, preserves classifications and never invokes
+workspace reset, bulk recopy, mirror replacement or temp cleanup. Keep the
+existing non-replacement case proving normal disabled-filter copy/publication.
+
+Results: all 114 focused RGB stage tests pass under Python 3.10 and 3.13;
+all 1,429 safe defaults pass under Python 3.13. The earlier 230 focused
+recovery tests and 1,428 safe defaults were prior-session evidence.
+Tests use only temporary paths/databases and fake WebODM; no production share,
+survey, service, credential, pipeline or GIS executable is accessed.
+
+## WebODM input manifest and failed-task replacement (2026-11-09)
+
+Use only pytest-owned image directories and SQLite plus recording fake WebODM.
+Manifest cases cover mixed JPEG extensions, stable count/bytes/digest,
+case-insensitive duplicate rejection and mutation before multipart dispatch.
+Processor cases cover exact root counts, API/root mismatches, timeout,
+confirmed/uncertain cancellation, first-root selection, later submodel exclusion
+and sanitized logging.
+
+CLI cases prove the full AH-026153 command, exact confirmation, Task 4-only
+mode, explicit node, forced raw/cross-run/WebODM stages and plan-only
+immutability. They also prove local `paused` and `requires_recovery` attempts are
+eligible while `running` remains rejected. Pipeline coverage proves `failed`,
+`paused` and `requires_recovery` source attempts retain their status in the
+authorization audit while the exact remote task must still be failed. A full
+sequence regression seeds the retained `xcb-t4` UUID and proves that no UUID-less
+`cb-t4` placeholder is written before authorization. Project/task/count proof,
+dedicated cache use, corrected naming, split/boundary/node preservation,
+append-only old/new binding history and no-third-task behavior remain covered.
+
+Results: 229 focused tests pass under Python 3.10 and 3.13; all 1,427 safe
+defaults pass and 1,427 safely collect under Python 3.13. Tests do not contact
+WebODM/NodeODM, access production survey/cache/database paths, load credentials,
+run the real pipeline or execute GIS tools.
+
+## Forced WebODM downstream invalidation (2026-11-06)
+
+Use a temporary SQLite repository and stubbed pipeline stages to seed completed
+WebODM, quality and QGIS attempts. Force only `webodm_task4` in a normal run and
+assert that WebODM, quality and QGIS each create a new result in order, with
+QGIS receiving `resume=False`. Keep a separate regression proving a directly
+forced, explicitly selected QGIS stage still receives `resume=True`.
+
+Add stage-aware storage coverage proving a completed Task 4 force restores
+upload-cache, QGIS staging, workspace and published-output estimates without
+restoring an unrelated cross-run mirror. Existing exact-UUID WebODM-only tests
+continue to prove explicitly selected repair execution does not spill into
+downstream stages. All boundaries remain fake or pytest-owned; no real service,
+GIS command, production database or survey path is allowed.
+
+Results: three focused cases pass on Python 3.10 and 3.13; the complete affected
+resume/storage/QGIS/RGB set passes 264/264 on both interpreters. All 1,406 safe
+defaults pass and safely collect on Python 3.13.
+
+## Mid-run storage reservation accounting (2026-11-06)
+
+Keep the existing pre-work regression that rejects a full estimate plus reserve
+after unexpected free-space loss. Add managed-resource coverage proving completed
+writes are not charged against the same admitted estimate again, while the full
+commitment remains visible and blocks an unsafe second admission. Add a separate
+physical-reserve failure assertion for `STORAGE_RESERVE`. Disk usage, processes,
+coordination journals and files are all fake or pytest-owned.
+
+Add planner cases for the retained-raw cumulative peak, delete-raw sequential
+peak, exact existing-byte credit, report disclosure and CLI wiring from the
+owned completed raw directory. Keep linked/missing paths fail-closed or uncredited.
+
+Results: 156 focused storage/resume cases pass on Python 3.10 with the known
+sqlite compatibility case deselected, and 260 combined cases pass on Python
+3.13. All 1,403 safe defaults pass and collect on 3.13. No protected path,
+production database, network share, WebODM, GIS executable or real pipeline is
+accessed.
+
+## Run-scoped Task 4 split/merge CLI (2026-11-05)
+
+Exercise CLI parsing and preflight with mocked configuration, source counts and
+pipeline construction. Cover the 4,288/400 calculation (11 base submodels),
+100-metre default, node 3 selection, CLI-over-environment precedence, invalid
+values/modes, overlap without split and split size at the image count. Verify a
+pre-creation resume reuses persisted options and rejects explicit conflicts.
+
+At the fake WebODM boundary, assert that Task 4 receives the preserved options,
+split values, generated boundary and node ID while `options_json` contains only
+the static options. Force failure before UUID persistence to prove the project
+binding already holds the profile, then verify exact-UUID resume creates no
+replacement and retains the stored options. Tests use only pytest-owned SQLite,
+paths and fake WebODM; no `.env`, host, socket, NodeODM, GIS process or production
+resource is used.
+
+Validation: 170 focused CLI/hermetic pipeline cases pass on both Python 3.10 and
+3.13; all 1,475 safe-default cases pass on 3.13 and 1,475 safely collect. The
+four changed Python files compile in memory on Python 3.10 without imports or
+bytecode writes. Scoped whitespace checks pass.
+
 ## Processing-node diagnostic redaction (2026-11-04)
 
 Mock the WebODM authentication and node-list boundaries and include credentials

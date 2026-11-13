@@ -35,6 +35,8 @@ class FakeWebODM:
         self.transient_failures = dict(transient_failures or {})
         self.permanent_failures = set(permanent_failures or set())
         self.task_statuses: dict[str, str] = {}
+        self.task_outputs: dict[str, str] = {}
+        self.task_metadata: dict[str, dict[str, Any]] = {}
         self.projects: dict[int, dict[str, Any]] = {}
         self.project_tasks: dict[int, list[dict[str, Any]]] = {}
         self.authenticated = False
@@ -55,6 +57,12 @@ class FakeWebODM:
 
     def configure_task_status(self, task_id: str, status: str) -> None:
         self.task_statuses[str(task_id)] = status
+
+    def configure_task_output(self, task_id: str, output: str) -> None:
+        self.task_outputs[str(task_id)] = str(output)
+
+    def configure_task_metadata(self, task_id: str, **metadata: Any) -> None:
+        self.task_metadata[str(task_id)] = dict(metadata)
 
     def configure_project(
         self,
@@ -131,12 +139,26 @@ class FakeWebODM:
     def get_task(self, project_id: int, task_id: str, **kwargs: Any) -> dict[str, Any]:
         task_id = str(task_id)
         self._record("get_task", project_id, task_id, **kwargs)
-        return {"id": task_id, "status": self.task_statuses.get(task_id, "queued")}
+        return {
+            "id": task_id,
+            "status": self.task_statuses.get(task_id, "queued"),
+            **self.task_metadata.get(task_id, {}),
+        }
 
     def get_task_status(self, project_id: int, task_id: str) -> str:
         task_id = str(task_id)
         self._record("get_task_status", project_id, task_id)
         return self.task_statuses.get(task_id, "queued")
+
+    def get_task_output(self, project_id: int, task_id: str) -> str:
+        task_id = str(task_id)
+        self._record("get_task_output", project_id, task_id)
+        return self.task_outputs.get(task_id, "")
+
+    def cancel_task(self, project_id: int, task_id: str) -> None:
+        task_id = str(task_id)
+        self._record("cancel_task", project_id, task_id)
+        self.task_statuses[task_id] = "canceled"
 
     def wait_for_completion(
         self,

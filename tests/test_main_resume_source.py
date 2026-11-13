@@ -393,6 +393,7 @@ def test_qgis_only_resume_storage_needs_skip_upload_cache():
         "include_qgis_staging": True,
         "include_workspace": True,
         "include_published_outputs": True,
+        "include_cross_run_mirror": False,
     }
 
 
@@ -405,6 +406,44 @@ def test_forced_webodm_resume_restores_upload_cache_estimate():
     )
 
     assert needs["include_upload_cache"] is True
+
+
+def test_forced_task4_resume_reserves_downstream_qgis_storage():
+    needs = rgb_main.resolve_storage_stage_needs(
+        resume=True,
+        latest_stage_statuses={
+            "data_segregation": "completed",
+            "cross_run_filter": "completed",
+            "kml_boundary": "completed",
+            "webodm": "completed",
+            "quality_gate": "completed",
+            "qgis": "completed",
+        },
+        force_stages={"webodm_task4"},
+        qgis_enabled=True,
+    )
+
+    assert needs == {
+        "include_upload_cache": True,
+        "include_qgis_staging": True,
+        "include_workspace": True,
+        "include_published_outputs": True,
+        "include_cross_run_mirror": False,
+    }
+
+
+def test_failed_cross_run_resume_keeps_mirror_storage_estimate():
+    needs = rgb_main.resolve_storage_stage_needs(
+        resume=True,
+        latest_stage_statuses={
+            "data_segregation": "completed",
+            "cross_run_filter": "failed",
+        },
+        force_stages=set(),
+        qgis_enabled=True,
+    )
+
+    assert needs["include_cross_run_mirror"] is True
 
 
 def test_incomplete_quality_gate_keeps_fallback_upload_capacity():
